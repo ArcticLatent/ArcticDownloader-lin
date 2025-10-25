@@ -107,6 +107,12 @@
       "display_name": "Fluxlisimo",
       "family": "Flux.1 Krea",
       "download_url": "https://civitai.com/api/download/models/2289736?type=Model&format=SafeTensor"
+    },
+    {
+      "id": "2",
+      "display_name": "Niji anime style",
+      "family": "Flux.1 D",
+      "download_url": "https://civitai.com/api/download/models/1423082?type=Model&format=SafeTensor"
     }
   ]
 }

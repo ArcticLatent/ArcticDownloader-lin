@@ -147,10 +147,14 @@ impl DownloadManager {
 
             if base_url.contains("civitai.com") {
                 if let Some(token_value) = token.as_deref() {
-                    if let Some(resolved) = civitai_expected_file_name(&client, &base_url, Some(token_value)).await {
+                    if let Some(resolved) =
+                        civitai_expected_file_name(&client, &base_url, Some(token_value)).await
+                    {
                         file_name = resolved;
                     }
-                } else if let Some(resolved) = civitai_expected_file_name(&client, &base_url, None).await {
+                } else if let Some(resolved) =
+                    civitai_expected_file_name(&client, &base_url, None).await
+                {
                     file_name = resolved;
                 }
             }
@@ -512,16 +516,14 @@ async fn civitai_expected_file_name(
     let files = payload.get("files")?.as_array()?;
     let base_url = download_url.split('?').next().unwrap_or(download_url);
 
-    let mut name = files
-        .iter()
-        .find_map(|file| {
-            let download = file.get("downloadUrl")?.as_str()?;
-            if download == base_url {
-                file.get("name")?.as_str()
-            } else {
-                None
-            }
-        });
+    let mut name = files.iter().find_map(|file| {
+        let download = file.get("downloadUrl")?.as_str()?;
+        if download == base_url {
+            file.get("name")?.as_str()
+        } else {
+            None
+        }
+    });
 
     if name.is_none() {
         name = files.iter().find_map(|file| {
