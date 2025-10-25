@@ -1,0 +1,28 @@
+app-id: dev.wknd.ArcticDownloader
+runtime: org.gnome.Platform
+runtime-version: "49"
+sdk: org.gnome.Sdk
+command: arctic-downloader
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --share=network
+  - --talk-name=org.freedesktop.portal.FileChooser
+  - --talk-name=org.freedesktop.portal.OpenURI
+  - --filesystem=xdg-run/pipewire-0
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_TARGET_DIR: /run/build/arctic-downloader/target
+    RUSTFLAGS: "-C debuginfo=1"
+modules:
+  - name: arctic-downloader
+    buildsystem: simple
+    sources:
+      - type: dir
+        path: ../
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml || cargo fetch --manifest-path Cargo.toml
+      - cargo build --release --frozen --manifest-path Cargo.toml
+      - install -Dm755 target/release/arctic-downloader /app/bin/arctic-downloader

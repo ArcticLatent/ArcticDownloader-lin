@@ -1,0 +1,105 @@
+{
+  "catalog_version": 1,
+  "models": [
+    {
+      "id": "wan-2-2",
+      "display_name": "WAN 2.2",
+      "family": "wan",
+      "variants": [
+        {
+          "id": "wan-14b-q2_k",
+          "quality_tier": "medium",
+          "min_vram_gb": 8,
+          "model_size": "14B",
+          "quantization": "Q2_K",
+          "note": "Runs on 8 GB (orange on HF), comfortable ≥12 GB",
+          "artifacts": [
+            {
+              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
+              "path": "split_files/vae/wan_2.1_vae.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "vae",
+              "license_url": null
+            },
+            {
+              "repo": "hf://Comfy-Org/Wan_2.1_ComfyUI_repackaged@main",
+              "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "text_encoders",
+              "license_url": null
+            },
+            {
+              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
+              "path": "split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "diffusion_models",
+              "license_url": null
+            },
+            {
+              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
+              "path": "split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "diffusion_models",
+              "license_url": null
+            },
+            {
+              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
+              "path": "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "loras",
+              "license_url": null
+            },
+            {
+              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
+              "path": "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "loras",
+              "license_url": null
+            }
+          ]
+        },
+        {
+          "id": "test",
+          "quality_tier": "high",
+          "min_vram_gb": 8,
+          "model_size": "14B",
+          "quantization": "Q2_K",
+          "note": "Runs on 8 GB (orange on HF), comfortable ≥12 GB",
+          "artifacts": [
+            {
+              "repo": "hf://Comfy-Org/Wan_2.1_ComfyUI_repackaged@main",
+              "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "text_encoders",
+              "license_url": null
+            },
+            {
+              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
+              "path": "split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "diffusion_models",
+              "license_url": null
+            },
+            {
+              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
+              "path": "split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "diffusion_models",
+              "license_url": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "loras": []
+}
