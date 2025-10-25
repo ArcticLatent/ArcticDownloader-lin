@@ -97,6 +97,8 @@ pub struct AppSettings {
     pub concurrent_downloads: usize,
     pub bandwidth_cap_mbps: Option<u32>,
     pub last_catalog_etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub civitai_token: Option<String>,
 }
 
 impl AppSettings {
@@ -115,6 +117,7 @@ impl Default for AppSettings {
             concurrent_downloads: 2,
             bandwidth_cap_mbps: None,
             last_catalog_etag: None,
+            civitai_token: None,
         }
     }
 }

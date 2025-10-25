@@ -667,6 +667,14 @@ fn edit_lora_dialog(
 
     content.append(&form);
 
+    let token_hint = gtk::Label::new(Some(
+        "For Civitai links, users must save their personal API token in the Arctic Downloader settings.",
+    ));
+    token_hint.set_halign(Align::Start);
+    token_hint.set_wrap(true);
+    token_hint.set_margin_top(4);
+    content.append(&token_hint);
+
     dialog.add_button("Cancel", ResponseType::Cancel);
     dialog.add_button("Save", ResponseType::Ok);
 

@@ -130,6 +130,7 @@ impl DownloadManager {
         &self,
         comfy_root: PathBuf,
         lora: LoraDefinition,
+        token: Option<String>,
         progress: Sender<DownloadSignal>,
     ) -> tokio::task::JoinHandle<Result<LoraDownloadOutcome>> {
         let client = self.client.clone();
@@ -163,9 +164,21 @@ impl DownloadManager {
                 });
             }
 
-            let url = lora.download_url.clone();
+            let mut url = lora.download_url.clone();
             if url.trim().is_empty() {
                 return Err(anyhow!("LoRA {} missing download URL", lora.id));
+            }
+
+            let token = token.filter(|t| !t.trim().is_empty());
+            let mut auth_token: Option<String> = None;
+            if url.contains("civitai.com") {
+                if let Some(token_value) = token.clone() {
+                    if !url.contains("token=") {
+                        let separator = if url.contains('?') { '&' } else { '?' };
+                        url = format!("{url}{separator}token={token_value}");
+                    }
+                    auth_token = Some(token_value);
+                }
             }
 
             let _ = progress.send(DownloadSignal::Started {
@@ -181,6 +194,7 @@ impl DownloadManager {
                 &loras_dir,
                 &file_name,
                 Some((progress.clone(), 0, file_name.clone())),
+                auth_token.as_deref(),
             )
             .await
             {
@@ -331,20 +345,25 @@ async fn download_direct(
     dest_dir: &Path,
     file_name: &str,
     progress: Option<(Sender<DownloadSignal>, usize, String)>,
+    auth_token: Option<&str>,
 ) -> Result<PathBuf> {
     let dest_path = dest_dir.join(file_name);
 
-    let response = client
-        .get(url)
+    let mut request = client.get(url);
+    if let Some(token) = auth_token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let response = request
         .send()
         .await
         .with_context(|| format!("request failed for {url}"))?;
 
     if response.status().is_client_error() || response.status().is_server_error() {
         let status = response.status();
-        if url.contains("civitai.com") && status.as_u16() == 403 {
+        if url.contains("civitai.com") && matches!(status.as_u16(), 401 | 403) {
             return Err(anyhow!(
-                "download failed for {url} (status {status}); Civitai typically requires an authenticated session. Please ensure you are signed in via a browser on this machine."
+                "download failed for {url} (status {status}); Civitai models require an API token. Generate one in your Civitai account and save it under Settings → Civitai API Token."
             ));
         }
         return Err(anyhow!("download failed for {url} (status {status})"));

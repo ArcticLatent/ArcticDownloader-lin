@@ -82,6 +82,55 @@ fn build_main_controls(context: &AppContext, overlay: ToastOverlay) -> GtkBox {
         .spacing(16)
         .build();
 
+    let token_entry = Entry::builder()
+        .placeholder_text("Paste your Civitai API token (if required)")
+        .hexpand(true)
+        .visibility(false)
+        .build();
+    if let Some(token) = context.config.settings().civitai_token.clone() {
+        token_entry.set_text(&token);
+    }
+
+    let save_token_button = Button::with_label("Save Token");
+    save_token_button.set_halign(Align::Start);
+
+    {
+        let context = context.clone();
+        let overlay = overlay.clone();
+        let token_entry = token_entry.clone();
+        save_token_button.connect_clicked(move |_| {
+            let raw = token_entry.text();
+            let trimmed = raw.trim().to_string();
+            match context.config.update_settings(|settings| {
+                settings.civitai_token = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.clone())
+                };
+            }) {
+                Ok(_) => {
+                    let message = if trimmed.is_empty() {
+                        "Cleared Civitai token."
+                    } else {
+                        "Civitai token saved."
+                    };
+                    overlay.add_toast(Toast::new(message));
+                }
+                Err(err) => {
+                    overlay.add_toast(Toast::new(&format!("Failed to save token: {err}")));
+                }
+            }
+        });
+    }
+    let token_controls = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(8)
+        .hexpand(true)
+        .build();
+    token_controls.append(&token_entry);
+    token_controls.append(&save_token_button);
+    column.append(&labelled_row("Civitai API Token", &token_controls));
+
     let stack_switcher = gtk::StackSwitcher::new();
     stack_switcher.set_halign(Align::Start);
     stack_switcher.set_margin_bottom(4);
@@ -817,6 +866,7 @@ fn build_lora_page(
         status_label_for_download.set_text(&format!("Downloading {}…", lora.display_name));
 
         let downloads = context_for_download.downloads.clone();
+        let civitai_token = context_for_download.config.settings().civitai_token.clone();
         let overlay_clone = overlay_for_download.clone();
         let lora_name = lora.display_name.clone();
 
@@ -933,7 +983,7 @@ fn build_lora_page(
             let start_message = format!("Downloading {lora_name}…");
             overlay_clone.add_toast(Toast::new(&start_message));
 
-            let handle = downloads.download_lora(comfy_path, lora, progress_sender);
+            let handle = downloads.download_lora(comfy_path, lora, civitai_token, progress_sender);
             match handle.await {
                 Ok(Ok(outcome)) => {
                     progress_bar_async.set_fraction(1.0);
