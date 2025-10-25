@@ -392,7 +392,7 @@ fn refresh_lora_list(list: &gtk::ListBox, state: &SharedState, overlay: &ToastOv
                 let duplicated = {
                     let state_ref = state.borrow();
                     state_ref.catalog.loras.get(idx).cloned().map(|mut lora| {
-                        lora.id = generate_lora_copy_id(&lora.id, &state_ref.catalog.loras);
+                        lora.id = next_lora_id(&state_ref.catalog.loras);
                         lora.display_name = format!("{} (Copy)", lora.display_name.trim_end());
                         lora
                     })
@@ -582,6 +582,12 @@ fn edit_lora_dialog(
     state: &SharedState,
     overlay: &ToastOverlay,
 ) -> Result<bool> {
+    let preset_id = if index.is_some() {
+        None
+    } else {
+        Some(next_lora_id(&state.borrow().catalog.loras))
+    };
+
     let mut definition = if let Some(idx) = index {
         state.borrow().catalog.loras[idx].clone()
     } else {
@@ -595,6 +601,10 @@ fn edit_lora_dialog(
         }
     };
 
+    if let Some(new_id) = preset_id {
+        definition.id = new_id;
+    }
+
     let dialog_title = if index.is_some() {
         "Edit LoRA"
     } else {
@@ -607,7 +617,15 @@ fn edit_lora_dialog(
         .default_width(520)
         .default_height(360)
         .build();
+    dialog.set_hide_on_close(true);
     dialog.set_destroy_with_parent(true);
+
+    let title_label = gtk::Label::new(Some(dialog_title));
+    title_label.add_css_class("title-2");
+    let header = HeaderBar::new();
+    header.set_title_widget(Some(&title_label));
+    header.set_show_end_title_buttons(true);
+    dialog.set_titlebar(Some(&header));
 
     let content = dialog.content_area();
     content.set_margin_start(12);
@@ -622,9 +640,9 @@ fn edit_lora_dialog(
         .hexpand(true)
         .build();
 
-    let id_entry = gtk::Entry::new();
-    id_entry.set_text(&definition.id);
-    add_row(&form, 0, "LoRA ID", &id_entry);
+    let id_label = gtk::Label::new(Some(&definition.id));
+    id_label.set_halign(Align::Start);
+    add_row(&form, 0, "LoRA ID", &id_label);
 
     let name_entry = gtk::Entry::new();
     name_entry.set_text(&definition.display_name);
@@ -657,12 +675,6 @@ fn edit_lora_dialog(
         return Ok(false);
     }
 
-    let id = id_entry.text().trim().to_string();
-    if id.is_empty() {
-        overlay.add_toast(Toast::new("LoRA ID is required."));
-        return Ok(false);
-    }
-
     let display_name = name_entry.text().trim().to_string();
     if display_name.is_empty() {
         overlay.add_toast(Toast::new("LoRA display name is required."));
@@ -675,7 +687,6 @@ fn edit_lora_dialog(
         return Ok(false);
     }
 
-    definition.id = id;
     definition.display_name = display_name;
     definition.download_url = download_url;
     definition.family = entry_to_option(&family_entry);
@@ -1155,14 +1166,16 @@ fn generate_variant_copy_id(base: &str, variants: &[ModelVariant]) -> String {
     candidate
 }
 
-fn generate_lora_copy_id(base: &str, loras: &[LoraDefinition]) -> String {
-    let mut suffix = 1;
-    let mut candidate = format!("{base}-copy");
-    while loras.iter().any(|lora| lora.id == candidate) {
-        suffix += 1;
-        candidate = format!("{base}-copy-{suffix}");
+fn next_lora_id(loras: &[LoraDefinition]) -> String {
+    let mut max_id: u32 = 0;
+    for lora in loras {
+        if let Ok(value) = lora.id.parse::<u32>() {
+            if value > max_id {
+                max_id = value;
+            }
+        }
     }
-    candidate
+    (max_id + 1).to_string()
 }
 
 fn run_dialog(dialog: &gtk::Dialog) -> ResponseType {

@@ -748,11 +748,13 @@ fn build_lora_page(
                 return;
             }
 
-            let mut store = filtered_loras_ref.borrow_mut();
-            store.clear();
-            store.extend(filtered.iter().cloned());
+            {
+                let mut store = filtered_loras_ref.borrow_mut();
+                store.clear();
+                store.extend(filtered.iter().cloned());
+            }
 
-            for (index, lora) in filtered.into_iter().enumerate() {
+            for (index, lora) in filtered.iter().enumerate() {
                 lora_dropdown.append(Some(&lora.id), &lora.label_with_index(index + 1));
             }
             lora_dropdown.set_sensitive(true);
@@ -952,23 +954,29 @@ fn build_lora_page(
                     overlay_clone.add_toast(Toast::new(&toast));
                 }
                 Ok(Err(err)) => {
-                    progress_label_async.set_text(&format!("Download failed: {err}"));
+                    progress_label_async
+                        .set_text(&escape_markup(&format!("Download failed: {err}")));
                     progress_bar_async.set_fraction(0.0);
                     progress_bar_async.set_text(Some("Failed"));
                     progress_box_async.set_visible(true);
                     download_button_async.set_sensitive(true);
                     status_label_async.set_text("LoRA download failed.");
-                    overlay_clone.add_toast(Toast::new(&format!("Download failed: {err}")));
+                    overlay_clone.add_toast(Toast::new(&escape_markup(&format!(
+                        "Download failed: {err}"
+                    ))));
                 }
                 Err(join_err) => {
-                    progress_label_async.set_text(&format!("Download task panicked: {join_err}"));
+                    progress_label_async.set_text(&escape_markup(&format!(
+                        "Download task panicked: {join_err}"
+                    )));
                     progress_bar_async.set_fraction(0.0);
                     progress_bar_async.set_text(Some("Error"));
                     progress_box_async.set_visible(true);
                     download_button_async.set_sensitive(true);
                     status_label_async.set_text("LoRA download failed.");
-                    overlay_clone
-                        .add_toast(Toast::new(&format!("Download task panicked: {join_err}")));
+                    overlay_clone.add_toast(Toast::new(&escape_markup(&format!(
+                        "Download task panicked: {join_err}"
+                    ))));
                 }
             }
         });
@@ -983,6 +991,10 @@ fn build_lora_page(
     column.append(&status_label);
 
     column
+}
+
+fn escape_markup(text: &str) -> String {
+    gtk::glib::markup_escape_text(text).to_string()
 }
 fn labelled_row(label: &str, widget: &impl IsA<gtk::Widget>) -> GtkBox {
     let row = GtkBox::builder()

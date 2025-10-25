@@ -101,5 +101,12 @@
       ]
     }
   ],
-  "loras": []
+  "loras": [
+    {
+      "id": "1",
+      "display_name": "Fluxlisimo",
+      "family": "Flux.1 Krea",
+      "download_url": "https://civitai.com/api/download/models/2289736?type=Model&format=SafeTensor"
+    }
+  ]
 }
