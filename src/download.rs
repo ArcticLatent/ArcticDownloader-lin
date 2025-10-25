@@ -2,7 +2,9 @@ use crate::model::{LoraDefinition, ModelArtifact, ResolvedModel, TargetCategory}
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use log::info;
-use reqwest::Client;
+use percent_encoding::percent_decode_str;
+use reqwest::{header, Client};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
@@ -140,7 +142,21 @@ impl DownloadManager {
                 .await
                 .with_context(|| format!("failed to create directory {:?}", loras_dir))?;
 
-            let file_name = lora.derived_file_name();
+            let base_url = lora.download_url.clone();
+            let mut file_name = lora.derived_file_name();
+
+            if base_url.contains("civitai.com") {
+                if let Some(token_value) = token.as_deref() {
+                    if let Some(resolved) = civitai_expected_file_name(&client, &base_url, Some(token_value)).await {
+                        file_name = resolved;
+                    }
+                } else if let Some(resolved) = civitai_expected_file_name(&client, &base_url, None).await {
+                    file_name = resolved;
+                }
+            }
+
+            file_name = sanitize_file_name(&file_name);
+
             let dest_path = loras_dir.join(&file_name);
 
             if fs::try_exists(&dest_path)
@@ -164,7 +180,7 @@ impl DownloadManager {
                 });
             }
 
-            let mut url = lora.download_url.clone();
+            let mut url = base_url.clone();
             if url.trim().is_empty() {
                 return Err(anyhow!("LoRA {} missing download URL", lora.id));
             }
@@ -227,8 +243,8 @@ async fn download_artifact(
         .await
         .with_context(|| format!("failed to create directory {:?}", dest_dir))?;
 
-    let file_name = artifact.file_name();
-    let dest_path = dest_dir.join(file_name);
+    let initial_file_name = artifact.file_name().to_string();
+    let mut dest_path = dest_dir.join(&initial_file_name);
 
     if fs::try_exists(&dest_path)
         .await
@@ -264,7 +280,28 @@ async fn download_artifact(
 
     let content_length = response.content_length();
 
-    let tmp_path = dest_dir.join(format!("{}.part", file_name));
+    let final_file_name = filename_from_headers(response.headers(), &initial_file_name);
+    if final_file_name != initial_file_name {
+        dest_path = dest_dir.join(&final_file_name);
+        if fs::try_exists(&dest_path)
+            .await
+            .with_context(|| format!("failed to check {:?} existence", dest_path))?
+        {
+            if let Some((sender, index, _artifact_name)) = progress.as_ref() {
+                let _ = sender.send(DownloadSignal::Finished {
+                    index: *index,
+                    size: Some(0),
+                });
+            }
+            return Ok(DownloadOutcome {
+                artifact: artifact.clone(),
+                destination: dest_path,
+                status: DownloadStatus::SkippedExisting,
+            });
+        }
+    }
+
+    let tmp_path = dest_dir.join(format!("{}.part", final_file_name));
     let mut file = fs::File::create(&tmp_path)
         .await
         .with_context(|| format!("failed to create temporary file {:?}", tmp_path))?;
@@ -311,7 +348,7 @@ async fn download_artifact(
                 fs::remove_file(&tmp_path).await.ok();
                 return Err(anyhow!(
                     "checksum mismatch for {} (expected {}, got {})",
-                    file_name,
+                    final_file_name,
                     expected,
                     actual
                 ));
@@ -347,8 +384,6 @@ async fn download_direct(
     progress: Option<(Sender<DownloadSignal>, usize, String)>,
     auth_token: Option<&str>,
 ) -> Result<PathBuf> {
-    let dest_path = dest_dir.join(file_name);
-
     let mut request = client.get(url);
     if let Some(token) = auth_token {
         request = request.header("Authorization", format!("Bearer {}", token));
@@ -369,8 +404,25 @@ async fn download_direct(
         return Err(anyhow!("download failed for {url} (status {status})"));
     }
 
+    let final_file_name = filename_from_headers(response.headers(), file_name);
+
+    let dest_path = dest_dir.join(&final_file_name);
+
+    if fs::try_exists(&dest_path)
+        .await
+        .with_context(|| format!("failed to check {:?} existence", dest_path))?
+    {
+        if let Some((sender, index, _artifact_name)) = progress {
+            let _ = sender.send(DownloadSignal::Finished {
+                index,
+                size: Some(0),
+            });
+        }
+        return Ok(dest_path);
+    }
+
     let content_length = response.content_length();
-    let tmp_path = dest_dir.join(format!("{}.part", file_name));
+    let tmp_path = dest_dir.join(format!("{}.part", final_file_name));
     let mut file = fs::File::create(&tmp_path)
         .await
         .with_context(|| format!("failed to create temporary file {:?}", tmp_path))?;
@@ -411,6 +463,100 @@ async fn download_direct(
     }
 
     Ok(dest_path)
+}
+
+fn filename_from_headers(headers: &header::HeaderMap, fallback: &str) -> String {
+    headers
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_content_disposition)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn parse_content_disposition(value: &str) -> Option<String> {
+    for part in value.split(';') {
+        let trimmed = part.trim();
+        if let Some(rest) = trimmed.strip_prefix("filename*=") {
+            let rest = rest.trim_matches('"');
+            let encoded = rest.split("''").last().unwrap_or(rest);
+            if let Ok(decoded) = percent_decode_str(encoded).decode_utf8() {
+                return Some(decoded.to_string());
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("filename=") {
+            let name = rest.trim_matches('"');
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+async fn civitai_expected_file_name(
+    client: &Client,
+    download_url: &str,
+    token: Option<&str>,
+) -> Option<String> {
+    let version_id = extract_civitai_model_version_id(download_url)?;
+    let mut request = client.get(format!(
+        "https://civitai.com/api/v1/model-versions/{}",
+        version_id
+    ));
+
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let response = request.send().await.ok()?.error_for_status().ok()?;
+    let payload: Value = response.json().await.ok()?;
+    let files = payload.get("files")?.as_array()?;
+    let base_url = download_url.split('?').next().unwrap_or(download_url);
+
+    let mut name = files
+        .iter()
+        .find_map(|file| {
+            let download = file.get("downloadUrl")?.as_str()?;
+            if download == base_url {
+                file.get("name")?.as_str()
+            } else {
+                None
+            }
+        });
+
+    if name.is_none() {
+        name = files.iter().find_map(|file| {
+            if file
+                .get("primary")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                file.get("name")?.as_str()
+            } else {
+                None
+            }
+        });
+    }
+
+    name.map(|s| s.to_string())
+}
+
+fn extract_civitai_model_version_id(url: &str) -> Option<u64> {
+    let idx = url.to_ascii_lowercase().find("/models/")?;
+    let remainder = &url[idx + "/models/".len()..];
+    let id_str = remainder
+        .split(|c| c == '?' || c == '/' || c == '&')
+        .next()?;
+    id_str.parse().ok()
+}
+
+fn sanitize_file_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| match ch {
+            '/' | '\\' => '_',
+            ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => ch,
+        })
+        .collect()
 }
 
 fn build_download_url(repo: &str, path: &str) -> Result<String> {
