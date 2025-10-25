@@ -30,8 +30,14 @@ pub struct LoraDownloadOutcome {
 #[derive(Clone, Debug)]
 pub struct CivitaiModelMetadata {
     pub file_name: String,
-    pub image_bytes: Option<Vec<u8>>,
+    pub preview: Option<CivitaiPreview>,
     pub trained_words: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum CivitaiPreview {
+    Image(Vec<u8>),
+    Video { url: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -645,45 +651,11 @@ async fn fetch_civitai_model_metadata_internal(
         .and_then(|file| file.name.clone())
         .unwrap_or_else(|| fallback_file_name_from_url(download_url, model_version_id));
 
-    let mut image_bytes = None;
-    if let Some(image_url) = images
-        .iter()
-        .filter_map(|image| image.url.as_deref())
-        .find(|url| !url.is_empty())
-    {
-        let mut image_request = client.get(image_url);
-        if let Some(token) = token {
-            image_request = image_request.header("Authorization", format!("Bearer {}", token));
-        }
-        match image_request.send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.bytes().await {
-                        Ok(bytes) => {
-                            image_bytes = Some(bytes.to_vec());
-                        }
-                        Err(err) => {
-                            warn!(
-                                "Failed to download image bytes for model version {model_version_id}: {err}"
-                            );
-                        }
-                    }
-                } else {
-                    warn!(
-                        "Image request for model version {model_version_id} returned status {}",
-                        response.status()
-                    );
-                }
-            }
-            Err(err) => {
-                warn!("Failed to request image for model version {model_version_id}: {err}");
-            }
-        }
-    }
+    let preview = resolve_preview(client, &images, token, model_version_id).await;
 
     Ok(CivitaiModelMetadata {
         file_name,
-        image_bytes,
+        preview,
         trained_words,
     })
 }
@@ -739,6 +711,83 @@ fn urls_equivalent(candidate: &Url, reference: &Url) -> bool {
     right.sort();
 
     left == right
+}
+
+async fn resolve_preview(
+    client: &Client,
+    images: &[CivitaiImage],
+    token: Option<&str>,
+    model_version_id: u64,
+) -> Option<CivitaiPreview> {
+    let mut first_image: Option<&str> = None;
+
+    for image in images {
+        let Some(url) = image.url.as_deref() else {
+            continue;
+        };
+        if url.is_empty() {
+            continue;
+        }
+
+        if is_video_url(url) {
+            let resolved = append_token_if_needed(url, token);
+            return Some(CivitaiPreview::Video { url: resolved });
+        }
+
+        if first_image.is_none() {
+            first_image = Some(url);
+        }
+    }
+
+    let Some(image_url) = first_image else {
+        return None;
+    };
+
+    let mut image_request = client.get(image_url);
+    if let Some(token) = token {
+        image_request = image_request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    match image_request.send().await {
+        Ok(response) => {
+            if response.status().is_success() {
+                match response.bytes().await {
+                    Ok(bytes) => Some(CivitaiPreview::Image(bytes.to_vec())),
+                    Err(err) => {
+                        warn!(
+                            "Failed to download image bytes for model version {model_version_id}: {err}"
+                        );
+                        None
+                    }
+                }
+            } else {
+                warn!(
+                    "Image request for model version {model_version_id} returned status {}",
+                    response.status()
+                );
+                None
+            }
+        }
+        Err(err) => {
+            warn!("Failed to request image for model version {model_version_id}: {err}");
+            None
+        }
+    }
+}
+
+fn is_video_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.ends_with(".mp4") || lower.ends_with(".webm") || lower.ends_with(".mov")
+}
+
+fn append_token_if_needed(url: &str, token: Option<&str>) -> String {
+    if let Some(token) = token {
+        if !token.trim().is_empty() && !url.contains("token=") {
+            let separator = if url.contains('?') { '&' } else { '?' };
+            return format!("{url}{separator}token={token}");
+        }
+    }
+    url.to_string()
 }
 
 #[derive(Debug, Deserialize)]

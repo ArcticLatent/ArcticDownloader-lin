@@ -1,6 +1,6 @@
 use crate::{
     app::AppContext,
-    download::{DownloadSignal, DownloadStatus},
+    download::{CivitaiPreview, DownloadSignal, DownloadStatus},
     model::{LoraDefinition, ResolvedModel},
     vram::VramTier,
 };
@@ -8,7 +8,7 @@ use adw::gio;
 use adw::gtk::{
     self, cairo, gdk, prelude::*, Align, Box as GtkBox, Button, ComboBoxText, Entry,
     FileChooserAction, FileChooserNative, Image, Label, Orientation, Picture, ResponseType,
-    Separator,
+    Separator, Video,
 };
 use adw::{Application, ApplicationWindow, HeaderBar, Toast, ToastOverlay, WindowTitle};
 use anyhow::Result;
@@ -669,7 +669,21 @@ fn build_lora_page(
     metadata_picture.set_visible(false);
     metadata_picture.set_can_shrink(true);
 
-    let metadata_triggers = Label::builder().wrap(true).halign(Align::Start).build();
+    let metadata_video = Video::builder()
+        .width_request(320)
+        .height_request(180)
+        .build();
+    metadata_video.set_visible(false);
+    metadata_video.set_autoplay(true);
+    metadata_video.set_loop(true);
+
+    let metadata_triggers = gtk::FlowBox::builder()
+        .row_spacing(6)
+        .column_spacing(6)
+        .max_children_per_line(8)
+        .selection_mode(gtk::SelectionMode::None)
+        .halign(Align::Start)
+        .build();
     metadata_triggers.set_visible(false);
 
     let metadata_box = GtkBox::builder()
@@ -678,6 +692,15 @@ fn build_lora_page(
         .build();
     metadata_box.append(&metadata_status);
     metadata_box.append(&metadata_picture);
+    metadata_box.append(&metadata_video);
+
+    let metadata_triggers_label = Label::builder()
+        .label("Trigger Words")
+        .halign(Align::Start)
+        .css_classes(vec![String::from("heading")])
+        .build();
+    metadata_triggers_label.set_visible(false);
+    metadata_box.append(&metadata_triggers_label);
     metadata_box.append(&metadata_triggers);
 
     let metadata_row = labelled_row("LoRA Details", &metadata_box);
@@ -710,17 +733,23 @@ fn build_lora_page(
     let update_preview: Rc<dyn Fn(Option<LoraDefinition>)> = {
         let metadata_status = metadata_status.clone();
         let metadata_picture = metadata_picture.clone();
+        let metadata_video = metadata_video.clone();
         let metadata_triggers = metadata_triggers.clone();
+        let metadata_triggers_label = metadata_triggers_label.clone();
         let metadata_row = metadata_row.clone();
         let current_preview_request = Rc::clone(&current_preview_request);
         let downloads = downloads_for_preview.clone();
         let config = config_for_preview.clone();
+        let overlay = overlay.clone();
 
         Rc::new(move |maybe_lora: Option<LoraDefinition>| {
             metadata_picture.set_paintable(Option::<&gdk::Texture>::None);
             metadata_picture.set_visible(false);
-            metadata_triggers.set_text("");
+            metadata_video.set_file(Option::<&gio::File>::None);
+            metadata_video.set_visible(false);
+            clear_flow_box(&metadata_triggers);
             metadata_triggers.set_visible(false);
+            metadata_triggers_label.set_visible(false);
             metadata_status.set_visible(false);
             metadata_row.set_visible(false);
             *current_preview_request.borrow_mut() = None;
@@ -750,11 +779,14 @@ fn build_lora_page(
 
             let metadata_status_clone = metadata_status.clone();
             let metadata_picture_clone = metadata_picture.clone();
+            let metadata_video_clone = metadata_video.clone();
             let metadata_triggers_clone = metadata_triggers.clone();
+            let metadata_triggers_label_clone = metadata_triggers_label.clone();
             let metadata_row_clone = metadata_row.clone();
             let current_preview_request_clone = Rc::clone(&current_preview_request);
             let downloads = downloads.clone();
             let config = config.clone();
+            let overlay = overlay.clone();
 
             adw::glib::MainContext::default().spawn_local(async move {
                 let token = config.settings().civitai_token.clone();
@@ -771,21 +803,56 @@ fn build_lora_page(
 
                         let mut has_content = false;
 
-                        if let Some(bytes) = metadata.image_bytes {
-                            if let Some(texture) = texture_from_image_bytes(&bytes) {
-                                metadata_picture_clone.set_paintable(Some(&texture));
-                                metadata_picture_clone.set_visible(true);
-                                has_content = true;
-                            } else {
-                                warn!("Failed to decode LoRA preview image.");
+                        metadata_picture_clone.set_paintable(Option::<&gdk::Texture>::None);
+                        metadata_picture_clone.set_visible(false);
+                        metadata_video_clone.set_file(Option::<&gio::File>::None);
+                        metadata_video_clone.set_visible(false);
+
+                        if let Some(preview) = metadata.preview {
+                            match preview {
+                                CivitaiPreview::Image(bytes) => {
+                                    if let Some(texture) = texture_from_image_bytes(&bytes) {
+                                        metadata_picture_clone.set_paintable(Some(&texture));
+                                        metadata_picture_clone.set_visible(true);
+                                        has_content = true;
+                                    } else {
+                                        warn!("Failed to decode LoRA preview image.");
+                                    }
+                                }
+                                CivitaiPreview::Video { url } => {
+                                    let file = gio::File::for_uri(&url);
+                                    metadata_video_clone.set_autoplay(true);
+                                    metadata_video_clone.set_loop(true);
+                                    metadata_video_clone.set_file(Some(&file));
+                                    metadata_video_clone.set_visible(true);
+                                    has_content = true;
+                                }
                             }
                         }
 
+                        clear_flow_box(&metadata_triggers_clone);
+                        metadata_triggers_clone.set_visible(false);
+                        metadata_triggers_label_clone.set_visible(false);
+
                         if !metadata.trained_words.is_empty() {
-                            metadata_triggers_clone.set_text(&format!(
-                                "Trigger words: {}",
-                                metadata.trained_words.join(", ")
-                            ));
+                            for (index, word) in metadata.trained_words.iter().enumerate() {
+                                let button = Button::with_label(&word);
+                                button.set_halign(Align::Start);
+                                button.add_css_class("pill");
+                                let overlay = overlay.clone();
+                                let word_for_clipboard = word.clone();
+                                button.connect_clicked(move |_| {
+                                    if let Some(display) = gdk::Display::default() {
+                                        let clipboard = display.clipboard();
+                                        clipboard.set_text(&word_for_clipboard);
+                                    }
+                                    let toast_text =
+                                        format!("Copied \"{word_for_clipboard}\" to clipboard.");
+                                    overlay.add_toast(Toast::new(&toast_text));
+                                });
+                                metadata_triggers_clone.insert(&button, index as i32);
+                            }
+                            metadata_triggers_label_clone.set_visible(true);
                             metadata_triggers_clone.set_visible(true);
                             has_content = true;
                         }
@@ -806,8 +873,11 @@ fn build_lora_page(
                         }
                         metadata_picture_clone.set_paintable(Option::<&gdk::Texture>::None);
                         metadata_picture_clone.set_visible(false);
-                        metadata_triggers_clone.set_text("");
+                        metadata_video_clone.set_file(Option::<&gio::File>::None);
+                        metadata_video_clone.set_visible(false);
+                        clear_flow_box(&metadata_triggers_clone);
                         metadata_triggers_clone.set_visible(false);
+                        metadata_triggers_label_clone.set_visible(false);
                         metadata_status_clone.set_text(&format!("Failed to load preview: {err}"));
                         metadata_status_clone.set_visible(true);
                         metadata_row_clone.set_visible(true);
@@ -820,8 +890,11 @@ fn build_lora_page(
                         }
                         metadata_picture_clone.set_paintable(Option::<&gdk::Texture>::None);
                         metadata_picture_clone.set_visible(false);
-                        metadata_triggers_clone.set_text("");
+                        metadata_video_clone.set_file(Option::<&gio::File>::None);
+                        metadata_video_clone.set_visible(false);
+                        clear_flow_box(&metadata_triggers_clone);
                         metadata_triggers_clone.set_visible(false);
+                        metadata_triggers_label_clone.set_visible(false);
                         metadata_status_clone.set_text(&format!("Preview task failed: {join_err}"));
                         metadata_status_clone.set_visible(true);
                         metadata_row_clone.set_visible(true);
@@ -1164,6 +1237,12 @@ fn texture_from_image_bytes(bytes: &[u8]) -> Option<gdk::Texture> {
     loader.close().ok()?;
     let pixbuf = loader.pixbuf()?;
     Some(gdk::Texture::for_pixbuf(&pixbuf))
+}
+
+fn clear_flow_box(flow_box: &gtk::FlowBox) {
+    while let Some(child) = flow_box.child_at_index(0) {
+        flow_box.remove(&child);
+    }
 }
 
 fn escape_markup(text: &str) -> String {
