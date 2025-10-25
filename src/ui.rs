@@ -7,11 +7,13 @@ use crate::{
 use adw::gio;
 use adw::gtk::{
     self, cairo, gdk, prelude::*, Align, Box as GtkBox, Button, ComboBoxText, Entry,
-    FileChooserAction, FileChooserNative, Image, Label, Orientation, ResponseType, Separator,
+    FileChooserAction, FileChooserNative, Image, Label, Orientation, Picture, ResponseType,
+    Separator,
 };
 use adw::{Application, ApplicationWindow, HeaderBar, Toast, ToastOverlay, WindowTitle};
 use anyhow::Result;
-use gdk_pixbuf::{Colorspace, Pixbuf};
+use gdk_pixbuf::{Colorspace, Pixbuf, PixbufLoader};
+use log::warn;
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -657,6 +659,30 @@ fn build_lora_page(
         .halign(Align::Start)
         .build();
 
+    let metadata_status = Label::builder().wrap(true).halign(Align::Start).build();
+    metadata_status.set_visible(false);
+
+    let metadata_picture = Picture::builder()
+        .width_request(320)
+        .height_request(180)
+        .build();
+    metadata_picture.set_visible(false);
+    metadata_picture.set_can_shrink(true);
+
+    let metadata_triggers = Label::builder().wrap(true).halign(Align::Start).build();
+    metadata_triggers.set_visible(false);
+
+    let metadata_box = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(8)
+        .build();
+    metadata_box.append(&metadata_status);
+    metadata_box.append(&metadata_picture);
+    metadata_box.append(&metadata_triggers);
+
+    let metadata_row = labelled_row("LoRA Details", &metadata_box);
+    metadata_row.set_visible(false);
+
     let progress_box = GtkBox::builder()
         .orientation(Orientation::Vertical)
         .spacing(6)
@@ -676,6 +702,134 @@ fn build_lora_page(
     let all_loras: Rc<Vec<LoraDefinition>> = Rc::new(context.catalog.loras());
     let filtered_loras: Rc<RefCell<Vec<LoraDefinition>>> = Rc::new(RefCell::new(Vec::new()));
     let resolved_lora: Rc<RefCell<Option<LoraDefinition>>> = Rc::new(RefCell::new(None));
+    let current_preview_request: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+    let downloads_for_preview = context.downloads.clone();
+    let config_for_preview = context.config.clone();
+
+    let update_preview: Rc<dyn Fn(Option<LoraDefinition>)> = {
+        let metadata_status = metadata_status.clone();
+        let metadata_picture = metadata_picture.clone();
+        let metadata_triggers = metadata_triggers.clone();
+        let metadata_row = metadata_row.clone();
+        let current_preview_request = Rc::clone(&current_preview_request);
+        let downloads = downloads_for_preview.clone();
+        let config = config_for_preview.clone();
+
+        Rc::new(move |maybe_lora: Option<LoraDefinition>| {
+            metadata_picture.set_paintable(Option::<&gdk::Texture>::None);
+            metadata_picture.set_visible(false);
+            metadata_triggers.set_text("");
+            metadata_triggers.set_visible(false);
+            metadata_status.set_visible(false);
+            metadata_row.set_visible(false);
+            *current_preview_request.borrow_mut() = None;
+
+            let Some(lora) = maybe_lora else {
+                return;
+            };
+
+            metadata_row.set_visible(true);
+
+            if !lora
+                .download_url
+                .to_ascii_lowercase()
+                .contains("civitai.com")
+            {
+                metadata_status.set_text("Preview available only for LoRAs hosted on Civitai.");
+                metadata_status.set_visible(true);
+                return;
+            }
+
+            metadata_status.set_text("Fetching LoRA preview…");
+            metadata_status.set_visible(true);
+
+            let download_url = lora.download_url.clone();
+            let lora_id = lora.id.clone();
+            *current_preview_request.borrow_mut() = Some(lora_id.clone());
+
+            let metadata_status_clone = metadata_status.clone();
+            let metadata_picture_clone = metadata_picture.clone();
+            let metadata_triggers_clone = metadata_triggers.clone();
+            let metadata_row_clone = metadata_row.clone();
+            let current_preview_request_clone = Rc::clone(&current_preview_request);
+            let downloads = downloads.clone();
+            let config = config.clone();
+
+            adw::glib::MainContext::default().spawn_local(async move {
+                let token = config.settings().civitai_token.clone();
+                let handle = downloads.civitai_model_metadata(download_url, token);
+                match handle.await {
+                    Ok(Ok(metadata)) => {
+                        if current_preview_request_clone.borrow().as_deref()
+                            != Some(lora_id.as_str())
+                        {
+                            return;
+                        }
+
+                        metadata_status_clone.set_visible(false);
+
+                        let mut has_content = false;
+
+                        if let Some(bytes) = metadata.image_bytes {
+                            if let Some(texture) = texture_from_image_bytes(&bytes) {
+                                metadata_picture_clone.set_paintable(Some(&texture));
+                                metadata_picture_clone.set_visible(true);
+                                has_content = true;
+                            } else {
+                                warn!("Failed to decode LoRA preview image.");
+                            }
+                        }
+
+                        if !metadata.trained_words.is_empty() {
+                            metadata_triggers_clone.set_text(&format!(
+                                "Trigger words: {}",
+                                metadata.trained_words.join(", ")
+                            ));
+                            metadata_triggers_clone.set_visible(true);
+                            has_content = true;
+                        }
+
+                        if !has_content {
+                            metadata_status_clone
+                                .set_text("No preview data available for this LoRA.");
+                            metadata_status_clone.set_visible(true);
+                        }
+
+                        metadata_row_clone.set_visible(true);
+                    }
+                    Ok(Err(err)) => {
+                        if current_preview_request_clone.borrow().as_deref()
+                            != Some(lora_id.as_str())
+                        {
+                            return;
+                        }
+                        metadata_picture_clone.set_paintable(Option::<&gdk::Texture>::None);
+                        metadata_picture_clone.set_visible(false);
+                        metadata_triggers_clone.set_text("");
+                        metadata_triggers_clone.set_visible(false);
+                        metadata_status_clone.set_text(&format!("Failed to load preview: {err}"));
+                        metadata_status_clone.set_visible(true);
+                        metadata_row_clone.set_visible(true);
+                    }
+                    Err(join_err) => {
+                        if current_preview_request_clone.borrow().as_deref()
+                            != Some(lora_id.as_str())
+                        {
+                            return;
+                        }
+                        metadata_picture_clone.set_paintable(Option::<&gdk::Texture>::None);
+                        metadata_picture_clone.set_visible(false);
+                        metadata_triggers_clone.set_text("");
+                        metadata_triggers_clone.set_visible(false);
+                        metadata_status_clone.set_text(&format!("Preview task failed: {join_err}"));
+                        metadata_status_clone.set_visible(true);
+                        metadata_row_clone.set_visible(true);
+                    }
+                }
+            });
+        })
+    };
 
     let apply_selection: Rc<dyn Fn()> = {
         let lora_dropdown = lora_dropdown.clone();
@@ -683,6 +837,7 @@ fn build_lora_page(
         let download_button = download_button.clone();
         let status_label = status_label.clone();
         let resolved_lora_ref: Rc<RefCell<Option<LoraDefinition>>> = Rc::clone(&resolved_lora);
+        let update_preview = update_preview.clone();
         Rc::new(move || {
             let active_id = lora_dropdown.active_id().map(|id| id.to_string());
             if let Some(id) = active_id {
@@ -698,16 +853,19 @@ fn build_lora_page(
                     };
                     status_label.set_label(&label);
                     download_button.set_sensitive(true);
+                    update_preview(Some(definition.clone()));
                     *resolved_lora_ref.borrow_mut() = Some(definition);
                 } else {
                     status_label.set_label("Select a LoRA to continue.");
                     download_button.set_sensitive(false);
                     *resolved_lora_ref.borrow_mut() = None;
+                    update_preview(None);
                 }
             } else {
                 status_label.set_label("Select a LoRA to continue.");
                 download_button.set_sensitive(false);
                 *resolved_lora_ref.borrow_mut() = None;
+                update_preview(None);
             }
         })
     };
@@ -721,10 +879,12 @@ fn build_lora_page(
         let filtered_loras_ref: Rc<RefCell<Vec<LoraDefinition>>> = Rc::clone(&filtered_loras);
         let resolved_lora_ref: Rc<RefCell<Option<LoraDefinition>>> = Rc::clone(&resolved_lora);
         let apply_selection = apply_selection.clone();
+        let update_preview = update_preview.clone();
         Rc::new(move || {
             lora_dropdown.remove_all();
             download_button.set_sensitive(false);
             *resolved_lora_ref.borrow_mut() = None;
+            update_preview(None);
 
             let family_filter = family_dropdown
                 .active_id()
@@ -747,6 +907,7 @@ fn build_lora_page(
             if filtered.is_empty() {
                 status_label.set_label("No LoRAs available for this filter.");
                 filtered_loras_ref.borrow_mut().clear();
+                update_preview(None);
                 return;
             }
 
@@ -987,6 +1148,7 @@ fn build_lora_page(
 
     column.append(&labelled_row("Family Filter", &family_dropdown));
     column.append(&labelled_row("LoRA", &lora_dropdown));
+    column.append(&metadata_row);
     column.append(&labelled_row("ComfyUI Folder", &comfy_path_entry));
     column.append(&select_folder_button);
     column.append(&download_button);
@@ -994,6 +1156,14 @@ fn build_lora_page(
     column.append(&status_label);
 
     column
+}
+
+fn texture_from_image_bytes(bytes: &[u8]) -> Option<gdk::Texture> {
+    let loader = PixbufLoader::new();
+    loader.write(bytes).ok()?;
+    loader.close().ok()?;
+    let pixbuf = loader.pixbuf()?;
+    Some(gdk::Texture::for_pixbuf(&pixbuf))
 }
 
 fn escape_markup(text: &str) -> String {

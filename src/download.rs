@@ -1,16 +1,17 @@
 use crate::model::{LoraDefinition, ModelArtifact, ResolvedModel, TargetCategory};
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
-use log::info;
+use log::{info, warn};
 use percent_encoding::percent_decode_str;
-use reqwest::{header, Client};
-use serde_json::Value;
+use reqwest::{header, Client, Url};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{mpsc::Sender, Arc},
 };
-use tokio::{fs, io::AsyncWriteExt, runtime::Runtime};
+use tokio::{fs, io::AsyncWriteExt, runtime::Runtime, sync::Mutex};
 
 #[derive(Clone, Debug)]
 pub struct DownloadOutcome {
@@ -24,6 +25,13 @@ pub struct LoraDownloadOutcome {
     pub lora: LoraDefinition,
     pub destination: PathBuf,
     pub status: DownloadStatus,
+}
+
+#[derive(Clone, Debug)]
+pub struct CivitaiModelMetadata {
+    pub file_name: String,
+    pub image_bytes: Option<Vec<u8>>,
+    pub trained_words: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +68,7 @@ pub enum DownloadSignal {
 pub struct DownloadManager {
     runtime: Arc<Runtime>,
     client: Client,
+    civitai_metadata_cache: Arc<Mutex<HashMap<u64, CivitaiModelMetadata>>>,
 }
 
 impl DownloadManager {
@@ -73,7 +82,11 @@ impl DownloadManager {
             .build()
             .expect("failed to construct reqwest client");
 
-        Self { runtime, client }
+        Self {
+            runtime,
+            client,
+            civitai_metadata_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn download_variant(
@@ -143,19 +156,26 @@ impl DownloadManager {
                 .with_context(|| format!("failed to create directory {:?}", loras_dir))?;
 
             let base_url = lora.download_url.clone();
+            let token_value = token.clone().and_then(|t| {
+                let trimmed = t.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+
             let mut file_name = lora.derived_file_name();
 
             if base_url.contains("civitai.com") {
-                if let Some(token_value) = token.as_deref() {
-                    if let Some(resolved) =
-                        civitai_expected_file_name(&client, &base_url, Some(token_value)).await
-                    {
-                        file_name = resolved;
-                    }
-                } else if let Some(resolved) =
-                    civitai_expected_file_name(&client, &base_url, None).await
+                match fetch_civitai_model_metadata(&client, &base_url, token_value.as_deref()).await
                 {
-                    file_name = resolved;
+                    Ok(metadata) => {
+                        file_name = metadata.file_name.clone();
+                    }
+                    Err(err) => {
+                        warn!("Failed to fetch Civitai metadata for {}: {err}", base_url);
+                    }
                 }
             }
 
@@ -189,15 +209,14 @@ impl DownloadManager {
                 return Err(anyhow!("LoRA {} missing download URL", lora.id));
             }
 
-            let token = token.filter(|t| !t.trim().is_empty());
             let mut auth_token: Option<String> = None;
             if url.contains("civitai.com") {
-                if let Some(token_value) = token.clone() {
+                if let Some(token_string) = token_value.clone() {
                     if !url.contains("token=") {
                         let separator = if url.contains('?') { '&' } else { '?' };
-                        url = format!("{url}{separator}token={token_value}");
+                        url = format!("{url}{separator}token={token_string}");
                     }
-                    auth_token = Some(token_value);
+                    auth_token = Some(token_string);
                 }
             }
 
@@ -231,6 +250,41 @@ impl DownloadManager {
                     Err(err)
                 }
             }
+        })
+    }
+
+    pub fn civitai_model_metadata(
+        &self,
+        download_url: String,
+        token: Option<String>,
+    ) -> tokio::task::JoinHandle<Result<CivitaiModelMetadata>> {
+        let client = self.client.clone();
+        let cache = Arc::clone(&self.civitai_metadata_cache);
+        self.runtime.spawn(async move {
+            let model_version_id = extract_civitai_model_version_id(&download_url)
+                .ok_or_else(|| anyhow!("unable to parse model version ID from {download_url}"))?;
+
+            if let Some(cached) = {
+                let cache_guard = cache.lock().await;
+                cache_guard.get(&model_version_id).cloned()
+            } {
+                return Ok(cached);
+            }
+
+            let metadata = fetch_civitai_model_metadata_internal(
+                &client,
+                model_version_id,
+                &download_url,
+                token.as_deref(),
+            )
+            .await?;
+
+            {
+                let mut cache_guard = cache.lock().await;
+                cache_guard.insert(model_version_id, metadata.clone());
+            }
+
+            Ok(metadata)
         })
     }
 }
@@ -496,52 +550,6 @@ fn parse_content_disposition(value: &str) -> Option<String> {
     None
 }
 
-async fn civitai_expected_file_name(
-    client: &Client,
-    download_url: &str,
-    token: Option<&str>,
-) -> Option<String> {
-    let version_id = extract_civitai_model_version_id(download_url)?;
-    let mut request = client.get(format!(
-        "https://civitai.com/api/v1/model-versions/{}",
-        version_id
-    ));
-
-    if let Some(token) = token {
-        request = request.header("Authorization", format!("Bearer {}", token));
-    }
-
-    let response = request.send().await.ok()?.error_for_status().ok()?;
-    let payload: Value = response.json().await.ok()?;
-    let files = payload.get("files")?.as_array()?;
-    let base_url = download_url.split('?').next().unwrap_or(download_url);
-
-    let mut name = files.iter().find_map(|file| {
-        let download = file.get("downloadUrl")?.as_str()?;
-        if download == base_url {
-            file.get("name")?.as_str()
-        } else {
-            None
-        }
-    });
-
-    if name.is_none() {
-        name = files.iter().find_map(|file| {
-            if file
-                .get("primary")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                file.get("name")?.as_str()
-            } else {
-                None
-            }
-        });
-    }
-
-    name.map(|s| s.to_string())
-}
-
 fn extract_civitai_model_version_id(url: &str) -> Option<u64> {
     let idx = url.to_ascii_lowercase().find("/models/")?;
     let remainder = &url[idx + "/models/".len()..];
@@ -590,4 +598,170 @@ fn build_download_url(repo: &str, path: &str) -> Result<String> {
     } else {
         Err(anyhow!("unsupported repository scheme in {repo}"))
     }
+}
+
+async fn fetch_civitai_model_metadata(
+    client: &Client,
+    download_url: &str,
+    token: Option<&str>,
+) -> Result<CivitaiModelMetadata> {
+    let model_version_id = extract_civitai_model_version_id(download_url)
+        .ok_or_else(|| anyhow!("unable to parse model version ID from {download_url}"))?;
+    fetch_civitai_model_metadata_internal(client, model_version_id, download_url, token).await
+}
+
+async fn fetch_civitai_model_metadata_internal(
+    client: &Client,
+    model_version_id: u64,
+    download_url: &str,
+    token: Option<&str>,
+) -> Result<CivitaiModelMetadata> {
+    let api_url = format!("https://civitai.com/api/v1/model-versions/{model_version_id}");
+
+    let mut request = client.get(&api_url);
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("request failed for {api_url}"))?
+        .error_for_status()
+        .with_context(|| format!("unexpected status downloading metadata from {api_url}"))?;
+
+    let payload: CivitaiModelVersion = response
+        .json()
+        .await
+        .with_context(|| format!("failed to parse metadata payload for {api_url}"))?;
+
+    let CivitaiModelVersion {
+        trained_words,
+        images,
+        files,
+    } = payload;
+
+    let file_name = select_civitai_file(&files, download_url)
+        .and_then(|file| file.name.clone())
+        .unwrap_or_else(|| fallback_file_name_from_url(download_url, model_version_id));
+
+    let mut image_bytes = None;
+    if let Some(image_url) = images
+        .iter()
+        .filter_map(|image| image.url.as_deref())
+        .find(|url| !url.is_empty())
+    {
+        let mut image_request = client.get(image_url);
+        if let Some(token) = token {
+            image_request = image_request.header("Authorization", format!("Bearer {}", token));
+        }
+        match image_request.send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.bytes().await {
+                        Ok(bytes) => {
+                            image_bytes = Some(bytes.to_vec());
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Failed to download image bytes for model version {model_version_id}: {err}"
+                            );
+                        }
+                    }
+                } else {
+                    warn!(
+                        "Image request for model version {model_version_id} returned status {}",
+                        response.status()
+                    );
+                }
+            }
+            Err(err) => {
+                warn!("Failed to request image for model version {model_version_id}: {err}");
+            }
+        }
+    }
+
+    Ok(CivitaiModelMetadata {
+        file_name,
+        image_bytes,
+        trained_words,
+    })
+}
+
+fn fallback_file_name_from_url(url: &str, model_version_id: u64) -> String {
+    url.rsplit('/')
+        .next()
+        .and_then(|segment| segment.split('?').next())
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+        .unwrap_or_else(|| format!("model-{model_version_id}.safetensors"))
+}
+
+fn select_civitai_file<'a>(
+    files: &'a [CivitaiFile],
+    download_url: &str,
+) -> Option<&'a CivitaiFile> {
+    if let Ok(reference) = Url::parse(download_url) {
+        if let Some(matched) = files.iter().find(|file| {
+            file.download_url
+                .as_deref()
+                .and_then(|candidate| Url::parse(candidate).ok())
+                .map_or(false, |candidate| urls_equivalent(&candidate, &reference))
+        }) {
+            return Some(matched);
+        }
+    }
+
+    files
+        .iter()
+        .find(|file| file.r#type.as_deref() == Some("Model"))
+        .or_else(|| files.first())
+}
+
+fn urls_equivalent(candidate: &Url, reference: &Url) -> bool {
+    if candidate.path() != reference.path() {
+        return false;
+    }
+
+    let mut left: Vec<(String, String)> = candidate
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let mut right: Vec<(String, String)> = reference
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+
+    left.retain(|(key, _)| key != "token");
+    right.retain(|(key, _)| key != "token");
+
+    left.sort();
+    right.sort();
+
+    left == right
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CivitaiModelVersion {
+    #[serde(default)]
+    trained_words: Vec<String>,
+    #[serde(default)]
+    images: Vec<CivitaiImage>,
+    #[serde(default)]
+    files: Vec<CivitaiFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CivitaiImage {
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CivitaiFile {
+    name: Option<String>,
+    download_url: Option<String>,
+    #[serde(rename = "type")]
+    r#type: Option<String>,
 }
