@@ -6,28 +6,33 @@ use crate::{
 };
 use adw::gio;
 use adw::gtk::{
-    self, cairo, gdk, prelude::*, Align, Box as GtkBox, Button, ComboBoxText, Entry,
-    FileChooserAction, FileChooserNative, Image, Label, Orientation, Picture, ResponseType,
-    Separator, Video,
+    self, gdk, prelude::*, Align, Box as GtkBox, Button, ComboBoxText, CssProvider, Entry,
+    FileChooserAction, FileChooserNative, FlowBox, Label, MediaFile, Orientation, Picture,
+    ResponseType, Separator,
 };
 use adw::{Application, ApplicationWindow, HeaderBar, Toast, ToastOverlay, WindowTitle};
 use anyhow::Result;
-use gdk_pixbuf::{Colorspace, Pixbuf, PixbufLoader};
+use gdk_pixbuf::PixbufLoader;
 use log::warn;
 use std::{
     cell::RefCell,
     collections::HashMap,
-    f64::consts::PI,
-    path::{Path, PathBuf},
+    fs,
+    path::PathBuf,
     rc::Rc,
     sync::mpsc::{self, TryRecvError},
     time::Duration,
 };
 
+const APP_CSS: &str = include_str!("../assets/style.css");
+
 pub fn bootstrap(app: &Application, context: AppContext) -> Result<()> {
     if let Err(err) = adw::init() {
         adw::glib::g_warning!(crate::app::APP_ID, "failed to initialize Adwaita: {err}");
     }
+
+    register_application_fonts();
+    install_application_css();
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -39,6 +44,109 @@ pub fn bootstrap(app: &Application, context: AppContext) -> Result<()> {
 
     window.present();
     Ok(())
+}
+
+fn install_application_css() {
+    if let Some(display) = gdk::Display::default() {
+        let provider = CssProvider::new();
+        provider.load_from_data(APP_CSS);
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+fn register_application_fonts() {
+    #[cfg(target_family = "unix")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        let fonts = discover_font_files();
+        if fonts.is_empty() {
+            return;
+        }
+
+        unsafe {
+            if fontconfig::FcInit() == 0 {
+                warn!("fontconfig initialization failed; bundled fonts unavailable");
+                return;
+            }
+            let config = fontconfig::FcConfigGetCurrent();
+            if config.is_null() {
+                warn!("fontconfig returned null config; bundled fonts unavailable");
+                return;
+            }
+
+            for path in fonts {
+                let c_path = match CString::new(path.as_os_str().as_bytes()) {
+                    Ok(cstr) => cstr,
+                    Err(err) => {
+                        warn!(
+                            "Failed to convert font path {} to CString: {err}",
+                            path.display()
+                        );
+                        continue;
+                    }
+                };
+                let result = fontconfig::FcConfigAppFontAddFile(
+                    config,
+                    c_path.as_ptr() as *const fontconfig::FcChar8,
+                );
+                if result == 0 {
+                    warn!("Failed to register font {}", path.display());
+                }
+            }
+        }
+    }
+}
+
+fn discover_font_files() -> Vec<PathBuf> {
+    let mut fonts = Vec::new();
+    let directories = ["assets/fonts", "data/fonts", "resources/fonts", "fonts"];
+
+    for dir in directories {
+        let path = PathBuf::from(dir);
+        if !path.exists() {
+            continue;
+        }
+        let iter = match fs::read_dir(&path) {
+            Ok(iter) => iter,
+            Err(err) => {
+                warn!("Failed to read font directory {}: {err}", path.display());
+                continue;
+            }
+        };
+        for entry in iter.flatten() {
+            let file_path = entry.path();
+            if let Some(ext) = file_path.extension() {
+                let ext = ext.to_string_lossy().to_ascii_lowercase();
+                if matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
+                    fonts.push(file_path);
+                }
+            }
+        }
+    }
+
+    fonts
+}
+
+#[cfg(target_family = "unix")]
+mod fontconfig {
+    use std::os::raw::c_int;
+
+    #[allow(non_camel_case_types)]
+    pub type FcChar8 = u8;
+    #[allow(non_camel_case_types)]
+    pub enum FcConfig {}
+
+    #[link(name = "fontconfig")]
+    extern "C" {
+        pub fn FcInit() -> c_int;
+        pub fn FcConfigGetCurrent() -> *mut FcConfig;
+        pub fn FcConfigAppFontAddFile(config: *mut FcConfig, file: *const FcChar8) -> c_int;
+    }
 }
 
 fn build_shell(context: &AppContext) -> ToastOverlay {
@@ -199,12 +307,7 @@ fn build_model_page(
                 (Some(model_id), Some(variant_id)) => {
                     if let Some(resolved) = context.catalog.resolve_variant(&model_id, &variant_id)
                     {
-                        status_label.set_label(&format!(
-                            "{} • {} (requires ≥ {} GB)",
-                            resolved.master.display_name,
-                            resolved.variant.summary(),
-                            resolved.variant.min_vram_gb
-                        ));
+                        status_label.set_label("Select a variant to continue.");
                         download_button.set_sensitive(true);
                         *resolved_variant.borrow_mut() = Some(resolved);
                     } else {
@@ -311,11 +414,6 @@ fn build_model_page(
 
             let comfy_path = PathBuf::from(comfy_text.as_str());
 
-            status_label.set_text(&format!(
-                "Checking existing files for {}…",
-                resolved.master.display_name
-            ));
-
             let all_present = resolved.variant.artifacts.iter().all(|artifact| {
                 comfy_path
                     .join(artifact.target_category.comfyui_subdir())
@@ -328,7 +426,6 @@ fn build_model_page(
                     "All artifacts for {} are already downloaded.",
                     resolved.master.display_name
                 );
-                status_label.set_text(&message);
                 overlay.add_toast(Toast::new(&message));
                 return;
             }
@@ -351,10 +448,6 @@ fn build_model_page(
             progress_bar.set_pulse_step(0.02);
             progress_bar.pulse();
             download_button_clone.set_sensitive(false);
-            status_label.set_text(&format!(
-                "Downloading artifacts for {}…",
-                resolved.master.display_name
-            ));
 
             let (progress_sender, progress_receiver) = mpsc::channel::<DownloadSignal>();
             let progress_state = Rc::new(RefCell::new(DownloadProgressState::default()));
@@ -558,8 +651,8 @@ fn build_model_page(
 
     let links_box = GtkBox::builder()
         .orientation(Orientation::Horizontal)
-        .spacing(12)
-        .halign(Align::End)
+        .spacing(16)
+        .halign(Align::Center)
         .build();
     links_box.set_hexpand(true);
     links_box.set_margin_top(12);
@@ -568,17 +661,47 @@ fn build_model_page(
         .tooltip_text("Open Arctic Latent on YouTube")
         .build();
     youtube_button.add_css_class("flat");
-    let youtube_image = load_image_or_fallback("youtube", create_youtube_icon);
-    youtube_image.set_size_request(32, 32);
-    youtube_button.set_child(Some(&youtube_image));
+    youtube_button.add_css_class("link-pill");
+    youtube_button.add_css_class("youtube-link");
+    youtube_button.set_halign(Align::Center);
+    let youtube_label = Label::builder()
+        .label("YouTube")
+        .css_classes(vec![String::from("link-label")])
+        .build();
+    let youtube_content = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(6)
+        .halign(Align::Center)
+        .build();
+    let youtube_icon = Label::new(Some("\u{f167}"));
+    youtube_icon.add_css_class("link-icon");
+    youtube_icon.add_css_class("youtube-icon");
+    youtube_content.append(&youtube_icon);
+    youtube_content.append(&youtube_label);
+    youtube_button.set_child(Some(&youtube_content));
 
     let github_button = Button::builder()
         .tooltip_text("Open Arctic Latent on GitHub")
         .build();
     github_button.add_css_class("flat");
-    let github_image = load_image_or_fallback("github", create_github_icon);
-    github_image.set_size_request(32, 32);
-    github_button.set_child(Some(&github_image));
+    github_button.add_css_class("link-pill");
+    github_button.add_css_class("github-link");
+    github_button.set_halign(Align::Center);
+    let github_label = Label::builder()
+        .label("GitHub")
+        .css_classes(vec![String::from("link-label")])
+        .build();
+    let github_content = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(6)
+        .halign(Align::Center)
+        .build();
+    let github_icon = Label::new(Some("\u{f09b}"));
+    github_icon.add_css_class("link-icon");
+    github_icon.add_css_class("github-icon");
+    github_content.append(&github_icon);
+    github_content.append(&github_label);
+    github_button.set_child(Some(&github_content));
 
     {
         let overlay = overlay.clone();
@@ -669,15 +792,7 @@ fn build_lora_page(
     metadata_picture.set_visible(false);
     metadata_picture.set_can_shrink(true);
 
-    let metadata_video = Video::builder()
-        .width_request(320)
-        .height_request(180)
-        .build();
-    metadata_video.set_visible(false);
-    metadata_video.set_autoplay(true);
-    metadata_video.set_loop(true);
-
-    let metadata_triggers = gtk::FlowBox::builder()
+    let metadata_triggers = FlowBox::builder()
         .row_spacing(6)
         .column_spacing(6)
         .max_children_per_line(8)
@@ -692,7 +807,6 @@ fn build_lora_page(
         .build();
     metadata_box.append(&metadata_status);
     metadata_box.append(&metadata_picture);
-    metadata_box.append(&metadata_video);
 
     let metadata_triggers_label = Label::builder()
         .label("Trigger Words")
@@ -726,6 +840,7 @@ fn build_lora_page(
     let filtered_loras: Rc<RefCell<Vec<LoraDefinition>>> = Rc::new(RefCell::new(Vec::new()));
     let resolved_lora: Rc<RefCell<Option<LoraDefinition>>> = Rc::new(RefCell::new(None));
     let current_preview_request: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let active_media: Rc<RefCell<Option<MediaFile>>> = Rc::new(RefCell::new(None));
 
     let downloads_for_preview = context.downloads.clone();
     let config_for_preview = context.config.clone();
@@ -733,7 +848,6 @@ fn build_lora_page(
     let update_preview: Rc<dyn Fn(Option<LoraDefinition>)> = {
         let metadata_status = metadata_status.clone();
         let metadata_picture = metadata_picture.clone();
-        let metadata_video = metadata_video.clone();
         let metadata_triggers = metadata_triggers.clone();
         let metadata_triggers_label = metadata_triggers_label.clone();
         let metadata_row = metadata_row.clone();
@@ -741,12 +855,14 @@ fn build_lora_page(
         let downloads = downloads_for_preview.clone();
         let config = config_for_preview.clone();
         let overlay = overlay.clone();
+        let active_media = Rc::clone(&active_media);
 
         Rc::new(move |maybe_lora: Option<LoraDefinition>| {
             metadata_picture.set_paintable(Option::<&gdk::Texture>::None);
             metadata_picture.set_visible(false);
-            metadata_video.set_file(Option::<&gio::File>::None);
-            metadata_video.set_visible(false);
+            if let Some(media) = active_media.borrow_mut().take() {
+                media.set_playing(false);
+            }
             clear_flow_box(&metadata_triggers);
             metadata_triggers.set_visible(false);
             metadata_triggers_label.set_visible(false);
@@ -779,7 +895,6 @@ fn build_lora_page(
 
             let metadata_status_clone = metadata_status.clone();
             let metadata_picture_clone = metadata_picture.clone();
-            let metadata_video_clone = metadata_video.clone();
             let metadata_triggers_clone = metadata_triggers.clone();
             let metadata_triggers_label_clone = metadata_triggers_label.clone();
             let metadata_row_clone = metadata_row.clone();
@@ -787,6 +902,7 @@ fn build_lora_page(
             let downloads = downloads.clone();
             let config = config.clone();
             let overlay = overlay.clone();
+            let active_media_clone = Rc::clone(&active_media);
 
             adw::glib::MainContext::default().spawn_local(async move {
                 let token = config.settings().civitai_token.clone();
@@ -805,8 +921,9 @@ fn build_lora_page(
 
                         metadata_picture_clone.set_paintable(Option::<&gdk::Texture>::None);
                         metadata_picture_clone.set_visible(false);
-                        metadata_video_clone.set_file(Option::<&gio::File>::None);
-                        metadata_video_clone.set_visible(false);
+                        if let Some(media) = active_media_clone.borrow_mut().take() {
+                            media.set_playing(false);
+                        }
 
                         if let Some(preview) = metadata.preview {
                             match preview {
@@ -821,10 +938,13 @@ fn build_lora_page(
                                 }
                                 CivitaiPreview::Video { url } => {
                                     let file = gio::File::for_uri(&url);
-                                    metadata_video_clone.set_autoplay(true);
-                                    metadata_video_clone.set_loop(true);
-                                    metadata_video_clone.set_file(Some(&file));
-                                    metadata_video_clone.set_visible(true);
+                                    let media = MediaFile::for_file(&file);
+                                    media.set_loop(true);
+                                    media.set_muted(true);
+                                    media.play();
+                                    metadata_picture_clone.set_paintable(Some(&media));
+                                    metadata_picture_clone.set_visible(true);
+                                    *active_media_clone.borrow_mut() = Some(media);
                                     has_content = true;
                                 }
                             }
@@ -873,8 +993,9 @@ fn build_lora_page(
                         }
                         metadata_picture_clone.set_paintable(Option::<&gdk::Texture>::None);
                         metadata_picture_clone.set_visible(false);
-                        metadata_video_clone.set_file(Option::<&gio::File>::None);
-                        metadata_video_clone.set_visible(false);
+                        if let Some(media) = active_media_clone.borrow_mut().take() {
+                            media.set_playing(false);
+                        }
                         clear_flow_box(&metadata_triggers_clone);
                         metadata_triggers_clone.set_visible(false);
                         metadata_triggers_label_clone.set_visible(false);
@@ -890,8 +1011,9 @@ fn build_lora_page(
                         }
                         metadata_picture_clone.set_paintable(Option::<&gdk::Texture>::None);
                         metadata_picture_clone.set_visible(false);
-                        metadata_video_clone.set_file(Option::<&gio::File>::None);
-                        metadata_video_clone.set_visible(false);
+                        if let Some(media) = active_media_clone.borrow_mut().take() {
+                            media.set_playing(false);
+                        }
                         clear_flow_box(&metadata_triggers_clone);
                         metadata_triggers_clone.set_visible(false);
                         metadata_triggers_label_clone.set_visible(false);
@@ -1320,14 +1442,20 @@ fn labelled_row(label: &str, widget: &impl IsA<gtk::Widget>) -> GtkBox {
 fn build_quant_legend() -> GtkBox {
     let legend = GtkBox::builder()
         .orientation(Orientation::Vertical)
-        .spacing(6)
+        .spacing(12)
         .build();
 
-    let title = Label::builder()
-        .label("Quantization Legend")
+    legend.append(&Separator::new(Orientation::Horizontal));
+
+    let summary_header = Label::builder()
+        .label(
+            "Quantization is the process of compressing model weights to fewer bits (2–8 bit) so models run faster and fit in less GPU memory during inference.",
+        )
+        .wrap(true)
         .halign(Align::Start)
-        .css_classes(vec![String::from("heading")])
+        .css_classes(vec![String::from("legend-text")])
         .build();
+    legend.append(&summary_header);
 
     let grid = gtk::Grid::builder()
         .column_spacing(18)
@@ -1335,177 +1463,100 @@ fn build_quant_legend() -> GtkBox {
         .hexpand(true)
         .build();
 
-    let headers = ["Suffix", "Size", "Quality", "Speed"];
-    for (col, header) in headers.into_iter().enumerate() {
+    let headers = ["GPU VRAM", "Recommended Quant", "Comment"];
+    for (col, header) in headers.iter().enumerate() {
         let header_label = Label::builder()
-            .label(header)
+            .label(*header)
             .halign(Align::Start)
             .css_classes(vec![String::from("heading")])
+            .css_classes(vec![String::from("legend-text")])
             .build();
         grid.attach(&header_label, col as i32, 0, 1, 1);
     }
 
-    let rows = [
-        ("O", "Baseline", "Lowest", "Fastest"),
-        ("S", "Small", "Low", "Fast"),
-        ("M", "Medium", "Medium", "Moderate"),
-        ("L", "Large", "Highest", "Slowest"),
+    let guidance_rows = [
+        ("<= 8 GB", "Q2 K / Q3 K", "Low-VRAM preview only"),
+        ("12 GB", "Q4 K M", "Balanced speed / quality"),
+        ("16 GB", "Q5 K M", "High-quality generation"),
+        (
+            "24 GB",
+            "Q6 K M/L or Q8 0",
+            "Lossless-like, heavy LoRA stacks",
+        ),
+        (
+            "32 GB",
+            "FP8 or FP16",
+            "Full-precision, refiner stages, batching",
+        ),
     ];
 
-    for (row_idx, (suffix, size, quality, speed)) in rows.into_iter().enumerate() {
+    for (row_idx, &(vram, quant, comment)) in guidance_rows.iter().enumerate() {
         let row = row_idx as i32 + 1;
 
-        let suffix_label = Label::builder()
-            .label(suffix)
+        let vram_label = Label::builder().label(vram).halign(Align::Start).build();
+        grid.attach(&vram_label, 0, row, 1, 1);
+
+        let quant_label = Label::builder()
+            .label(quant)
             .halign(Align::Start)
             .css_classes(vec![String::from("monospace")])
+            .css_classes(vec![String::from("legend-text")])
             .build();
-        grid.attach(&suffix_label, 0, row, 1, 1);
+        grid.attach(&quant_label, 1, row, 1, 1);
 
-        let size_label = Label::builder().label(size).halign(Align::Start).build();
-        grid.attach(&size_label, 1, row, 1, 1);
-
-        let quality_label = Label::builder().label(quality).halign(Align::Start).build();
-        grid.attach(&quality_label, 2, row, 1, 1);
-
-        let speed_label = Label::builder().label(speed).halign(Align::Start).build();
-        grid.attach(&speed_label, 3, row, 1, 1);
+        let comment_label = Label::builder()
+            .label(comment)
+            .halign(Align::Start)
+            .wrap(true)
+            .css_classes(vec![String::from("legend-text")])
+            .build();
+        grid.attach(&comment_label, 2, row, 1, 1);
     }
 
-    legend.append(&Separator::new(Orientation::Horizontal));
-    legend.append(&title);
     legend.append(&grid);
-    legend
-}
 
-fn load_image_or_fallback<F>(name: &str, fallback: F) -> Image
-where
-    F: Fn() -> Image,
-{
-    for path in candidate_image_paths(name) {
-        if path.exists() {
-            let file = gio::File::for_path(&path);
-            match gdk::Texture::from_file(&file) {
-                Ok(texture) => {
-                    return Image::from_paintable(Some(&texture));
-                }
-                Err(err) => {
-                    adw::glib::g_warning!(
-                        crate::app::APP_ID,
-                        "Failed to load {name} image at {}: {err}",
-                        path.display()
-                    );
-                }
-            }
-        }
-    }
-    fallback()
-}
+    let interpretation_header = Label::builder()
+        .label("Interpretation")
+        .halign(Align::Start)
+        .css_classes(vec![String::from("heading")])
+        .build();
+    legend.append(&interpretation_header);
 
-fn candidate_image_paths(name: &str) -> Vec<PathBuf> {
-    let directories = [
-        "assets/branding",
-        "assets/icons",
-        "assets",
-        "data/branding",
-        "data/icons",
-        "data",
+    let notes_box = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(6)
+        .build();
+
+    let bullets: [&str; 1] = [
+        "<b>_S / M / L suffixes:</b>\n_S = small/faster (lower fidelity)  M = balanced  L = large/slower (higher fidelity)",
     ];
-    let extensions = ["png", "svg", "jpg", "jpeg", "webp"];
-    let mut paths = Vec::new();
-    for dir in directories {
-        for ext in &extensions {
-            paths.push(Path::new(dir).join(format!("{name}.{ext}")));
-        }
+
+    for markup in bullets.iter() {
+        let label = Label::builder()
+            .use_markup(true)
+            .wrap(true)
+            .halign(Align::Start)
+            .css_classes(vec![String::from("legend-text")])
+            .build();
+        label.set_markup(&format!("• {}", markup));
+        notes_box.append(&label);
     }
-    paths
-}
 
-fn create_youtube_icon() -> Image {
-    create_surface_image(48, 48, |cr, width, height| {
-        let radius = (width.min(height)) * 0.45;
-        let cx = width / 2.0;
-        let cy = height / 2.0;
+    legend.append(&notes_box);
 
-        cr.set_source_rgba(1.0, 0.0, 0.0, 1.0);
-        cr.arc(cx, cy, radius, 0.0, 2.0 * PI);
-        let _ = cr.fill();
+    let disclaimer = Label::builder()
+        .label(
+            "Values are approximate; actual VRAM use and performance vary by model, resolution, parameter count, and hardware configuration.",
+        )
+        .halign(Align::Start)
+        .wrap(true)
+        .css_classes(vec![String::from("dim-label"), String::from("legend-text")])
+        .use_markup(true)
+        .build();
+    disclaimer.set_markup("<i>Values are approximate; actual VRAM use and performance vary by model, resolution, parameter count, and hardware configuration.</i>");
+    legend.append(&disclaimer);
 
-        cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
-        cr.move_to(cx + radius * 0.55, cy);
-        cr.line_to(cx - radius * 0.3, cy - radius * 0.65);
-        cr.line_to(cx - radius * 0.3, cy + radius * 0.65);
-        cr.close_path();
-        let _ = cr.fill();
-    })
-}
-
-fn create_github_icon() -> Image {
-    create_surface_image(48, 48, |cr, width, height| {
-        let radius = (width.min(height)) * 0.45;
-        let cx = width / 2.0;
-        let cy = height / 2.0;
-
-        cr.set_source_rgba(
-            0x17 as f64 / 255.0,
-            0x15 as f64 / 255.0,
-            0x15 as f64 / 255.0,
-            1.0,
-        );
-        cr.arc(cx, cy, radius, 0.0, 2.0 * PI);
-        let _ = cr.fill();
-
-        cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
-        cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-        cr.set_font_size(radius * 0.9);
-        let text = "GH";
-        if let Ok(extents) = cr.text_extents(text) {
-            let width = extents.width();
-            let height = extents.height();
-            let x_bearing = extents.x_bearing();
-            let y_bearing = extents.y_bearing();
-            let x = cx - (width / 2.0 + x_bearing);
-            let y = cy - (height / 2.0 + y_bearing);
-            cr.move_to(x, y);
-            let _ = cr.show_text(text);
-        }
-    })
-}
-
-fn create_surface_image<F>(width: i32, height: i32, draw: F) -> Image
-where
-    F: Fn(&cairo::Context, f64, f64),
-{
-    let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height)
-        .unwrap_or_else(|err| {
-            panic!("failed to create Cairo surface ({width}x{height}): {err}");
-        });
-    let cr = cairo::Context::new(&surface).expect("failed to create Cairo context");
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-    let _ = cr.paint();
-    draw(&cr, width as f64, height as f64);
-    surface.flush();
-
-    let stride = surface.stride();
-    let width_px = surface.width();
-    let height_px = surface.height();
-    let copy_len = (stride as usize) * (height_px as usize);
-    let data_vec = surface
-        .data()
-        .map(|data| data.as_ref().to_vec())
-        .unwrap_or_else(|_| vec![0; copy_len]);
-
-    let pixbuf = Pixbuf::from_mut_slice(
-        data_vec,
-        Colorspace::Rgb,
-        true,
-        8,
-        width_px,
-        height_px,
-        stride,
-    );
-    let texture = gdk::Texture::for_pixbuf(&pixbuf);
-    Image::from_paintable(Some(&texture))
+    legend
 }
 
 #[derive(Clone, Debug)]
