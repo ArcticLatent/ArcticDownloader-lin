@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     fs,
     path::PathBuf,
     rc::Rc,
@@ -12,9 +13,11 @@ use adw::{
 };
 use anyhow::{anyhow, Context, Result};
 use arctic_downloader::model::{
-    LoraDefinition, MasterModel, ModelArtifact, ModelCatalog, ModelVariant, QualityTier,
+    AlwaysGroup, LoraDefinition, MasterModel, ModelArtifact, ModelCatalog, ModelVariant,
     TargetCategory,
 };
+use arctic_downloader::ram::RamTier;
+use arctic_downloader::vram::VramTier;
 
 const APP_ID: &str = "dev.wknd.CatalogAdmin";
 const DEFAULT_CATALOG_PATH: &str = "data/catalog.json";
@@ -45,6 +48,7 @@ struct ArtifactRow {
     container: gtk::Box,
     target_entry: gtk::Entry,
     url_entry: gtk::Entry,
+    ram_combo: Option<gtk::ComboBoxText>,
     sha256: Option<String>,
     size_bytes: Option<u64>,
     license_url: Option<String>,
@@ -61,6 +65,255 @@ struct ArtifactRowPreset {
     sha256: Option<String>,
     size_bytes: Option<u64>,
     license_url: Option<String>,
+    min_ram_tier: Option<RamTier>,
+}
+
+struct ArtifactEditor {
+    container: gtk::Box,
+    add_button: gtk::Button,
+    rows: Rc<RefCell<Vec<ArtifactRow>>>,
+    add_row: Rc<dyn Fn(Option<ArtifactRowPreset>)>,
+}
+
+fn build_artifact_editor(
+    presets: Vec<ArtifactRowPreset>,
+    include_ram_combo: bool,
+) -> ArtifactEditor {
+    let artifacts_list = gtk::Box::new(Orientation::Vertical, 6);
+    artifacts_list.set_hexpand(true);
+
+    let artifacts_box = gtk::Box::new(Orientation::Vertical, 6);
+    artifacts_box.set_hexpand(true);
+    artifacts_box.append(&artifacts_list);
+
+    let add_button = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add artifact entry")
+        .build();
+
+    let rows: Rc<RefCell<Vec<ArtifactRow>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let add_row: Rc<dyn Fn(Option<ArtifactRowPreset>)> = {
+        let artifacts_list = artifacts_list.clone();
+        let rows = rows.clone();
+        Rc::new(move |preset: Option<ArtifactRowPreset>| {
+            let row = gtk::Box::new(Orientation::Horizontal, 6);
+            row.set_spacing(6);
+            row.set_hexpand(true);
+
+            let target_entry = gtk::Entry::new();
+            target_entry.set_placeholder_text(Some("target_category"));
+            target_entry.set_width_chars(18);
+
+            let url_entry = gtk::Entry::new();
+            url_entry.set_placeholder_text(Some("https://huggingface.co/..."));
+            url_entry.set_hexpand(true);
+
+            let remove_button = gtk::Button::builder()
+                .icon_name("list-remove-symbolic")
+                .tooltip_text("Remove artifact")
+                .build();
+
+            row.append(&target_entry);
+            row.append(&url_entry);
+            let mut ram_combo: Option<gtk::ComboBoxText> = None;
+            if include_ram_combo {
+                let combo = gtk::ComboBoxText::new();
+                combo.append(Some("any"), "Any RAM");
+                for tier in RamTier::all() {
+                    combo.append(Some(tier.identifier()), tier.description());
+                }
+                combo.set_active_id(Some("any"));
+                combo.set_hexpand(false);
+                row.append(&combo);
+                ram_combo = Some(combo);
+            }
+            row.append(&remove_button);
+
+            let (
+                target_slug,
+                url_text,
+                sha256,
+                size_bytes,
+                license_url,
+                original_repo,
+                original_path,
+                min_ram_tier,
+            ) = match preset {
+                Some(p) => (
+                    p.target_slug,
+                    p.url,
+                    p.sha256,
+                    p.size_bytes,
+                    p.license_url,
+                    p.repo,
+                    p.path,
+                    p.min_ram_tier,
+                ),
+                None => (
+                    String::new(),
+                    String::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            };
+
+            if !target_slug.is_empty() {
+                target_entry.set_text(&target_slug);
+            }
+            if !url_text.is_empty() {
+                url_entry.set_text(&url_text);
+            }
+            if let (Some(combo), Some(tier)) = (ram_combo.as_ref(), min_ram_tier) {
+                combo.set_active_id(Some(tier.identifier()));
+            }
+
+            let artifact_row = ArtifactRow {
+                container: row.clone(),
+                target_entry: target_entry.clone(),
+                url_entry: url_entry.clone(),
+                ram_combo: ram_combo.clone(),
+                sha256,
+                size_bytes,
+                license_url,
+                original_repo,
+                original_path,
+            };
+            rows.borrow_mut().push(artifact_row);
+
+            let row_clone = row.clone();
+            let rows_remove = rows.clone();
+            remove_button.connect_clicked(move |_| {
+                row_clone.unparent();
+                let ptr = row_clone.as_ptr();
+                rows_remove
+                    .borrow_mut()
+                    .retain(|item| item.container.as_ptr() != ptr);
+            });
+
+            artifacts_list.append(&row);
+            row.show();
+        })
+    };
+
+    for preset in presets {
+        add_row(Some(preset));
+    }
+
+    ArtifactEditor {
+        container: artifacts_box,
+        add_button,
+        rows,
+        add_row,
+    }
+}
+
+fn artifact_presets_from(artifacts: &[ModelArtifact]) -> Vec<ArtifactRowPreset> {
+    artifacts
+        .iter()
+        .map(|artifact| {
+            let url = artifact
+                .direct_url
+                .clone()
+                .or_else(|| build_huggingface_download_url(&artifact.repo, &artifact.path))
+                .unwrap_or_else(|| artifact.repo.clone());
+
+            ArtifactRowPreset {
+                target_slug: artifact.target_category.slug().to_string(),
+                url,
+                repo: Some(artifact.repo.clone()),
+                path: Some(artifact.path.clone()),
+                sha256: artifact.sha256.clone(),
+                size_bytes: artifact.size_bytes,
+                license_url: artifact.license_url.clone(),
+                min_ram_tier: artifact.min_ram_tier,
+            }
+        })
+        .collect()
+}
+
+fn artifacts_from_rows(
+    rows: &[ArtifactRow],
+    overlay: &ToastOverlay,
+    empty_message: &str,
+) -> Option<Vec<ModelArtifact>> {
+    if rows.is_empty() {
+        overlay.add_toast(Toast::new(empty_message));
+        return None;
+    }
+
+    let mut artifacts = Vec::new();
+    for row in rows.iter() {
+        let target_slug = row.target_entry.text().trim().to_ascii_lowercase();
+        if target_slug.is_empty() {
+            overlay.add_toast(Toast::new("Artifact target_category is required."));
+            return None;
+        }
+
+        let target_category = match TargetCategory::from_slug(&target_slug) {
+            Some(category) => category,
+            None => {
+                overlay.add_toast(Toast::new(&format!(
+                    "Unknown target category: {target_slug}"
+                )));
+                return None;
+            }
+        };
+
+        let url_text = row.url_entry.text().trim().to_string();
+        if url_text.is_empty() {
+            overlay.add_toast(Toast::new("Artifact download URL is required."));
+            return None;
+        }
+
+        let parsed = parse_huggingface_download_url(&url_text).or_else(|err| {
+            if let (Some(repo), Some(path)) = (&row.original_repo, &row.original_path) {
+                if url_text == *repo {
+                    Ok((repo.clone(), path.clone()))
+                } else {
+                    Err(err)
+                }
+            } else {
+                Err(err)
+            }
+        });
+
+        let (repo, path) = match parsed {
+            Ok(parts) => parts,
+            Err(err) => {
+                overlay.add_toast(Toast::new(&format!("Invalid Hugging Face URL: {err}")));
+                return None;
+            }
+        };
+
+        let min_ram_tier = row.ram_combo.as_ref().and_then(|combo| {
+            combo.active_id().and_then(|id| {
+                let value = id.as_str();
+                if value == "any" {
+                    None
+                } else {
+                    RamTier::from_identifier(value)
+                }
+            })
+        });
+
+        artifacts.push(ModelArtifact {
+            repo,
+            path,
+            sha256: row.sha256.clone(),
+            size_bytes: row.size_bytes,
+            target_category,
+            license_url: row.license_url.clone(),
+            min_ram_tier,
+            direct_url: Some(url_text),
+        });
+    }
+
+    Some(artifacts)
 }
 
 fn build_admin_ui(app: &Application) -> Result<()> {
@@ -437,6 +690,7 @@ fn edit_model_dialog(
             display_name: String::new(),
             family: String::new(),
             variants: Vec::new(),
+            always: Vec::new(),
         }
     };
 
@@ -490,6 +744,40 @@ fn edit_model_dialog(
     add_row(&form, 2, "Family", &family_entry);
 
     content.append(&form);
+
+    let always_label = gtk::Label::new(Some("Always Artifacts"));
+    always_label.set_halign(Align::Start);
+    always_label.add_css_class("heading");
+    content.append(&always_label);
+
+    let always_state: Rc<RefCell<Vec<AlwaysGroup>>> = Rc::new(RefCell::new(model.always.clone()));
+
+    let always_list = gtk::ListBox::new();
+    always_list.set_selection_mode(SelectionMode::None);
+    refresh_always_rows(&always_list, &always_state, overlay, &dialog);
+
+    let always_scroller = gtk::ScrolledWindow::builder()
+        .min_content_height(160)
+        .child(&always_list)
+        .build();
+    content.append(&always_scroller);
+
+    let add_always_button = gtk::Button::with_label("Add Always Group");
+    add_always_button.set_margin_top(12);
+    content.append(&add_always_button);
+
+    {
+        let always_state = always_state.clone();
+        let always_list = always_list.clone();
+        let overlay = overlay.clone();
+        let dialog = dialog.clone();
+        add_always_button.connect_clicked(move |_| {
+            if let Some(group) = edit_always_group_dialog(None, &dialog, overlay.clone()) {
+                always_state.borrow_mut().push(group);
+                refresh_always_rows(&always_list, &always_state, &overlay, &dialog);
+            }
+        });
+    }
 
     let variants_label = gtk::Label::new(Some("Variants"));
     variants_label.set_halign(Align::Start);
@@ -555,10 +843,38 @@ fn edit_model_dialog(
             return Ok(());
         }
 
+        let always_groups = always_state.borrow();
+        let mut seen_ids = HashSet::new();
+        for group in always_groups.iter() {
+            let key = group.id.trim();
+            if key.is_empty() {
+                overlay.add_toast(Toast::new(
+                    "Each always group needs a field name (e.g., vae, loras).",
+                ));
+                return Ok(());
+            }
+            if !seen_ids.insert(key.to_string()) {
+                overlay.add_toast(Toast::new("Each always group ID must be unique."));
+                return Ok(());
+            }
+            if group.artifacts.is_empty() {
+                let label = group.label.as_deref().unwrap_or(key);
+                overlay.add_toast(Toast::new(&format!(
+                    "Always group \"{}\" needs at least one artifact.",
+                    label
+                )));
+                return Ok(());
+            }
+        }
+
         model.id = id;
         model.display_name = display_name;
         model.family = family;
         model.variants = variants.clone();
+        model.always = always_groups.clone();
+
+        drop(variants);
+        drop(always_groups);
 
         let mut state_mut = state.borrow_mut();
         if let Some(i) = index {
@@ -575,6 +891,186 @@ fn edit_model_dialog(
     }
 
     Ok(())
+}
+
+fn refresh_always_rows(
+    list: &gtk::ListBox,
+    always_state: &Rc<RefCell<Vec<AlwaysGroup>>>,
+    overlay: &ToastOverlay,
+    parent: &gtk::Dialog,
+) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+
+    let groups = always_state.borrow().clone();
+
+    for (index, group) in groups.iter().enumerate() {
+        let title = group.label.as_deref().unwrap_or(&group.id);
+        let subtitle = format!("{} • {} artifact(s)", group.id, group.artifacts.len());
+
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(&subtitle)
+            .activatable(false)
+            .build();
+
+        let edit_button = gtk::Button::with_label("Edit");
+        edit_button.set_halign(Align::Center);
+        row.add_suffix(&edit_button);
+
+        let delete_button = gtk::Button::with_label("Remove");
+        delete_button.set_halign(Align::Center);
+        row.add_suffix(&delete_button);
+
+        {
+            let always_state = always_state.clone();
+            let list = list.clone();
+            let overlay = overlay.clone();
+            let parent = parent.clone();
+            let preset = group.clone();
+            let idx = index;
+            edit_button.connect_clicked(move |_| {
+                if let Some(updated) =
+                    edit_always_group_dialog(Some(preset.clone()), &parent, overlay.clone())
+                {
+                    if let Some(entry) = always_state.borrow_mut().get_mut(idx) {
+                        *entry = updated;
+                    }
+                    refresh_always_rows(&list, &always_state, &overlay, &parent);
+                }
+            });
+        }
+
+        {
+            let always_state = always_state.clone();
+            let list = list.clone();
+            let overlay = overlay.clone();
+            let parent = parent.clone();
+            let idx = index;
+            delete_button.connect_clicked(move |_| {
+                if idx < always_state.borrow().len() {
+                    always_state.borrow_mut().remove(idx);
+                    overlay.add_toast(Toast::new("Always group removed."));
+                    refresh_always_rows(&list, &always_state, &overlay, &parent);
+                }
+            });
+        }
+
+        list.append(&row);
+    }
+}
+
+fn edit_always_group_dialog(
+    preset: Option<AlwaysGroup>,
+    parent: &gtk::Dialog,
+    overlay: ToastOverlay,
+) -> Option<AlwaysGroup> {
+    let group = preset.unwrap_or(AlwaysGroup {
+        id: String::new(),
+        label: None,
+        artifacts: Vec::new(),
+    });
+
+    let dialog = gtk::Dialog::builder()
+        .title("Always Group")
+        .transient_for(parent)
+        .modal(true)
+        .default_width(720)
+        .default_height(520)
+        .build();
+    dialog.set_hide_on_close(true);
+    dialog.set_destroy_with_parent(true);
+
+    let title_label = gtk::Label::new(Some("Always Group"));
+    title_label.add_css_class("title-2");
+    let header = HeaderBar::new();
+    header.set_title_widget(Some(&title_label));
+    header.set_show_end_title_buttons(true);
+    dialog.set_titlebar(Some(&header));
+
+    let content = dialog.content_area();
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_spacing(12);
+
+    let form = gtk::Grid::builder()
+        .column_spacing(12)
+        .row_spacing(12)
+        .hexpand(true)
+        .build();
+
+    let id_entry = gtk::Entry::new();
+    id_entry.set_placeholder_text(Some("vae, loras, upscale_models…"));
+    id_entry.set_text(&group.id);
+    add_row(&form, 0, "Field Key", &id_entry);
+
+    let label_entry = gtk::Entry::new();
+    if let Some(label) = &group.label {
+        label_entry.set_text(label);
+    }
+    add_row(&form, 1, "Display Label (optional)", &label_entry);
+
+    content.append(&form);
+
+    let artifacts_label = gtk::Label::new(Some(
+        "Always-on artifacts (downloaded for every variant of this model).",
+    ));
+    artifacts_label.set_halign(Align::Start);
+    artifacts_label.set_wrap(true);
+    content.append(&artifacts_label);
+
+    let ArtifactEditor {
+        container: artifacts_box,
+        add_button: add_artifact_button,
+        rows: artifact_rows,
+        add_row: add_artifact_row,
+    } = build_artifact_editor(artifact_presets_from(&group.artifacts), true);
+
+    content.append(&add_artifact_button);
+    content.append(&artifacts_box);
+
+    {
+        let add_artifact_row = add_artifact_row.clone();
+        add_artifact_button.connect_clicked(move |_| {
+            add_artifact_row(None);
+        });
+    }
+
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Save", ResponseType::Ok);
+
+    let response = run_dialog(&dialog);
+    if response != ResponseType::Ok {
+        return None;
+    }
+
+    let id = id_entry.text().trim().to_string();
+    if id.is_empty() {
+        overlay.add_toast(Toast::new("Provide a field key for this always group."));
+        return None;
+    }
+
+    let label = entry_to_option(&label_entry);
+
+    let artifact_entries = artifact_rows.borrow();
+    let artifacts = match artifacts_from_rows(
+        &artifact_entries,
+        &overlay,
+        "Add at least one artifact for this always group.",
+    ) {
+        Some(values) => values,
+        None => return None,
+    };
+    drop(artifact_entries);
+
+    Some(AlwaysGroup {
+        id,
+        label,
+        artifacts,
+    })
 }
 
 fn edit_lora_dialog(
@@ -737,8 +1233,8 @@ fn refresh_variant_rows(
         let row = adw::ActionRow::builder()
             .title(&variant.selection_label())
             .subtitle(&format!(
-                "Requires ≥ {} GB • {} artifact(s)",
-                variant.min_vram_gb,
+                "{} • {} artifact(s)",
+                variant.tier.description(),
                 variant.artifacts.len()
             ))
             .activatable(false)
@@ -809,8 +1305,7 @@ fn edit_variant_dialog(
 ) -> Option<ModelVariant> {
     let variant = existing.unwrap_or_else(|| ModelVariant {
         id: String::new(),
-        quality_tier: QualityTier::Medium,
-        min_vram_gb: 0,
+        tier: VramTier::TierC,
         model_size: None,
         quantization: None,
         note: None,
@@ -852,37 +1347,30 @@ fn edit_variant_dialog(
     id_entry.set_text(&variant.id);
     add_row(&form, 0, "Variant ID", &id_entry);
 
-    let min_vram_entry = gtk::Entry::new();
-    if variant.min_vram_gb > 0 {
-        min_vram_entry.set_text(&variant.min_vram_gb.to_string());
+    let tier_combo = gtk::ComboBoxText::new();
+    for tier in VramTier::all() {
+        tier_combo.append(Some(tier.identifier()), tier.description());
     }
-    add_row(&form, 1, "Min VRAM (GB)", &min_vram_entry);
-
-    let quality_combo = gtk::ComboBoxText::new();
-    for tier in quality_tiers() {
-        let label = tier.label();
-        quality_combo.append(Some(label), label);
-    }
-    quality_combo.set_active_id(Some(variant.quality_tier.label()));
-    add_row(&form, 2, "Quality Tier", &quality_combo);
+    tier_combo.set_active_id(Some(variant.tier.identifier()));
+    add_row(&form, 1, "Required VRAM Tier", &tier_combo);
 
     let size_entry = gtk::Entry::new();
     if let Some(size) = &variant.model_size {
         size_entry.set_text(size);
     }
-    add_row(&form, 3, "Model Size", &size_entry);
+    add_row(&form, 2, "Model Size", &size_entry);
 
     let quant_entry = gtk::Entry::new();
     if let Some(quant) = &variant.quantization {
         quant_entry.set_text(quant);
     }
-    add_row(&form, 4, "Quantization", &quant_entry);
+    add_row(&form, 3, "Quantization", &quant_entry);
 
     let note_entry = gtk::Entry::new();
     if let Some(note) = &variant.note {
         note_entry.set_text(note);
     }
-    add_row(&form, 5, "Note", &note_entry);
+    add_row(&form, 4, "Note", &note_entry);
 
     content.append(&form);
 
@@ -891,114 +1379,15 @@ fn edit_variant_dialog(
     artifacts_label.set_wrap(true);
     content.append(&artifacts_label);
 
-    let artifact_rows: Rc<RefCell<Vec<ArtifactRow>>> = Rc::new(RefCell::new(Vec::new()));
-    let artifacts_list = gtk::Box::new(Orientation::Vertical, 6);
-    artifacts_list.set_hexpand(true);
-
-    let artifacts_box = gtk::Box::new(Orientation::Vertical, 6);
-    artifacts_box.append(&artifacts_list);
-
-    let add_artifact_button = gtk::Button::builder()
-        .icon_name("list-add-symbolic")
-        .tooltip_text("Add artifact entry")
-        .build();
+    let ArtifactEditor {
+        container: artifacts_box,
+        add_button: add_artifact_button,
+        rows: artifact_rows,
+        add_row: add_artifact_row,
+    } = build_artifact_editor(artifact_presets_from(&variant.artifacts), false);
 
     content.append(&add_artifact_button);
     content.append(&artifacts_box);
-
-    let add_artifact_row: Rc<dyn Fn(Option<ArtifactRowPreset>)> = {
-        let artifacts_list = artifacts_list.clone();
-        let artifact_rows = artifact_rows.clone();
-        Rc::new(move |preset: Option<ArtifactRowPreset>| {
-            let row = gtk::Box::new(Orientation::Horizontal, 6);
-            row.set_spacing(6);
-            row.set_hexpand(true);
-
-            let target_entry = gtk::Entry::new();
-            target_entry.set_placeholder_text(Some("target_category"));
-            target_entry.set_width_chars(18);
-
-            let url_entry = gtk::Entry::new();
-            url_entry.set_placeholder_text(Some("https://huggingface.co/..."));
-            url_entry.set_hexpand(true);
-
-            let remove_button = gtk::Button::builder()
-                .icon_name("list-remove-symbolic")
-                .tooltip_text("Remove artifact")
-                .build();
-
-            row.append(&target_entry);
-            row.append(&url_entry);
-            row.append(&remove_button);
-
-            let (
-                target_slug,
-                url_text,
-                sha256,
-                size_bytes,
-                license_url,
-                original_repo,
-                original_path,
-            ) = match preset {
-                Some(p) => (
-                    p.target_slug,
-                    p.url,
-                    p.sha256,
-                    p.size_bytes,
-                    p.license_url,
-                    p.repo,
-                    p.path,
-                ),
-                None => (String::new(), String::new(), None, None, None, None, None),
-            };
-
-            if !target_slug.is_empty() {
-                target_entry.set_text(&target_slug);
-            }
-            if !url_text.is_empty() {
-                url_entry.set_text(&url_text);
-            }
-
-            let artifact_row = ArtifactRow {
-                container: row.clone(),
-                target_entry: target_entry.clone(),
-                url_entry: url_entry.clone(),
-                sha256,
-                size_bytes,
-                license_url,
-                original_repo,
-                original_path,
-            };
-            artifact_rows.borrow_mut().push(artifact_row);
-
-            let row_clone = row.clone();
-            let artifact_rows_remove = artifact_rows.clone();
-            remove_button.connect_clicked(move |_| {
-                row_clone.unparent();
-                let row_ptr = row_clone.as_ptr();
-                artifact_rows_remove
-                    .borrow_mut()
-                    .retain(|item| item.container.as_ptr() != row_ptr);
-            });
-
-            artifacts_list.append(&row);
-            row.show();
-        })
-    };
-
-    for artifact in &variant.artifacts {
-        let url = build_huggingface_download_url(&artifact.repo, &artifact.path)
-            .unwrap_or_else(|| artifact.repo.clone());
-        add_artifact_row(Some(ArtifactRowPreset {
-            target_slug: artifact.target_category.slug().to_string(),
-            url,
-            repo: Some(artifact.repo.clone()),
-            path: Some(artifact.path.clone()),
-            sha256: artifact.sha256.clone(),
-            size_bytes: artifact.size_bytes,
-            license_url: artifact.license_url.clone(),
-        }));
-    }
 
     {
         let add_artifact_row = add_artifact_row.clone();
@@ -1021,31 +1410,19 @@ fn edit_variant_dialog(
         return None;
     }
 
-    let min_vram: u32 = match min_vram_entry.text().trim() {
-        text if text.is_empty() => 0,
-        text => match text.parse() {
-            Ok(value) => value,
-            Err(_) => {
-                overlay.add_toast(Toast::new(
-                    "Minimum VRAM must be a whole number of gigabytes.",
-                ));
-                return None;
-            }
-        },
-    };
-
-    let quality_tier = quality_combo
+    let tier = tier_combo
         .active_id()
-        .and_then(|id| parse_quality_tier(id.as_str()))
+        .as_ref()
+        .and_then(|id| VramTier::from_identifier(id.as_str()))
         .or_else(|| {
-            quality_combo
-                .active_text()
-                .and_then(|text| parse_quality_tier(text.as_str()))
+            tier_combo
+                .active()
+                .and_then(|idx| VramTier::all().get(idx as usize).copied())
         });
-    let quality_tier = match quality_tier {
-        Some(tier) => tier,
+    let tier = match tier {
+        Some(value) => value,
         None => {
-            overlay.add_toast(Toast::new("Select a quality tier."));
+            overlay.add_toast(Toast::new("Select a required VRAM tier."));
             return None;
         }
     };
@@ -1055,94 +1432,24 @@ fn edit_variant_dialog(
     let note = entry_to_option(&note_entry);
 
     let artifact_entries = artifact_rows.borrow();
-    let mut artifacts = Vec::new();
-    if artifact_entries.is_empty() {
-        overlay.add_toast(Toast::new("Add at least one artifact for this variant."));
-        return None;
-    }
-
-    for row in artifact_entries.iter() {
-        let target_slug = row.target_entry.text().trim().to_ascii_lowercase();
-        if target_slug.is_empty() {
-            overlay.add_toast(Toast::new("Artifact target_category is required."));
-            return None;
-        }
-
-        let target_category = match TargetCategory::from_slug(&target_slug) {
-            Some(category) => category,
-            None => {
-                overlay.add_toast(Toast::new(&format!(
-                    "Unknown target category: {target_slug}"
-                )));
-                return None;
-            }
-        };
-
-        let url_text = row.url_entry.text().trim().to_string();
-        if url_text.is_empty() {
-            overlay.add_toast(Toast::new("Artifact download URL is required."));
-            return None;
-        }
-
-        let parsed = parse_huggingface_download_url(&url_text).or_else(|err| {
-            if let (Some(repo), Some(path)) = (&row.original_repo, &row.original_path) {
-                if url_text == *repo {
-                    Ok((repo.clone(), path.clone()))
-                } else {
-                    Err(err)
-                }
-            } else {
-                Err(err)
-            }
-        });
-
-        let (repo, path) = match parsed {
-            Ok(parts) => parts,
-            Err(err) => {
-                overlay.add_toast(Toast::new(&format!("Invalid Hugging Face URL: {err}")));
-                return None;
-            }
-        };
-
-        artifacts.push(ModelArtifact {
-            repo,
-            path,
-            sha256: row.sha256.clone(),
-            size_bytes: row.size_bytes,
-            target_category,
-            license_url: row.license_url.clone(),
-            direct_url: Some(url_text),
-        });
-    }
+    let artifacts = match artifacts_from_rows(
+        &artifact_entries,
+        &overlay,
+        "Add at least one artifact for this variant.",
+    ) {
+        Some(values) => values,
+        None => return None,
+    };
+    drop(artifact_entries);
 
     Some(ModelVariant {
         id,
-        quality_tier,
-        min_vram_gb: min_vram,
+        tier,
         model_size,
         quantization,
         note,
         artifacts,
     })
-}
-
-fn quality_tiers() -> [QualityTier; 4] {
-    [
-        QualityTier::Ultra,
-        QualityTier::High,
-        QualityTier::Medium,
-        QualityTier::Low,
-    ]
-}
-
-fn parse_quality_tier(label: &str) -> Option<QualityTier> {
-    match label {
-        "Ultra" => Some(QualityTier::Ultra),
-        "High" => Some(QualityTier::High),
-        "Medium" => Some(QualityTier::Medium),
-        "Low" => Some(QualityTier::Low),
-        _ => None,
-    }
 }
 
 fn entry_to_option(entry: &gtk::Entry) -> Option<String> {

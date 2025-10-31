@@ -1,16 +1,17 @@
 # Arctic Downloader
 
 Arctic Downloader is a Rust/libadwaita desktop companion that helps ComfyUI users pull the correct
-model variants (and their auxiliary files) for the GPU VRAM they have on hand. Viewers of the
-accompanying tutorial series can pick a “master model”, pick their VRAM tier, point the app at their
-ComfyUI install, and let the app grab the curated artifacts from Hugging Face into the correct
-`ComfyUI/models/*` subfolders.
+model variants (and their auxiliary files) for the GPU VRAM and system RAM they have on hand.
+Viewers of the accompanying tutorial series can pick a “master model”, choose their GPU VRAM + RAM
+tiers, point the app at their ComfyUI install, and let the app grab the curated artifacts from
+Hugging Face into the correct `ComfyUI/models/*` subfolders.
 
 ## Current Status
 
 This repository currently contains the project scaffolding:
 
-- Rust GTK/libadwaita application shell with drop-down selectors and placeholder actions.
+- Rust GTK/libadwaita application shell with GPU VRAM and system RAM selectors plus placeholder
+  actions.
 - Async services for future download management and catalog handling.
 - A versioned catalog template (`data/catalog.json`) describing master models, variants, artifacts,
   and ComfyUI destination categories.
@@ -30,8 +31,8 @@ This repository currently contains the project scaffolding:
    cargo check
    cargo run
    ```
-3. The app will launch a placeholder UI with model and VRAM pickers. Download actions are stubbed out
-   until the network pipeline is implemented.
+3. The app will launch a placeholder UI with master-model, GPU VRAM, and system RAM pickers.
+   Download actions are stubbed out until the network pipeline is implemented.
 
 ### Catalog Admin Tool
 
@@ -41,9 +42,9 @@ Before cutting a new release you can curate `data/catalog.json` via the private 
 cargo run --bin catalog_admin
 ```
 
-The tool lists existing models, lets you add/edit/delete entries, and captures optional artifacts
-(VAE, text encoders, CLIP, LoRAs, etc.) through checkbox-controlled sections. Saving writes directly
-to `data/catalog.json`.
+The tool lists existing models, lets you add/edit/delete entries, organise “always-on” artifact
+groups per model, and assign per-variant artifacts (with optional RAM tier gating). Saving writes
+directly to `data/catalog.json`.
 
 ### Formatting & Lints
 
@@ -72,8 +73,10 @@ flatpak run dev.wknd.ArcticDownloader
 
 The app ships and trusts the checked-in `data/catalog.json`. Each entry maps:
 
-- `models[].variants[]` to VRAM requirements and qualitative tiers.
-- `artifacts[]` to Hugging Face repositories, file paths, and ComfyUI destination categories.
+- `models[].always[]` to named groups of artifacts that are always downloaded for a model.
+- `models[].variants[]` to minimum VRAM requirements, qualitative tiers, and optional RAM gates.
+- `artifacts[]` to Hugging Face repositories, file paths, ComfyUI destination categories, and
+  optional RAM tier requirements.
 
 Update this file between tutorial episodes to control which exact files viewers receive. Future work
 will add signature verification and remote catalog refreshes.

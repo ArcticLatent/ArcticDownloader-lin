@@ -1,4 +1,10 @@
-use crate::{catalog::CatalogService, config::ConfigStore, download::DownloadManager, ui};
+use crate::{
+    catalog::CatalogService,
+    config::ConfigStore,
+    download::DownloadManager,
+    ram::{detect_ram_profile, RamProfile, RamTier},
+    ui,
+};
 use adw::glib;
 use adw::{gio::ApplicationFlags, prelude::*, Application};
 use anyhow::{anyhow, Result};
@@ -13,6 +19,17 @@ pub struct AppContext {
     pub config: Arc<ConfigStore>,
     pub catalog: Arc<CatalogService>,
     pub downloads: Arc<DownloadManager>,
+    pub ram_profile: Option<RamProfile>,
+}
+
+impl AppContext {
+    pub fn ram_tier(&self) -> Option<RamTier> {
+        self.ram_profile.map(|profile| profile.tier)
+    }
+
+    pub fn total_ram_gb(&self) -> Option<f64> {
+        self.ram_profile.map(|profile| profile.total_gb)
+    }
 }
 
 pub struct ArcticDownloaderApp {
@@ -37,12 +54,14 @@ impl ArcticDownloaderApp {
         let config = Arc::new(ConfigStore::new()?);
         let catalog = Arc::new(CatalogService::new()?);
         let downloads = Arc::new(DownloadManager::new(runtime.clone()));
+        let ram_profile = detect_ram_profile();
 
         let context = AppContext {
             runtime,
             config,
             catalog,
             downloads,
+            ram_profile,
         };
 
         Ok(Self {

@@ -1,7 +1,8 @@
 use crate::{
     app::AppContext,
-    download::{CivitaiPreview, DownloadSignal, DownloadStatus},
+    download::{CivitaiPreview, DownloadError, DownloadSignal, DownloadStatus},
     model::{LoraDefinition, ResolvedModel},
+    ram::RamTier,
     vram::VramTier,
 };
 use adw::gio;
@@ -240,9 +241,20 @@ fn build_model_page(
 
     let vram_dropdown = ComboBoxText::new();
     for tier in VramTier::all() {
-        vram_dropdown.append(Some(&tier.gigabytes().to_string()), &tier.to_string());
+        vram_dropdown.append(Some(tier.identifier()), tier.description());
     }
     vram_dropdown.set_active(Some(0));
+
+    let ram_dropdown = ComboBoxText::new();
+    for tier in RamTier::all() {
+        ram_dropdown.append(Some(tier.identifier()), tier.description());
+    }
+    if let Some(tier) = context.ram_tier() {
+        ram_dropdown.set_active_id(Some(tier.identifier()));
+    }
+    if ram_dropdown.active().is_none() {
+        ram_dropdown.set_active(Some(0));
+    }
 
     let variant_dropdown = ComboBoxText::new();
     variant_dropdown.set_sensitive(false);
@@ -342,8 +354,8 @@ fn build_model_page(
 
             let tier = vram_dropdown
                 .active_id()
-                .and_then(|id| id.parse::<u32>().ok())
-                .and_then(VramTier::from_gigabytes);
+                .as_ref()
+                .and_then(|id| VramTier::from_identifier(id.as_str()));
             let model_id = model_dropdown.active_id().map(|id| id.to_string());
 
             match (model_id, tier) {
@@ -395,13 +407,14 @@ fn build_model_page(
         let overlay = overlay.clone();
         let comfy_path_entry = comfy_path_entry.clone();
         let resolved_variant = Rc::clone(&resolved_variant);
+        let ram_dropdown = ram_dropdown.clone();
         let progress_box = progress_box_clone.clone();
         let progress_label = progress_label_clone.clone();
         let progress_bar = progress_bar_clone.clone();
         let status_label = status_label_clone_for_button.clone();
         let download_button_clone = download_button.clone();
         download_button.connect_clicked(move |_| {
-            let Some(resolved) = resolved_variant.borrow().clone() else {
+            let Some(mut resolved) = resolved_variant.borrow().clone() else {
                 overlay.add_toast(Toast::new("Select a variant before downloading."));
                 return;
             };
@@ -414,21 +427,50 @@ fn build_model_page(
 
             let comfy_path = PathBuf::from(comfy_text.as_str());
 
-            let all_present = resolved.variant.artifacts.iter().all(|artifact| {
+            let ram_tier = ram_dropdown
+                .active_id()
+                .as_ref()
+                .and_then(|id| RamTier::from_identifier(id.as_str()))
+                .or_else(|| {
+                    ram_dropdown
+                        .active()
+                        .and_then(|idx| RamTier::all().get(idx as usize).copied())
+                })
+                .or_else(|| context.ram_tier());
+
+            let plan_artifacts = resolved.artifacts_for_download(ram_tier);
+
+            if plan_artifacts.is_empty() {
+                overlay.add_toast(Toast::new(
+                    "No artifacts match the selected RAM tier for this variant.",
+                ));
+                return;
+            }
+
+            let all_present = plan_artifacts.iter().all(|artifact| {
                 comfy_path
                     .join(artifact.target_category.comfyui_subdir())
+                    .join(resolved.master.id.as_str())
                     .join(artifact.file_name())
                     .exists()
             });
 
             if all_present {
                 let message = format!(
-                    "All artifacts for {} are already downloaded.",
+                    "All artifacts for {} are already downloaded for the selected GPU/RAM tier.",
                     resolved.master.display_name
                 );
                 overlay.add_toast(Toast::new(&message));
+                progress_box.set_visible(true);
+                progress_label.set_text(&message);
+                progress_bar.set_fraction(1.0);
+                progress_bar.set_text(Some("100%"));
+                progress_bar.set_show_text(true);
+                status_label.set_text(&message);
                 return;
             }
+
+            resolved.variant.artifacts = plan_artifacts;
 
             let downloads = context.downloads.clone();
             let overlay_clone = overlay.clone();
@@ -625,6 +667,7 @@ fn build_model_page(
 
     column.append(&labelled_row("Master Model", &model_dropdown));
     column.append(&labelled_row("GPU VRAM", &vram_dropdown));
+    column.append(&labelled_row("System RAM", &ram_dropdown));
     column.append(&labelled_row("Variant / Quantization", &variant_dropdown));
     column.append(&labelled_row("ComfyUI Folder", &comfy_path_entry));
 
@@ -808,6 +851,15 @@ fn build_lora_page(
     metadata_box.append(&metadata_status);
     metadata_box.append(&metadata_picture);
 
+    let metadata_creator_label = Label::builder()
+        .use_markup(true)
+        .halign(Align::Start)
+        .wrap(true)
+        .css_classes(vec![String::from("legend-text")])
+        .build();
+    metadata_creator_label.set_visible(false);
+    metadata_box.append(&metadata_creator_label);
+
     let metadata_triggers_label = Label::builder()
         .label("Trigger Words")
         .halign(Align::Start)
@@ -850,6 +902,7 @@ fn build_lora_page(
         let metadata_picture = metadata_picture.clone();
         let metadata_triggers = metadata_triggers.clone();
         let metadata_triggers_label = metadata_triggers_label.clone();
+        let metadata_creator_label = metadata_creator_label.clone();
         let metadata_row = metadata_row.clone();
         let current_preview_request = Rc::clone(&current_preview_request);
         let downloads = downloads_for_preview.clone();
@@ -866,6 +919,7 @@ fn build_lora_page(
             clear_flow_box(&metadata_triggers);
             metadata_triggers.set_visible(false);
             metadata_triggers_label.set_visible(false);
+            metadata_creator_label.set_visible(false);
             metadata_status.set_visible(false);
             metadata_row.set_visible(false);
             *current_preview_request.borrow_mut() = None;
@@ -897,6 +951,7 @@ fn build_lora_page(
             let metadata_picture_clone = metadata_picture.clone();
             let metadata_triggers_clone = metadata_triggers.clone();
             let metadata_triggers_label_clone = metadata_triggers_label.clone();
+            let metadata_creator_label_clone = metadata_creator_label.clone();
             let metadata_row_clone = metadata_row.clone();
             let current_preview_request_clone = Rc::clone(&current_preview_request);
             let downloads = downloads.clone();
@@ -923,6 +978,28 @@ fn build_lora_page(
                         metadata_picture_clone.set_visible(false);
                         if let Some(media) = active_media_clone.borrow_mut().take() {
                             media.set_playing(false);
+                        }
+
+                        metadata_creator_label_clone.set_visible(false);
+                        if let Some(username_raw) = metadata
+                            .creator_username
+                            .as_deref()
+                            .filter(|s| !s.is_empty())
+                        {
+                            let link_raw = metadata
+                                .creator_link
+                                .clone()
+                                .filter(|link| !link.is_empty())
+                                .unwrap_or_else(|| {
+                                    format!("https://civitai.com/user/{username_raw}")
+                                });
+                            let escaped_username = gtk::glib::markup_escape_text(username_raw);
+                            let escaped_link = gtk::glib::markup_escape_text(&link_raw);
+                            metadata_creator_label_clone.set_markup(&format!(
+                                "Creator: <a href=\"{escaped_link}\">{escaped_username}</a>"
+                            ));
+                            metadata_creator_label_clone.set_visible(true);
+                            has_content = true;
                         }
 
                         if let Some(preview) = metadata.preview {
@@ -991,6 +1068,23 @@ fn build_lora_page(
                         {
                             return;
                         }
+                        if let Some(DownloadError::Unauthorized) =
+                            err.downcast_ref::<DownloadError>()
+                        {
+                            metadata_status_clone.set_text("You are not authorized to view previews. Please paste your Civitai API token above, save it, and try again.");
+                            metadata_status_clone.set_visible(true);
+                            metadata_row_clone.set_visible(true);
+                            metadata_picture_clone.set_paintable(Option::<&gdk::Texture>::None);
+                            metadata_picture_clone.set_visible(false);
+                            if let Some(media) = active_media_clone.borrow_mut().take() {
+                                media.set_playing(false);
+                            }
+                            clear_flow_box(&metadata_triggers_clone);
+                            metadata_triggers_clone.set_visible(false);
+                            metadata_triggers_label_clone.set_visible(false);
+                            metadata_creator_label_clone.set_visible(false);
+                            return;
+                        }
                         metadata_picture_clone.set_paintable(Option::<&gdk::Texture>::None);
                         metadata_picture_clone.set_visible(false);
                         if let Some(media) = active_media_clone.borrow_mut().take() {
@@ -999,6 +1093,7 @@ fn build_lora_page(
                         clear_flow_box(&metadata_triggers_clone);
                         metadata_triggers_clone.set_visible(false);
                         metadata_triggers_label_clone.set_visible(false);
+                        metadata_creator_label_clone.set_visible(false);
                         metadata_status_clone.set_text(&format!("Failed to load preview: {err}"));
                         metadata_status_clone.set_visible(true);
                         metadata_row_clone.set_visible(true);
@@ -1017,6 +1112,7 @@ fn build_lora_page(
                         clear_flow_box(&metadata_triggers_clone);
                         metadata_triggers_clone.set_visible(false);
                         metadata_triggers_label_clone.set_visible(false);
+                        metadata_creator_label_clone.set_visible(false);
                         metadata_status_clone.set_text(&format!("Preview task failed: {join_err}"));
                         metadata_status_clone.set_visible(true);
                         metadata_row_clone.set_visible(true);
@@ -1289,30 +1385,45 @@ fn build_lora_page(
         let status_label_async = status_label_for_download.clone();
         let download_button_async = download_button_for_download.clone();
         adw::glib::MainContext::default().spawn_local(async move {
-            let start_message = format!("Downloading {lora_name}…");
-            overlay_clone.add_toast(Toast::new(&start_message));
-
             let handle = downloads.download_lora(comfy_path, lora, civitai_token, progress_sender);
             match handle.await {
                 Ok(Ok(outcome)) => {
-                    progress_bar_async.set_fraction(1.0);
-                    progress_bar_async.set_text(Some("100%"));
-                    progress_label_async.set_text("LoRA download complete.");
-                    progress_box_async.set_visible(false);
                     download_button_async.set_sensitive(true);
-                    status_label_async.set_text("LoRA download complete.");
-
-                    let toast = match outcome.status {
+                    match outcome.status {
                         DownloadStatus::Downloaded => {
-                            format!("Saved {}", outcome.destination.display())
+                            progress_bar_async.set_fraction(1.0);
+                            progress_bar_async.set_text(Some("100%"));
+                            progress_label_async.set_text("LoRA download complete.");
+                            progress_box_async.set_visible(false);
+                            status_label_async.set_text("LoRA download complete.");
+                            let toast = format!("Saved {}", outcome.destination.display());
+                            overlay_clone.add_toast(Toast::new(&toast));
                         }
                         DownloadStatus::SkippedExisting => {
-                            format!("Skipped existing {}", outcome.destination.display())
+                            let message = "You already downloaded this LoRA.";
+                            progress_label_async.set_text(message);
+                            progress_bar_async.set_fraction(0.0);
+                            progress_bar_async.set_text(Some("Already downloaded"));
+                            progress_box_async.set_visible(false);
+                            status_label_async.set_text(message);
+                            overlay_clone.add_toast(Toast::new(message));
                         }
-                    };
-                    overlay_clone.add_toast(Toast::new(&toast));
+                    }
                 }
                 Ok(Err(err)) => {
+                    if let Some(DownloadError::Unauthorized) = err.downcast_ref::<DownloadError>()
+                    {
+                        let message = "You are not authorized to download. Please paste your Civitai API token above, save it, and try again.";
+                        progress_label_async.set_text(message);
+                        progress_bar_async.set_fraction(0.0);
+                        progress_bar_async.set_text(Some("Unauthorized"));
+                        progress_box_async.set_visible(true);
+                        download_button_async.set_sensitive(true);
+                        status_label_async.set_text(message);
+                        overlay_clone.add_toast(Toast::new(message));
+                        return;
+                    }
+
                     progress_label_async
                         .set_text(&escape_markup(&format!("Download failed: {err}")));
                     progress_bar_async.set_fraction(0.0);
@@ -1446,115 +1557,41 @@ fn build_quant_legend() -> GtkBox {
         .build();
 
     legend.append(&Separator::new(Orientation::Horizontal));
+    let guidance = [
+        "(S) Tier S: 32 GB+ VRAM  (fp16 UNET - Best Quality)",
+        "(A) Tier A: 16-31 GB VRAM (fp8 UNET - High Quality)",
+        "(B) Tier B: 12-15 GB VRAM (GGUF Q4 - Balanced Quality)",
+        "(C) Tier C: <12 GB VRAM   (GGUF Q3 - Preview Quality)",
+    ];
 
-    let summary_header = Label::builder()
-        .label(
-            "Quantization is the process of compressing model weights to fewer bits (2–8 bit) so models run faster and fit in less GPU memory during inference.",
-        )
-        .wrap(true)
+    for line in guidance.iter() {
+        let label = Label::builder()
+            .label(*line)
+            .halign(Align::Start)
+            .wrap(true)
+            .css_classes(vec![String::from("legend-text")])
+            .build();
+        legend.append(&label);
+    }
+
+    let quant_header = Label::builder()
+        .use_markup(true)
+        .label("<b>Model quantization</b>")
         .halign(Align::Start)
         .css_classes(vec![String::from("legend-text")])
         .build();
-    legend.append(&summary_header);
+    legend.append(&quant_header);
 
-    let grid = gtk::Grid::builder()
-        .column_spacing(18)
-        .row_spacing(6)
-        .hexpand(true)
-        .build();
-
-    let headers = ["GPU VRAM", "Recommended Quant", "Comment"];
-    for (col, header) in headers.iter().enumerate() {
-        let header_label = Label::builder()
-            .label(*header)
-            .halign(Align::Start)
-            .css_classes(vec![String::from("heading")])
-            .css_classes(vec![String::from("legend-text")])
-            .build();
-        grid.attach(&header_label, col as i32, 0, 1, 1);
-    }
-
-    let guidance_rows = [
-        ("<= 8 GB", "Q2 K / Q3 K", "Low-VRAM preview only"),
-        ("12 GB", "Q4 K M", "Balanced speed / quality"),
-        ("16 GB", "Q5 K M", "High-quality generation"),
-        (
-            "24 GB",
-            "Q6 K M/L or Q8 0",
-            "Lossless-like, heavy LoRA stacks",
-        ),
-        (
-            "32 GB",
-            "FP8 or FP16",
-            "Full-precision, refiner stages, batching",
-        ),
-    ];
-
-    for (row_idx, &(vram, quant, comment)) in guidance_rows.iter().enumerate() {
-        let row = row_idx as i32 + 1;
-
-        let vram_label = Label::builder().label(vram).halign(Align::Start).build();
-        grid.attach(&vram_label, 0, row, 1, 1);
-
-        let quant_label = Label::builder()
-            .label(quant)
-            .halign(Align::Start)
-            .css_classes(vec![String::from("monospace")])
-            .css_classes(vec![String::from("legend-text")])
-            .build();
-        grid.attach(&quant_label, 1, row, 1, 1);
-
-        let comment_label = Label::builder()
-            .label(comment)
-            .halign(Align::Start)
-            .wrap(true)
-            .css_classes(vec![String::from("legend-text")])
-            .build();
-        grid.attach(&comment_label, 2, row, 1, 1);
-    }
-
-    legend.append(&grid);
-
-    let interpretation_header = Label::builder()
-        .label("Interpretation")
-        .halign(Align::Start)
-        .css_classes(vec![String::from("heading")])
-        .build();
-    legend.append(&interpretation_header);
-
-    let notes_box = GtkBox::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(6)
-        .build();
-
-    let bullets: [&str; 1] = [
-        "<b>_S / M / L suffixes:</b>\n_S = small/faster (lower fidelity)  M = balanced  L = large/slower (higher fidelity)",
-    ];
-
-    for markup in bullets.iter() {
-        let label = Label::builder()
-            .use_markup(true)
-            .wrap(true)
-            .halign(Align::Start)
-            .css_classes(vec![String::from("legend-text")])
-            .build();
-        label.set_markup(&format!("• {}", markup));
-        notes_box.append(&label);
-    }
-
-    legend.append(&notes_box);
-
-    let disclaimer = Label::builder()
+    let quant_description = Label::builder()
+        .use_markup(true)
         .label(
-            "Values are approximate; actual VRAM use and performance vary by model, resolution, parameter count, and hardware configuration.",
+            "<i>Reducing the precision of a model's weights (e.g., from 16-bit to 8-bit or 4-bit) to decrease its memory usage and speed up inference.</i>",
         )
         .halign(Align::Start)
         .wrap(true)
-        .css_classes(vec![String::from("dim-label"), String::from("legend-text")])
-        .use_markup(true)
+        .css_classes(vec![String::from("legend-text")])
         .build();
-    disclaimer.set_markup("<i>Values are approximate; actual VRAM use and performance vary by model, resolution, parameter count, and hardware configuration.</i>");
-    legend.append(&disclaimer);
+    legend.append(&quant_description);
 
     legend
 }

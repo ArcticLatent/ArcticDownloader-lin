@@ -1,4 +1,4 @@
-use crate::vram::VramTier;
+use crate::{ram::RamTier, vram::VramTier};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -36,38 +36,29 @@ pub struct MasterModel {
     pub display_name: String,
     pub family: String,
     pub variants: Vec<ModelVariant>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub always: Vec<AlwaysGroup>,
 }
 
 impl MasterModel {
     pub fn best_variant_for_tier(&self, tier: VramTier) -> Option<&ModelVariant> {
-        let available = tier.gigabytes();
         self.variants
             .iter()
-            .filter(|variant| variant.min_vram_gb <= available)
-            .max_by_key(|variant| variant.min_vram_gb)
+            .find(|variant| variant.tier == tier)
+            .or_else(|| {
+                self.variants
+                    .iter()
+                    .filter(|variant| variant.tier.strength() < tier.strength())
+                    .max_by_key(|variant| variant.tier.strength())
+            })
     }
 
     pub fn variants_for_tier(&self, tier: VramTier) -> Vec<ModelVariant> {
-        let available = tier.gigabytes();
-        let mut variants: Vec<ModelVariant> = self
-            .variants
+        self.variants
             .iter()
-            .filter(|variant| variant.min_vram_gb <= available)
+            .filter(|variant| variant.tier == tier)
             .cloned()
-            .collect();
-
-        if available >= 32 {
-            let filtered: Vec<ModelVariant> = variants
-                .iter()
-                .cloned()
-                .filter(|variant| variant.model_size.as_deref() != Some("5B"))
-                .collect();
-            if !filtered.is_empty() {
-                variants = filtered;
-            }
-        }
-
-        variants
+            .collect()
     }
 
     pub fn find_variant(&self, variant_id: &str) -> Option<&ModelVariant> {
@@ -75,12 +66,51 @@ impl MasterModel {
             .iter()
             .find(|variant| variant.id == variant_id)
     }
+
+    pub fn artifacts_for_variant(
+        &self,
+        variant: &ModelVariant,
+        ram_tier: Option<RamTier>,
+    ) -> Vec<ModelArtifact> {
+        let mut artifacts = Vec::new();
+
+        for group in &self.always {
+            for artifact in &group.artifacts {
+                if artifact.is_supported_on_ram(ram_tier) {
+                    artifacts.push(artifact.clone());
+                }
+            }
+        }
+
+        for artifact in &variant.artifacts {
+            if artifact.is_supported_on_ram(ram_tier) {
+                artifacts.push(artifact.clone());
+            }
+        }
+
+        artifacts
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct ResolvedModel {
     pub master: MasterModel,
     pub variant: ModelVariant,
+}
+
+impl ResolvedModel {
+    pub fn artifacts_for_download(&self, ram_tier: Option<RamTier>) -> Vec<ModelArtifact> {
+        self.master.artifacts_for_variant(&self.variant, ram_tier)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AlwaysGroup {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub artifacts: Vec<ModelArtifact>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -135,8 +165,7 @@ impl LoraDefinition {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelVariant {
     pub id: String,
-    pub quality_tier: QualityTier,
-    pub min_vram_gb: u32,
+    pub tier: VramTier,
     #[serde(default)]
     pub model_size: Option<String>,
     #[serde(default)]
@@ -155,10 +184,10 @@ impl ModelVariant {
         if let Some(quant) = &self.quantization {
             parts.push(quant.clone());
         }
-        parts.push(self.quality_tier.label().to_string());
         if let Some(note) = &self.note {
             parts.push(note.clone());
         }
+        parts.push(self.tier.label().to_string());
         parts.join(" • ")
     }
 
@@ -173,11 +202,8 @@ impl ModelVariant {
         if let Some(note) = &self.note {
             parts.push(note.clone());
         }
-        if parts.is_empty() {
-            self.quality_tier.label().to_string()
-        } else {
-            parts.join(" • ")
-        }
+        parts.push(self.tier.label().to_string());
+        parts.join(" • ")
     }
 }
 
@@ -193,6 +219,8 @@ pub struct ModelArtifact {
     #[serde(default)]
     pub license_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_ram_tier: Option<RamTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_url: Option<String>,
 }
 
@@ -202,6 +230,15 @@ impl ModelArtifact {
             .rsplit_once('/')
             .map(|(_, file)| file)
             .unwrap_or(&self.path)
+    }
+
+    pub fn is_supported_on_ram(&self, available: Option<RamTier>) -> bool {
+        match self.min_ram_tier {
+            None => true,
+            Some(required) => available
+                .map(|tier| tier.satisfies(required))
+                .unwrap_or(false),
+        }
     }
 }
 
@@ -293,26 +330,6 @@ impl TargetCategory {
             "ControlNet" => Some(TargetCategory::Controlnet),
             "Other" => Some(TargetCategory::Unknown),
             _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum QualityTier {
-    Ultra,
-    High,
-    Medium,
-    Low,
-}
-
-impl QualityTier {
-    pub fn label(&self) -> &'static str {
-        match self {
-            QualityTier::Ultra => "Ultra",
-            QualityTier::High => "High",
-            QualityTier::Medium => "Medium",
-            QualityTier::Low => "Low",
         }
     }
 }

@@ -3,49 +3,85 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VramTier {
-    Gpu8,
-    Gpu12,
-    Gpu16,
-    Gpu24,
-    Gpu32Plus,
+    TierS,
+    TierA,
+    TierB,
+    TierC,
 }
 
 impl VramTier {
-    pub const fn gigabytes(self) -> u32 {
-        match self {
-            VramTier::Gpu8 => 8,
-            VramTier::Gpu12 => 12,
-            VramTier::Gpu16 => 16,
-            VramTier::Gpu24 => 24,
-            VramTier::Gpu32Plus => 32,
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            VramTier::Gpu8 => "8 GB",
-            VramTier::Gpu12 => "12 GB",
-            VramTier::Gpu16 => "16 GB",
-            VramTier::Gpu24 => "24 GB",
-            VramTier::Gpu32Plus => "32 GB+",
-        }
-    }
-
     pub fn all() -> &'static [VramTier] {
         use VramTier::*;
-        &[Gpu8, Gpu12, Gpu16, Gpu24, Gpu32Plus]
+        &[TierS, TierA, TierB, TierC]
     }
 
-    pub fn from_gigabytes(gb: u32) -> Option<Self> {
-        Self::all()
-            .iter()
-            .copied()
-            .find(|tier| tier.gigabytes() == gb)
+    pub const fn identifier(self) -> &'static str {
+        match self {
+            VramTier::TierS => "tier_s",
+            VramTier::TierA => "tier_a",
+            VramTier::TierB => "tier_b",
+            VramTier::TierC => "tier_c",
+        }
+    }
+
+    pub const fn min_vram_gb(self) -> f64 {
+        match self {
+            VramTier::TierS => 31.9,
+            VramTier::TierA => 15.9,
+            VramTier::TierB => 11.5,
+            VramTier::TierC => 0.0,
+        }
+    }
+
+    pub const fn max_vram_gb(self) -> f64 {
+        match self {
+            VramTier::TierS => f64::MAX,
+            VramTier::TierA => 31.9,
+            VramTier::TierB => 15.9,
+            VramTier::TierC => 11.5,
+        }
+    }
+
+    pub const fn strength(self) -> u8 {
+        match self {
+            VramTier::TierC => 0,
+            VramTier::TierB => 1,
+            VramTier::TierA => 2,
+            VramTier::TierS => 3,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            VramTier::TierS => "Tier S",
+            VramTier::TierA => "Tier A",
+            VramTier::TierB => "Tier B",
+            VramTier::TierC => "Tier C",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            VramTier::TierS => "Tier S (32 GB+)",
+            VramTier::TierA => "Tier A (16-31 GB)",
+            VramTier::TierB => "Tier B (12-15 GB)",
+            VramTier::TierC => "Tier C (<12 GB)",
+        }
+    }
+
+    pub fn from_identifier(id: &str) -> Option<Self> {
+        match id {
+            "tier_s" | "S" | "s" => Some(VramTier::TierS),
+            "tier_a" | "A" | "a" => Some(VramTier::TierA),
+            "tier_b" | "B" | "b" => Some(VramTier::TierB),
+            "tier_c" | "C" | "c" => Some(VramTier::TierC),
+            _ => None,
+        }
     }
 }
 
 impl std::fmt::Display for VramTier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
+        f.write_str(self.description())
     }
 }

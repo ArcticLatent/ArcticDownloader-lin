@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{mpsc::Sender, Arc},
 };
+use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, runtime::Runtime, sync::Mutex};
 
 #[derive(Clone, Debug)]
@@ -32,6 +33,8 @@ pub struct CivitaiModelMetadata {
     pub file_name: String,
     pub preview: Option<CivitaiPreview>,
     pub trained_words: Vec<String>,
+    pub creator_username: Option<String>,
+    pub creator_link: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +73,12 @@ pub enum DownloadSignal {
     },
 }
 
+#[derive(Debug, Error)]
+pub enum DownloadError {
+    #[error("unauthorized")]
+    Unauthorized,
+}
+
 #[derive(Debug)]
 pub struct DownloadManager {
     runtime: Arc<Runtime>,
@@ -104,9 +113,11 @@ impl DownloadManager {
         let client = self.client.clone();
         self.runtime.spawn(async move {
             let mut outcomes = Vec::new();
-            let total = resolved.variant.artifacts.len();
+            let model_folder = resolved.master.id.clone();
+            let artifacts = resolved.variant.artifacts.clone();
+            let total = artifacts.len();
 
-            for (index, artifact) in resolved.variant.artifacts.clone().into_iter().enumerate() {
+            for (index, artifact) in artifacts.into_iter().enumerate() {
                 let artifact_name = artifact.file_name().to_string();
                 let _ = progress.send(DownloadSignal::Started {
                     artifact: artifact_name.clone(),
@@ -119,6 +130,7 @@ impl DownloadManager {
                 match download_artifact(
                     &client,
                     &comfy_root,
+                    &model_folder,
                     &artifact,
                     Some((progress.clone(), index, artifact_name.clone())),
                 )
@@ -156,10 +168,14 @@ impl DownloadManager {
     ) -> tokio::task::JoinHandle<Result<LoraDownloadOutcome>> {
         let client = self.client.clone();
         self.runtime.spawn(async move {
-            let loras_dir = comfy_root.join(TargetCategory::Loras.comfyui_subdir());
-            fs::create_dir_all(&loras_dir)
-                .await
-                .with_context(|| format!("failed to create directory {:?}", loras_dir))?;
+            let folder_name = lora
+                .family
+                .as_deref()
+                .map(normalize_folder_name)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| sanitize_file_name(&lora.id));
+            let loras_root = comfy_root.join(TargetCategory::Loras.comfyui_subdir());
+            let lora_dir = loras_root.join(&folder_name);
 
             let base_url = lora.download_url.clone();
             let token_value = token.clone().and_then(|t| {
@@ -187,7 +203,7 @@ impl DownloadManager {
 
             file_name = sanitize_file_name(&file_name);
 
-            let dest_path = loras_dir.join(&file_name);
+            let dest_path = lora_dir.join(&file_name);
 
             if fs::try_exists(&dest_path)
                 .await
@@ -236,7 +252,7 @@ impl DownloadManager {
             match download_direct(
                 &client,
                 &url,
-                &loras_dir,
+                &lora_dir,
                 &file_name,
                 Some((progress.clone(), 0, file_name.clone())),
                 auth_token.as_deref(),
@@ -249,6 +265,24 @@ impl DownloadManager {
                     status: DownloadStatus::Downloaded,
                 }),
                 Err(err) => {
+                    if matches!(
+                        err.downcast_ref::<DownloadError>(),
+                        Some(DownloadError::Unauthorized)
+                    ) {
+                        let _ = progress.send(DownloadSignal::Failed {
+                            artifact: file_name.clone(),
+                            error: "Unauthorized".to_string(),
+                        });
+                        if fs::try_exists(&lora_dir).await.unwrap_or(false) {
+                            if let Ok(mut entries) = fs::read_dir(&lora_dir).await {
+                                if matches!(entries.next_entry().await, Ok(None)) {
+                                    let _ = fs::remove_dir(&lora_dir).await;
+                                }
+                            }
+                        }
+                        return Err(err);
+                    }
+
                     let _ = progress.send(DownloadSignal::Failed {
                         artifact: file_name,
                         error: err.to_string(),
@@ -298,11 +332,12 @@ impl DownloadManager {
 async fn download_artifact(
     client: &Client,
     comfy_root: &Path,
+    model_folder: &str,
     artifact: &ModelArtifact,
     progress: Option<(Sender<DownloadSignal>, usize, String)>,
 ) -> Result<DownloadOutcome> {
     let subdir = artifact.target_category.comfyui_subdir();
-    let dest_dir = comfy_root.join(subdir);
+    let dest_dir = comfy_root.join(subdir).join(model_folder);
     fs::create_dir_all(&dest_dir)
         .await
         .with_context(|| format!("failed to create directory {:?}", dest_dir))?;
@@ -461,9 +496,7 @@ async fn download_direct(
     if response.status().is_client_error() || response.status().is_server_error() {
         let status = response.status();
         if url.contains("civitai.com") && matches!(status.as_u16(), 401 | 403) {
-            return Err(anyhow!(
-                "download failed for {url} (status {status}); Civitai models require an API token. Generate one in your Civitai account and save it under Settings → Civitai API Token."
-            ));
+            return Err(DownloadError::Unauthorized.into());
         }
         return Err(anyhow!("download failed for {url} (status {status})"));
     }
@@ -471,6 +504,10 @@ async fn download_direct(
     let final_file_name = filename_from_headers(response.headers(), file_name);
 
     let dest_path = dest_dir.join(&final_file_name);
+
+    fs::create_dir_all(dest_dir)
+        .await
+        .with_context(|| format!("failed to create directory {:?}", dest_dir))?;
 
     if fs::try_exists(&dest_path)
         .await
@@ -566,13 +603,32 @@ fn extract_civitai_model_version_id(url: &str) -> Option<u64> {
 }
 
 fn sanitize_file_name(name: &str) -> String {
-    name.chars()
+    let sanitized = percent_decode_str(name)
+        .decode_utf8_lossy()
+        .chars()
         .map(|ch| match ch {
-            '/' | '\\' => '_',
-            ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ if ch.is_control() => '_',
             _ => ch,
         })
-        .collect()
+        .collect::<String>();
+    if sanitized.trim_matches('_').is_empty() {
+        "download".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn normalize_folder_name(name: &str) -> String {
+    let mut normalized = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+        } else if !normalized.ends_with('_') {
+            normalized.push('_');
+        }
+    }
+    normalized.trim_matches('_').to_string()
 }
 
 fn build_download_url(repo: &str, path: &str) -> Result<String> {
@@ -632,7 +688,13 @@ async fn fetch_civitai_model_metadata_internal(
     let response = request
         .send()
         .await
-        .with_context(|| format!("request failed for {api_url}"))?
+        .with_context(|| format!("request failed for {api_url}"))?;
+
+    if response.status().as_u16() == 401 {
+        return Err(DownloadError::Unauthorized.into());
+    }
+
+    let response = response
         .error_for_status()
         .with_context(|| format!("unexpected status downloading metadata from {api_url}"))?;
 
@@ -645,6 +707,8 @@ async fn fetch_civitai_model_metadata_internal(
         trained_words,
         images,
         files,
+        model,
+        model_id,
     } = payload;
 
     let file_name = select_civitai_file(&files, download_url)
@@ -653,10 +717,35 @@ async fn fetch_civitai_model_metadata_internal(
 
     let preview = resolve_preview(client, &images, token, model_version_id).await;
 
+    let mut creator_username = None;
+    let mut creator_link = None;
+
+    if let Some(model) = model {
+        if let Some(creator) = model.creator {
+            creator_username = creator.username;
+            creator_link = creator.link;
+        }
+    }
+
+    if creator_username.is_none() {
+        if let Some(model_id) = model_id {
+            match fetch_civitai_model_creator(client, model_id, token).await {
+                Ok(Some(creator)) => {
+                    creator_username = creator.username;
+                    creator_link = creator.link;
+                }
+                Ok(None) => {}
+                Err(err) => warn!("Failed to fetch creator info for model {model_id}: {err}"),
+            }
+        }
+    }
+
     Ok(CivitaiModelMetadata {
         file_name,
         preview,
         trained_words,
+        creator_username,
+        creator_link,
     })
 }
 
@@ -799,6 +888,10 @@ struct CivitaiModelVersion {
     images: Vec<CivitaiImage>,
     #[serde(default)]
     files: Vec<CivitaiFile>,
+    #[serde(default)]
+    model: Option<CivitaiModel>,
+    #[serde(default)]
+    model_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -813,4 +906,59 @@ struct CivitaiFile {
     download_url: Option<String>,
     #[serde(rename = "type")]
     r#type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CivitaiModel {
+    #[serde(default)]
+    creator: Option<CivitaiCreator>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CivitaiCreator {
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    link: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CivitaiModelResponse {
+    #[serde(default)]
+    creator: Option<CivitaiCreator>,
+}
+
+async fn fetch_civitai_model_creator(
+    client: &Client,
+    model_id: u64,
+    token: Option<&str>,
+) -> Result<Option<CivitaiCreator>> {
+    let api_url = format!("https://civitai.com/api/v1/models/{model_id}");
+    let mut request = client.get(&api_url);
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("request failed for {api_url}"))?;
+
+    if response.status().as_u16() == 401 {
+        return Err(DownloadError::Unauthorized.into());
+    }
+
+    let response = response
+        .error_for_status()
+        .with_context(|| format!("unexpected status downloading metadata from {api_url}"))?;
+
+    let payload: CivitaiModelResponse = response
+        .json()
+        .await
+        .with_context(|| format!("failed to parse metadata payload for {api_url}"))?;
+
+    Ok(payload.creator)
 }

@@ -7,94 +7,112 @@
       "family": "wan",
       "variants": [
         {
-          "id": "wan-14b-q2_k",
-          "quality_tier": "medium",
-          "min_vram_gb": 8,
+          "id": "wan-14b-fp8",
+          "tier": "tier_a",
           "model_size": "14B",
-          "quantization": "Q2_K",
-          "note": "Runs on 8 GB (orange on HF), comfortable ≥12 GB",
+          "quantization": "FP8",
+          "note": null,
           "artifacts": [
             {
-              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
-              "path": "split_files/vae/wan_2.1_vae.safetensors",
+              "repo": "hf://arcticlatent/wan2.2@main",
+              "path": "unet_14b/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "unet",
+              "license_url": null,
+              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/unet_14b/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
+            }
+          ]
+        }
+      ],
+      "always": [
+        {
+          "id": "vae",
+          "artifacts": [
+            {
+              "repo": "hf://arcticlatent/wan2.2@main",
+              "path": "vae/wan_2.1_vae.safetensors",
               "sha256": null,
               "size_bytes": null,
               "target_category": "vae",
-              "license_url": null
-            },
-            {
-              "repo": "hf://Comfy-Org/Wan_2.1_ComfyUI_repackaged@main",
-              "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-              "sha256": null,
-              "size_bytes": null,
-              "target_category": "text_encoders",
-              "license_url": null
-            },
-            {
-              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
-              "path": "split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
-              "sha256": null,
-              "size_bytes": null,
-              "target_category": "diffusion_models",
-              "license_url": null
-            },
-            {
-              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
-              "path": "split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
-              "sha256": null,
-              "size_bytes": null,
-              "target_category": "diffusion_models",
-              "license_url": null
-            },
-            {
-              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
-              "path": "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors",
-              "sha256": null,
-              "size_bytes": null,
-              "target_category": "loras",
-              "license_url": null
-            },
-            {
-              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
-              "path": "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors",
-              "sha256": null,
-              "size_bytes": null,
-              "target_category": "loras",
-              "license_url": null
+              "license_url": null,
+              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/vae/wan_2.1_vae.safetensors"
             }
           ]
         },
         {
-          "id": "test",
-          "quality_tier": "high",
-          "min_vram_gb": 8,
-          "model_size": "14B",
-          "quantization": "Q2_K",
-          "note": "Runs on 8 GB (orange on HF), comfortable ≥12 GB",
+          "id": "loras",
           "artifacts": [
             {
-              "repo": "hf://Comfy-Org/Wan_2.1_ComfyUI_repackaged@main",
-              "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+              "repo": "hf://arcticlatent/wan2.2@main",
+              "path": "loras_14b/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "loras",
+              "license_url": null,
+              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/loras_14b/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors"
+            },
+            {
+              "repo": "hf://arcticlatent/wan2.2@main",
+              "path": "loras_14b/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "loras",
+              "license_url": null,
+              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/loras_14b/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors"
+            },
+            {
+              "repo": "hf://arcticlatent/wan2.2@main",
+              "path": "loras_14b/Wan2.2-Lightning_T2V-v1.1-A14B-4steps-lora_HIGH_fp16.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "loras",
+              "license_url": null,
+              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/loras_14b/Wan2.2-Lightning_T2V-v1.1-A14B-4steps-lora_HIGH_fp16.safetensors"
+            },
+            {
+              "repo": "hf://arcticlatent/wan2.2@main",
+              "path": "loras_14b/Wan2.2-Lightning_T2V-v1.1-A14B-4steps-lora_LOW_fp16.safetensors",
+              "sha256": null,
+              "size_bytes": null,
+              "target_category": "loras",
+              "license_url": null,
+              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/loras_14b/Wan2.2-Lightning_T2V-v1.1-A14B-4steps-lora_LOW_fp16.safetensors"
+            }
+          ]
+        },
+        {
+          "id": "clip",
+          "artifacts": [
+            {
+              "repo": "hf://arcticlatent/wan2.2@main",
+              "path": "clip/umt5_xxl_fp16.safetensors",
               "sha256": null,
               "size_bytes": null,
               "target_category": "text_encoders",
-              "license_url": null
+              "license_url": null,
+              "min_ram_tier": "tier_a",
+              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/clip/umt5_xxl_fp16.safetensors"
             },
             {
-              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
-              "path": "split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+              "repo": "hf://arcticlatent/wan2.2@main",
+              "path": "clip/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
               "sha256": null,
               "size_bytes": null,
-              "target_category": "diffusion_models",
-              "license_url": null
+              "target_category": "text_encoders",
+              "license_url": null,
+              "min_ram_tier": "tier_b",
+              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/clip/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
             },
             {
-              "repo": "hf://Comfy-Org/Wan_2.2_ComfyUI_Repackaged@main",
-              "path": "split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+              "repo": "hf://arcticlatent/wan2.2@main",
+              "path": "clip/gguf/umt5-xxl-encoder-Q5_K_M.gguf",
               "sha256": null,
               "size_bytes": null,
-              "target_category": "diffusion_models",
-              "license_url": null
+              "target_category": "text_encoders",
+              "license_url": null,
+              "min_ram_tier": "tier_c",
+              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/clip/gguf/umt5-xxl-encoder-Q5_K_M.gguf"
             }
           ]
         }
