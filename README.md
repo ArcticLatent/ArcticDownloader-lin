@@ -4,17 +4,23 @@ Arctic Downloader is a Rust/libadwaita desktop companion that helps ComfyUI user
 model variants (and their auxiliary files) for the GPU VRAM and system RAM they have on hand.
 Viewers of the accompanying tutorial series can pick a “master model”, choose their GPU VRAM + RAM
 tiers, point the app at their ComfyUI install, and let the app grab the curated artifacts from
-Hugging Face into the correct `ComfyUI/models/*` subfolders.
+Hugging Face into the correct `ComfyUI/models/*` subfolders. Downloads are filtered by the VRAM tier
+selected in-app, while RAM-sensitive artifacts can be gated per tier so lower-memory machines only
+receive the assets they can realistically run.
 
 ## Current Status
 
-This repository currently contains the project scaffolding:
+This repository currently contains:
 
-- Rust GTK/libadwaita application shell with GPU VRAM and system RAM selectors plus placeholder
-  actions.
-- Async services for future download management and catalog handling.
-- A versioned catalog template (`data/catalog.json`) describing master models, variants, artifacts,
-  and ComfyUI destination categories.
+- A Rust GTK/libadwaita application with GPU VRAM and system RAM selectors, per-tier legends, and
+  artifact download progress.
+- Async download services that place master-model artifacts inside dedicated folders
+  (`ComfyUI/models/<category>/<model_id>/…`) and LoRA assets inside family-normalised subdirectories
+  (`ComfyUI/models/loras/<family_slug>/…`).
+- Optional Civitai API integration for LoRA previews, trigger words, creator attribution, and
+  authenticated downloads (with clear guidance when a token is missing).
+- A versioned catalog template (`data/catalog.json`) describing master models, variants, “always-on”
+  assets, and target categories with optional RAM tier requirements.
 - A Flatpak manifest targeting `org.gnome.Platform//49` (see `flatpak/dev.wknd.ArcticDownloader.yaml`).
 
 ## Repository Layout
@@ -31,8 +37,9 @@ This repository currently contains the project scaffolding:
    cargo check
    cargo run
    ```
-3. The app will launch a placeholder UI with master-model, GPU VRAM, and system RAM pickers.
-   Download actions are stubbed out until the network pipeline is implemented.
+3. The app launches with master-model, GPU VRAM, and system RAM pickers. The variant list filters to
+   the chosen GPU tier, while the legend summarises the four supported tiers (S/A/B/C) and their
+   expected quantisations. RAM tier selection controls which RAM-gated artifacts are offered.
 
 ### Catalog Admin Tool
 
@@ -43,8 +50,14 @@ cargo run --bin catalog_admin
 ```
 
 The tool lists existing models, lets you add/edit/delete entries, organise “always-on” artifact
-groups per model, and assign per-variant artifacts (with optional RAM tier gating). Saving writes
-directly to `data/catalog.json`.
+groups per model, and assign per-variant artifacts. RAM tier gating is configured only inside the
+“always-on” groups, while variants capture a `tier` (GPU requirement) that maps directly to the
+four-tier UI. Saving writes directly to `data/catalog.json`.
+
+> **Note:** LoRA previews and downloads that originate from Civitai require a personal API token.
+> Enter this once in the LoRA page and the app will handle creator metadata, trigger words, and
+> authenticated downloads. If the token is missing or invalid the UI now explains the issue instead
+> of leaving empty folders.
 
 ### Formatting & Lints
 
@@ -74,12 +87,25 @@ flatpak run dev.wknd.ArcticDownloader
 The app ships and trusts the checked-in `data/catalog.json`. Each entry maps:
 
 - `models[].always[]` to named groups of artifacts that are always downloaded for a model.
-- `models[].variants[]` to minimum VRAM requirements, qualitative tiers, and optional RAM gates.
+- `models[].variants[]` to GPU `tier` requirements (S/A/B/C) plus optional notes, sizes, and
+  quantisation strings.
 - `artifacts[]` to Hugging Face repositories, file paths, ComfyUI destination categories, and
   optional RAM tier requirements.
 
+LoRA definitions (`catalog.loras[]`) now download into folders derived from their `family` name so
+multiple LoRAs can coexist without filename clashes.
+
 Update this file between tutorial episodes to control which exact files viewers receive. Future work
 will add signature verification and remote catalog refreshes.
+
+## LoRA Downloads & Civitai Integration
+
+- LoRA assets fetched from Civitai display preview media, trigger words, and creator attribution.
+- Each downloaded LoRA is placed under `ComfyUI/models/loras/<family_slug>/…`; the slug is derived
+  from the LoRA family name and normalised to lowercase with underscores.
+- If a Civitai request returns `401/403` the UI surfaces a clear “You are not authorized…” message
+  instead of silently failing. Paste your personal Civitai API token in the LoRA section once to
+  enable authenticated downloads.
 
 ## Roadmap Highlights
 
