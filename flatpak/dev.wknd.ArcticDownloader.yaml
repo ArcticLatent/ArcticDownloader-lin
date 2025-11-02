@@ -13,6 +13,8 @@ finish-args:
   - --filesystem=xdg-run/pipewire-0
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
+  build-args:
+    - --share=network
   env:
     CARGO_TARGET_DIR: /run/build/arctic-downloader/target
     RUSTFLAGS: "-C debuginfo=1"
@@ -24,5 +26,5 @@ modules:
         path: ../
     build-commands:
       - cargo --offline fetch --manifest-path Cargo.toml || cargo fetch --manifest-path Cargo.toml
-      - cargo build --release --frozen --manifest-path Cargo.toml
+      - cargo build --release --locked --manifest-path Cargo.toml
       - install -Dm755 target/release/arctic-downloader /app/bin/arctic-downloader
