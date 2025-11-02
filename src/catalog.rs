@@ -1,24 +1,40 @@
 use crate::{
+    config::{default_catalog_endpoint, ConfigStore},
     model::{LoraDefinition, ModelCatalog, ModelVariant, ResolvedModel},
     vram::VramTier,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{info, warn};
-use std::{fs, path::PathBuf, sync::RwLock};
+use reqwest::{header, Client, StatusCode};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 const BUNDLED_CATALOG: &str = include_str!("../data/catalog.json");
+const CACHED_CATALOG_FILE: &str = "catalog.json";
 
 #[derive(Debug)]
 pub struct CatalogService {
     catalog: RwLock<ModelCatalog>,
+    config: Arc<ConfigStore>,
 }
 
 impl CatalogService {
-    pub fn new() -> Result<Self> {
-        let catalog = resolve_catalog()
+    pub fn new(config: Arc<ConfigStore>) -> Result<Self> {
+        let catalog = load_cached_catalog(&config)
+            .or_else(resolve_catalog)
             .unwrap_or_else(|| serde_json::from_str(BUNDLED_CATALOG).expect("valid bundled JSON"));
+        info!(
+            "Catalog initialised with {} models ({} LoRAs).",
+            catalog.models.len(),
+            catalog.loras.len()
+        );
         Ok(Self {
             catalog: RwLock::new(catalog),
+            config,
         })
     }
 
@@ -58,23 +74,139 @@ impl CatalogService {
     pub fn find_lora(&self, id: &str) -> Option<LoraDefinition> {
         self.catalog_snapshot().find_lora(id)
     }
+
+    pub async fn refresh_from_remote(&self) -> Result<bool> {
+        let settings = self.config.settings();
+        let endpoint = settings
+            .catalog_endpoint
+            .clone()
+            .and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+            .or_else(default_catalog_endpoint);
+
+        let Some(url) = endpoint else {
+            info!("No remote catalog endpoint configured; using bundled data.");
+            return Ok(false);
+        };
+
+        let client = Client::builder()
+            .user_agent(format!(
+                "ArcticDownloader/{} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("CARGO_PKG_NAME")
+            ))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .context("failed to build HTTP client for catalog refresh")?;
+
+        let mut request = client.get(&url);
+        if let Some(etag) = settings
+            .last_catalog_etag
+            .as_deref()
+            .filter(|etag| !etag.is_empty())
+        {
+            request = request.header(header::IF_NONE_MATCH, etag);
+        }
+
+        info!("Refreshing catalog from {url}");
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("failed to fetch remote catalog from {url}"))?;
+
+        match response.status() {
+            StatusCode::NOT_MODIFIED => {
+                info!("Remote catalog is up to date (HTTP 304).");
+                return Ok(false);
+            }
+            StatusCode::OK => {}
+            status => {
+                warn!(
+                    "Catalog refresh skipped: server returned {} ({:?})",
+                    status.as_u16(),
+                    status
+                );
+                return Ok(false);
+            }
+        }
+
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_string());
+
+        let bytes = response
+            .bytes()
+            .await
+            .context("failed to read remote catalog body")?;
+        let catalog: ModelCatalog = serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed to parse remote catalog JSON from {url}"))?;
+
+        self.persist_catalog(&catalog)?;
+
+        {
+            let mut guard = self.catalog.write().expect("catalog poisoned for write");
+            *guard = catalog;
+        }
+
+        self.config.update_settings(|settings| {
+            settings.last_catalog_etag = etag.clone();
+            if settings.catalog_endpoint.is_none() {
+                settings.catalog_endpoint = Some(url.clone());
+            }
+        })?;
+
+        info!("Catalog updated from remote source.");
+        Ok(true)
+    }
+
+    fn persist_catalog(&self, catalog: &ModelCatalog) -> Result<()> {
+        let path = self.cached_catalog_path();
+        let data = serde_json::to_vec_pretty(catalog)?;
+        fs::write(&path, data)
+            .with_context(|| format!("failed to write cached catalog to {path:?}"))?;
+        Ok(())
+    }
+
+    fn cached_catalog_path(&self) -> PathBuf {
+        self.config.cache_path().join(CACHED_CATALOG_FILE)
+    }
 }
 
 fn resolve_catalog() -> Option<ModelCatalog> {
     for path in catalog_candidate_paths() {
-        match fs::read_to_string(&path) {
-            Ok(contents) => match serde_json::from_str::<ModelCatalog>(&contents) {
-                Ok(parsed) => {
-                    info!("Loaded catalog from {:?}", path);
-                    return Some(parsed);
-                }
-                Err(err) => warn!("Failed to parse catalog at {:?}: {err}", path),
-            },
-            Err(err) => warn!("Failed to read catalog at {:?}: {err}", path),
+        if let Some(catalog) = load_catalog_from_path(&path) {
+            return Some(catalog);
         }
     }
     warn!("Falling back to bundled catalog data.");
     None
+}
+
+fn load_catalog_from_path(path: &Path) -> Option<ModelCatalog> {
+    match fs::read_to_string(path) {
+        Ok(contents) => match serde_json::from_str::<ModelCatalog>(&contents) {
+            Ok(parsed) => {
+                info!("Loaded catalog from {:?}", path);
+                Some(parsed)
+            }
+            Err(err) => {
+                warn!("Failed to parse catalog at {:?}: {err}", path);
+                None
+            }
+        },
+        Err(err) => {
+            warn!("Failed to read catalog at {:?}: {err}", path);
+            None
+        }
+    }
 }
 
 fn catalog_candidate_paths() -> Vec<PathBuf> {
@@ -103,4 +235,17 @@ fn catalog_candidate_paths() -> Vec<PathBuf> {
 
     candidates.retain(|p| p.exists());
     candidates
+}
+
+fn load_cached_catalog(config: &ConfigStore) -> Option<ModelCatalog> {
+    let path = cached_catalog_path(config);
+    if path.exists() {
+        load_catalog_from_path(&path)
+    } else {
+        None
+    }
+}
+
+fn cached_catalog_path(config: &ConfigStore) -> PathBuf {
+    config.cache_path().join(CACHED_CATALOG_FILE)
 }

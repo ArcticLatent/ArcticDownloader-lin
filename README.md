@@ -98,6 +98,19 @@ multiple LoRAs can coexist without filename clashes.
 Update this file between tutorial episodes to control which exact files viewers receive. Future work
 will add signature verification and remote catalog refreshes.
 
+### Remote Catalog Refresh
+
+- The app boots using a cached copy of `catalog.json` (stored under
+  `~/.cache/dev.wknd.ArcticDownloader/catalog.json`) or the bundled fallback.
+- On launch it performs an HTTP GET against the catalog endpoint recorded in `settings.json`
+  (`catalog_endpoint`). A successful `200 OK` replaces the in-memory catalog, persists the JSON to
+  the cache, and stores the returned `ETag` so subsequent runs can short-circuit with `304 Not
+  Modified`.
+- Builds default to `https://raw.githubusercontent.com/burce/ArcticDownloader/main/data/catalog.json`
+  as the remote source. Override this at runtime with `ARCTIC_CATALOG_URL` or at build-time via the
+  `ARCTIC_DEFAULT_CATALOG_URL` environment variable. Setting either to an empty string disables the
+  remote fetch.
+
 ## LoRA Downloads & Civitai Integration
 
 - LoRA assets fetched from Civitai display preview media, trigger words, and creator attribution.

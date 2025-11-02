@@ -3,12 +3,14 @@ use anyhow::{anyhow, Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     sync::RwLock,
 };
 
 const SETTINGS_FILE: &str = "settings.json";
+const FALLBACK_REMOTE_CATALOG_URL: &str =
+    "https://raw.githubusercontent.com/burce/ArcticDownloader/main/data/catalog.json";
 
 #[derive(Debug)]
 pub struct ConfigStore {
@@ -34,7 +36,7 @@ impl ConfigStore {
             .with_context(|| format!("failed to create cache directory {:?}", dirs.cache_dir()))?;
 
         let settings_path = PathBuf::from(dirs.config_dir()).join(SETTINGS_FILE);
-        let settings = if settings_path.exists() {
+        let mut settings = if settings_path.exists() {
             let data = fs::read(&settings_path)
                 .with_context(|| format!("failed to read settings file {settings_path:?}"))?;
             serde_json::from_slice(&data)
@@ -43,10 +45,23 @@ impl ConfigStore {
             AppSettings::default()
         };
 
-        Ok(Self {
+        let mut persist_defaults = false;
+        if settings.catalog_endpoint.is_none() {
+            settings.catalog_endpoint = default_catalog_endpoint();
+            persist_defaults = settings_path.exists();
+        }
+
+        let store = Self {
             dirs,
             settings: RwLock::new(settings),
-        })
+        };
+
+        if persist_defaults {
+            let snapshot = store.settings();
+            store.persist_locked(&snapshot)?;
+        }
+
+        Ok(store)
     }
 
     pub fn settings(&self) -> AppSettings {
@@ -98,6 +113,8 @@ pub struct AppSettings {
     pub bandwidth_cap_mbps: Option<u32>,
     pub last_catalog_etag: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub civitai_token: Option<String>,
 }
 
@@ -117,7 +134,30 @@ impl Default for AppSettings {
             concurrent_downloads: 2,
             bandwidth_cap_mbps: None,
             last_catalog_etag: None,
+            catalog_endpoint: default_catalog_endpoint(),
             civitai_token: None,
         }
     }
+}
+
+pub(crate) fn default_catalog_endpoint() -> Option<String> {
+    if let Ok(url) = env::var("ARCTIC_CATALOG_URL") {
+        let trimmed = url.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+
+    if let Some(url) = option_env!("ARCTIC_DEFAULT_CATALOG_URL") {
+        let trimmed = url.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+
+    Some(FALLBACK_REMOTE_CATALOG_URL.to_string())
 }

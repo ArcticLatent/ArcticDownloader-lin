@@ -8,6 +8,7 @@ use crate::{
 use adw::glib;
 use adw::{gio::ApplicationFlags, prelude::*, Application};
 use anyhow::{anyhow, Result};
+use log::warn;
 use std::sync::Arc;
 use tokio::runtime::{Builder, Runtime};
 
@@ -52,7 +53,12 @@ impl ArcticDownloaderApp {
             .build();
 
         let config = Arc::new(ConfigStore::new()?);
-        let catalog = Arc::new(CatalogService::new()?);
+        let catalog = Arc::new(CatalogService::new(config.clone())?);
+
+        if let Err(err) = runtime.block_on(catalog.refresh_from_remote()) {
+            warn!("Unable to refresh catalog from remote source: {err:#}");
+        }
+
         let downloads = Arc::new(DownloadManager::new(runtime.clone()));
         let ram_profile = detect_ram_profile();
 
