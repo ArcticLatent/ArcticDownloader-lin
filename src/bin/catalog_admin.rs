@@ -19,7 +19,7 @@ use arctic_downloader::model::{
 use arctic_downloader::ram::RamTier;
 use arctic_downloader::vram::VramTier;
 
-const APP_ID: &str = "dev.wknd.CatalogAdmin";
+const APP_ID: &str = "io.github.ArcticDownloader.CatalogAdmin";
 const DEFAULT_CATALOG_PATH: &str = "data/catalog.json";
 
 fn main() -> Result<()> {

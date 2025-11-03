@@ -21,13 +21,13 @@ This repository currently contains:
   authenticated downloads (with clear guidance when a token is missing).
 - A versioned catalog template (`data/catalog.json`) describing master models, variants, “always-on”
   assets, and target categories with optional RAM tier requirements.
-- A Flatpak manifest targeting `org.gnome.Platform//49` (see `flatpak/dev.wknd.ArcticDownloader.yaml`).
+- A Flatpak manifest targeting `org.gnome.Platform//49` (see `flatpak/io.github.ArcticDownloader.yaml`).
 
 ## Repository Layout
 
 - `Cargo.toml` / `src/` — application sources.
 - `data/catalog.json` — curated model/variant metadata shipped with the app.
-- `flatpak/dev.wknd.ArcticDownloader.yaml` — Flatpak builder manifest.
+- `flatpak/io.github.ArcticDownloader.yaml` — Flatpak builder manifest.
 
 ## Developing Locally
 
@@ -78,8 +78,8 @@ flatpak install org.gnome.Platform//49 org.gnome.Sdk//49 org.freedesktop.Sdk.Ext
 
 Then perform a local build:
 ```bash
-flatpak-builder --user --install --force-clean build-dir flatpak/dev.wknd.ArcticDownloader.yaml
-flatpak run dev.wknd.ArcticDownloader
+flatpak-builder --user --install --force-clean build-dir flatpak/io.github.ArcticDownloader.yaml
+flatpak run io.github.ArcticDownloader
 ```
 
 ## Catalog Curation
@@ -101,7 +101,7 @@ will add signature verification and remote catalog refreshes.
 ### Remote Catalog Refresh
 
 - The app boots using a cached copy of `catalog.json` (stored under
-  `~/.cache/dev.wknd.ArcticDownloader/catalog.json`) or the bundled fallback.
+  `~/.cache/io.github.ArcticDownloader/catalog.json`) or the bundled fallback.
 - On launch it performs an HTTP GET against the catalog endpoint recorded in `settings.json`
   (`catalog_endpoint`). A successful `200 OK` replaces the in-memory catalog, persists the JSON to
   the cache, and stores the returned `ETag` so subsequent runs can short-circuit with `304 Not

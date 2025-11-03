@@ -1,4 +1,4 @@
-app-id: dev.wknd.ArcticDownloader
+app-id: io.github.ArcticDownloader
 runtime: org.gnome.Platform
 runtime-version: "49"
 sdk: org.gnome.Sdk
