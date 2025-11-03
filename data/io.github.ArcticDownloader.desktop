@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Arctic Downloader
+Comment=Download curated ComfyUI models for your hardware
+Exec=arctic-downloader
+Icon=io.github.ArcticDownloader
+Terminal=false
+Type=Application
+Categories=Graphics;Utility;
+StartupNotify=true
