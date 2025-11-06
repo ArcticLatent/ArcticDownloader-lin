@@ -60,6 +60,7 @@ That’s it—browse the catalog, pick what you want, and click download. The ap
   ```
 
 - If you already ran my post-install script from <https://github.com/ArcticLatent/post-linux>, you’re all set—those packages are included.
+- Some Civitai creators require you to be logged in to download their LoRAs. If you see an “unauthorized” download error, create a free API key on the Civitai website, paste it into the LoRA section inside Arctic Downloader, and hit Save.
 
 ## Need Help?
 
