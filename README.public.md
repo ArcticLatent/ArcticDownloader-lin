@@ -34,3 +34,21 @@ That’s it—browse the catalog, pick what you want, and click download. The ap
 If you need help, hit a problem, or spot a bug in the app, please open an issue in this GitHub repository so we can take a look.
 
 Enjoy smoother ComfyUI setups!
+
+## Requirements
+
+- Active internet connection for downloading models and LoRAs.
+- GStreamer media components so the app can display video previews inside the catalog. Install them with:
+
+  ```bash
+  # Ubuntu / Debian / Linux Mint
+  sudo apt install libgtk-4-media-gstreamer
+
+  # Fedora
+  sudo dnf install gstreamer1-plugin-gtk4
+
+  # Arch / Manjaro
+  sudo pacman -S gstreamer gst-plugin-gtk
+  ```
+
+- If you already ran my post-install script from <https://github.com/ArcticLatent/post-linux>, you’re all set—those packages are included.
