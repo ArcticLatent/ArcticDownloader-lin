@@ -4,6 +4,8 @@
 
 # Arctic Downloader
 
+### ComfyUI Asset Helper by Arctic Latent
+
 Arctic Downloader is a helper app for people who run ComfyUI and want a simple way to grab the right models, VAE files, and LoRAs for their setup. It’s curated to mirror the builds shown in my YouTube tutorials so you can follow along without hunting for the assets yourself. Think of it as a catalog with a big “download” button that understands your hardware limits so you don’t have to guess which files will actually fit.
 
 ## What it does
