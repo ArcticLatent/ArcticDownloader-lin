@@ -8,7 +8,7 @@ use crate::{
 use adw::gio;
 use adw::gtk::{
     self, gdk, prelude::*, Align, Box as GtkBox, Button, ComboBoxText, CssProvider, Entry,
-    FileChooserAction, FileChooserNative, FlowBox, Label, MediaFile, Orientation, Picture,
+    FileChooserAction, FileChooserNative, FlowBox, Label, ListBox, MediaFile, Orientation, Picture,
     ResponseType, Separator,
 };
 use adw::{Application, ApplicationWindow, HeaderBar, Toast, ToastOverlay, WindowTitle};
@@ -19,7 +19,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc::{self, TryRecvError},
     time::Duration,
@@ -472,6 +472,7 @@ fn build_model_page(
 
             resolved.variant.artifacts = plan_artifacts;
 
+            let comfy_root_for_summary = comfy_path.clone();
             let downloads = context.downloads.clone();
             let overlay_clone = overlay.clone();
             let master_name = resolved.master.display_name.clone();
@@ -637,6 +638,21 @@ fn build_model_page(
                         let summary =
                             format!("Finished: {downloaded} downloaded, {skipped} skipped.");
                         overlay_clone.add_toast(Toast::new(&summary));
+                        let summary_entries: Vec<DownloadSummaryEntry> = outcomes
+                            .iter()
+                            .filter(|outcome| outcome.status == DownloadStatus::Downloaded)
+                            .map(|outcome| DownloadSummaryEntry {
+                                file_name: outcome.artifact.file_name().to_string(),
+                                destination: outcome.destination.clone(),
+                            })
+                            .collect();
+                        if !summary_entries.is_empty() {
+                            show_download_summary_window(
+                                overlay_clone.clone(),
+                                &comfy_root_for_summary,
+                                &summary_entries,
+                            );
+                        }
                     }
                     Ok(Err(err)) => {
                         progress_label_async.set_text(&format!("Download failed: {err}"));
@@ -1385,6 +1401,7 @@ fn build_lora_page(
         let status_label_async = status_label_for_download.clone();
         let download_button_async = download_button_for_download.clone();
         adw::glib::MainContext::default().spawn_local(async move {
+            let comfy_root_for_summary = comfy_path.clone();
             let handle = downloads.download_lora(comfy_path, lora, civitai_token, progress_sender);
             match handle.await {
                 Ok(Ok(outcome)) => {
@@ -1398,6 +1415,20 @@ fn build_lora_page(
                             status_label_async.set_text("LoRA download complete.");
                             let toast = format!("Saved {}", outcome.destination.display());
                             overlay_clone.add_toast(Toast::new(&toast));
+                            let file_name = outcome
+                                .destination
+                                .file_name()
+                                .map(|name| name.to_string_lossy().to_string())
+                                .unwrap_or_else(|| outcome.lora.derived_file_name());
+                            let summary_entries = vec![DownloadSummaryEntry {
+                                file_name,
+                                destination: outcome.destination.clone(),
+                            }];
+                            show_download_summary_window(
+                                overlay_clone.clone(),
+                                &comfy_root_for_summary,
+                                &summary_entries,
+                            );
                         }
                         DownloadStatus::SkippedExisting => {
                             let message = "You already downloaded this LoRA.";
@@ -1596,6 +1627,165 @@ fn build_quant_legend() -> GtkBox {
     legend
 }
 
+#[derive(Clone)]
+struct DownloadSummaryEntry {
+    file_name: String,
+    destination: PathBuf,
+}
+
+fn show_download_summary_window(
+    overlay: ToastOverlay,
+    comfy_root: &Path,
+    entries: &[DownloadSummaryEntry],
+) {
+    let Some(parent_window) = overlay
+        .root()
+        .and_then(|root| root.downcast::<ApplicationWindow>().ok())
+    else {
+        overlay.add_toast(Toast::new("Could not determine top-level window."));
+        return;
+    };
+
+    if entries.is_empty() {
+        return;
+    }
+
+    let summary_window = gtk::Window::builder()
+        .transient_for(&parent_window)
+        .modal(true)
+        .title("Downloads Complete")
+        .default_width(520)
+        .default_height(360)
+        .build();
+
+    let content = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(12)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+
+    let intro_label = Label::builder()
+        .label("The following files were downloaded:")
+        .halign(Align::Start)
+        .wrap(true)
+        .build();
+    content.append(&intro_label);
+
+    let list_box = ListBox::builder()
+        .selection_mode(gtk::SelectionMode::Single)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+
+    let mut folder_entries: Vec<PathBuf> = Vec::new();
+
+    for entry in entries {
+        let file_name = entry.file_name.clone();
+        let folder_path = entry
+            .destination
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| entry.destination.clone());
+
+        let display_folder = folder_path
+            .strip_prefix(comfy_root)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| folder_path.display().to_string());
+
+        let row_box = GtkBox::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(4)
+            .build();
+        row_box.add_css_class("download-summary-row");
+
+        let file_label = Label::builder()
+            .label(file_name)
+            .halign(Align::Start)
+            .wrap(true)
+            .build();
+
+        let folder_label = Label::builder()
+            .label(display_folder)
+            .halign(Align::Start)
+            .wrap(true)
+            .build();
+        folder_label.add_css_class("caption");
+
+        row_box.append(&file_label);
+        row_box.append(&folder_label);
+
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&row_box));
+        list_box.append(&row);
+
+        folder_entries.push(folder_path);
+    }
+
+    let scroller = gtk::ScrolledWindow::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .child(&list_box)
+        .build();
+    content.append(&scroller);
+
+    let buttons_row = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(6)
+        .halign(Align::End)
+        .build();
+
+    let open_button = Button::with_label("Open Folder");
+    open_button.set_sensitive(false);
+    let close_button = Button::with_label("Close");
+
+    let summary_window_for_close = summary_window.clone();
+    close_button.connect_clicked(move |_| {
+        summary_window_for_close.close();
+    });
+
+    let folder_entries = Rc::new(folder_entries);
+    let list_box_for_open = list_box.clone();
+    let overlay_for_open = overlay.clone();
+    open_button.connect_clicked(move |_| {
+        if let Some(row) = list_box_for_open.selected_row() {
+            let index = row.index();
+            if index >= 0 {
+                if let Some(folder) = folder_entries.get(index as usize) {
+                    let file = gio::File::for_path(folder);
+                    let uri = file.uri();
+                    if let Err(err) = gio::AppInfo::launch_default_for_uri(
+                        uri.as_str(),
+                        None::<&gio::AppLaunchContext>,
+                    ) {
+                        let message = format!("Failed to open folder {}: {err}", folder.display());
+                        overlay_for_open.add_toast(Toast::new(&message));
+                        adw::glib::g_warning!(crate::app::APP_ID, "{message}");
+                    }
+                }
+            }
+        }
+    });
+
+    let open_button_for_selection = open_button.clone();
+    list_box.connect_row_selected(move |_, row| {
+        open_button_for_selection.set_sensitive(row.is_some());
+    });
+
+    if let Some(row) = list_box.row_at_index(0) {
+        list_box.select_row(Some(&row));
+    }
+
+    buttons_row.append(&close_button);
+    buttons_row.append(&open_button);
+    content.append(&buttons_row);
+
+    summary_window.set_child(Some(&content));
+    summary_window.present();
+}
+
 #[derive(Clone, Debug)]
 struct EntryState {
     received: u64,
@@ -1682,10 +1872,12 @@ fn open_folder_picker(
     }
 
     let overlay_clone = overlay.clone();
+    let chooser_keepalive = chooser.clone();
     let entry_clone = entry.clone();
     let context_clone = context.clone();
     let shared_entries_clone = Rc::clone(&shared_entries);
     chooser.connect_response(move |dialog, response| {
+        let _keepalive = chooser_keepalive.clone();
         let overlay = overlay_clone.clone();
         let entry = entry_clone.clone();
         let context = context_clone.clone();

@@ -31,12 +31,12 @@
           "artifacts": [
             {
               "repo": "hf://arcticlatent/wan2.2@main",
-              "path": "vae/wan_2.1_vae.safetensors",
+              "path": "vae/wan2.2_vae.safetensors",
               "sha256": null,
               "size_bytes": null,
               "target_category": "vae",
               "license_url": null,
-              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/vae/wan_2.1_vae.safetensors"
+              "direct_url": "https://huggingface.co/arcticlatent/wan2.2/resolve/main/vae/wan2.2_vae.safetensors"
             }
           ]
         },
