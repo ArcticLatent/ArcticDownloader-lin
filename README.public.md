@@ -18,7 +18,7 @@ Arctic Downloader is a helper app for people who run ComfyUI and want a simple w
 
 1. **Install ComfyUI** and make sure you know where its folder lives.
 2. **Download the latest `.flatpak` release** from this repository’s Releases page.
-3. Install it (for example on Linux: `flatpak install arctic-downloader.flatpak`).
+3. Install it (`flatpak install arctic-downloader.flatpak`).
 4. Launch Arctic Downloader and pick your ComfyUI folder when prompted.
 
 That’s it—browse the catalog, pick what you want, and click download. The app handles the rest.
