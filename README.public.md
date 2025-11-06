@@ -38,7 +38,7 @@ Enjoy smoother ComfyUI setups!
 ## Requirements
 
 - Active internet connection for downloading models and LoRAs.
-- GStreamer media components so the app can display video previews inside the catalog. Install them with:
+- GStreamer media components (only needed for Civitai LoRAs that include video previews). Install them with:
 
   ```bash
   # Ubuntu / Debian / Linux Mint
