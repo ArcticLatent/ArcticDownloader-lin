@@ -38,6 +38,19 @@ Enjoy smoother ComfyUI setups!
 ## Requirements
 
 - Active internet connection for downloading models and LoRAs.
+- Flatpak installed on your system. Install it with:
+
+  ```bash
+  # Ubuntu / Debian / Linux Mint
+  sudo apt install flatpak
+
+  # Fedora (already included on Workstation editions, but here’s the command just in case)
+  sudo dnf install flatpak
+
+  # Arch / Manjaro
+  sudo pacman -S flatpak
+  ```
+
 - GStreamer media components (only needed for Civitai LoRAs that include video previews). Install them with:
 
   ```bash
