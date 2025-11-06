@@ -29,12 +29,6 @@ That’s it—browse the catalog, pick what you want, and click download. The ap
 - Use the legend inside the app if you want a refresher on the quantization shorthand (fp16, fp8, GGUF, etc.).
 - If you drop in new hardware later, just change your tier in the app and it will show the upgraded variants automatically.
 
-## Need Help?
-
-If you need help, hit a problem, or spot a bug in the app, please open an issue in this GitHub repository so we can take a look.
-
-Enjoy smoother ComfyUI setups!
-
 ## Requirements
 
 - Active internet connection for downloading models and LoRAs.
@@ -65,3 +59,9 @@ Enjoy smoother ComfyUI setups!
   ```
 
 - If you already ran my post-install script from <https://github.com/ArcticLatent/post-linux>, you’re all set—those packages are included.
+
+## Need Help?
+
+If you need help, hit a problem, or spot a bug in the app, please open an issue in this GitHub repository so we can take a look.
+
+Enjoy smoother ComfyUI setups!
