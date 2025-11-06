@@ -10,6 +10,7 @@ Arctic Downloader is a helper app for people who run ComfyUI and want a simple w
 
 - Shows a catalog of hand-picked ComfyUI models and LoRAs.
 - Lets you choose your GPU VRAM and system RAM, then highlights the variants that make sense for those limits.
+- Automatically grabs the “always needed” extras (text encoders, CLIPs, upscalers, and similar helpers) so nothing is missing.
 - Saves everything into the right subfolders under your ComfyUI installation so you can start using the files right away.
 - Gives you live progress for each download and, when it’s done, lists exactly which files landed where (with quick-open buttons).
 - Supports optional Civitai API tokens for LoRAs that need an account.
