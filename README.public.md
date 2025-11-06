@@ -31,6 +31,6 @@ That’s it—browse the catalog, pick what you want, and click download. The ap
 
 ## Need Help?
 
-Check the Toast notifications inside the app for quick hints, or join the Arctic Latent community (YouTube & GitHub links are built into the footer). Feel free to open an issue here if something doesn’t download or a link goes stale.
+If you need help, hit a problem, or spot a bug in the app, please open an issue in this GitHub repository so we can take a look.
 
-Enjoy smoother ComfyUI setups! 
+Enjoy smoother ComfyUI setups!
