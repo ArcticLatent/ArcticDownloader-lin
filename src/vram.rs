@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VramTier {
     TierS,
@@ -60,6 +60,15 @@ impl VramTier {
         }
     }
 
+    pub fn shorthand(self) -> &'static str {
+        match self {
+            VramTier::TierS => "S",
+            VramTier::TierA => "A",
+            VramTier::TierB => "B",
+            VramTier::TierC => "C",
+        }
+    }
+
     pub fn description(self) -> &'static str {
         match self {
             VramTier::TierS => "Tier S (32 GB+)",
@@ -76,6 +85,24 @@ impl VramTier {
             "tier_b" | "B" | "b" => Some(VramTier::TierB),
             "tier_c" | "C" | "c" => Some(VramTier::TierC),
             _ => None,
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            VramTier::TierS => 0,
+            VramTier::TierA => 1,
+            VramTier::TierB => 2,
+            VramTier::TierC => 3,
+        }
+    }
+
+    pub fn next_stronger(self) -> Option<VramTier> {
+        match self {
+            VramTier::TierS => None,
+            VramTier::TierA => Some(VramTier::TierS),
+            VramTier::TierB => Some(VramTier::TierA),
+            VramTier::TierC => Some(VramTier::TierB),
         }
     }
 }

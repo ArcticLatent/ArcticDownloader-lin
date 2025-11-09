@@ -1,5 +1,5 @@
 use crate::{ram::RamTier, vram::VramTier};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelCatalog {
@@ -28,6 +28,17 @@ impl ModelCatalog {
     pub fn find_lora(&self, id: &str) -> Option<LoraDefinition> {
         self.loras.iter().find(|l| l.id == id).cloned()
     }
+
+    pub fn model_families(&self) -> Vec<String> {
+        let mut families: Vec<String> = self
+            .models
+            .iter()
+            .map(|model| model.family.clone())
+            .collect();
+        families.sort();
+        families.dedup();
+        families
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -38,6 +49,8 @@ pub struct MasterModel {
     pub variants: Vec<ModelVariant>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub always: Vec<AlwaysGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_tier_thresholds: Option<RamTierThresholds>,
 }
 
 impl MasterModel {
@@ -90,6 +103,14 @@ impl MasterModel {
 
         artifacts
     }
+
+    pub fn resolved_ram_thresholds(&self) -> ResolvedRamTierThresholds {
+        ResolvedRamTierThresholds::new(self.ram_tier_thresholds.as_ref())
+    }
+
+    pub fn ram_tier_range_label(&self, tier: RamTier) -> String {
+        self.resolved_ram_thresholds().range_label(tier)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +132,81 @@ pub struct AlwaysGroup {
     pub label: Option<String>,
     #[serde(default)]
     pub artifacts: Vec<ModelArtifact>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RamTierThresholds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_a_min_gb: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_b_min_gb: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_c_min_gb: Option<f64>,
+}
+
+impl RamTierThresholds {
+    pub fn min_for(&self, tier: RamTier) -> Option<f64> {
+        match tier {
+            RamTier::TierA => self.tier_a_min_gb,
+            RamTier::TierB => self.tier_b_min_gb,
+            RamTier::TierC => self.tier_c_min_gb,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tier_a_min_gb.is_none() && self.tier_b_min_gb.is_none() && self.tier_c_min_gb.is_none()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedRamTierThresholds {
+    mins: [f64; 3],
+}
+
+impl Default for ResolvedRamTierThresholds {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl ResolvedRamTierThresholds {
+    pub fn new(overrides: Option<&RamTierThresholds>) -> Self {
+        let mut mins = [0.0; 3];
+        for tier in RamTier::all() {
+            let idx = tier.index();
+            mins[idx] = overrides
+                .and_then(|o| o.min_for(*tier))
+                .unwrap_or(tier.min_ram_gb() as f64);
+        }
+        Self { mins }
+    }
+
+    pub fn min(&self, tier: RamTier) -> f64 {
+        self.mins[tier.index()]
+    }
+
+    pub fn range_label(&self, tier: RamTier) -> String {
+        let min = self.min(tier);
+        if let Some(next) = tier.next_stronger() {
+            let next_min = self.min(next);
+            if min <= 0.0 {
+                format!("< {} GB", format_gb(next_min))
+            } else {
+                format!("{}-{} GB", format_gb(min), format_gb(next_min))
+            }
+        } else {
+            format!("≥ {} GB", format_gb(min))
+        }
+    }
+}
+
+fn format_gb(value: f64) -> String {
+    let rounded = (value * 10.0).round() / 10.0;
+    if (rounded.fract()).abs() < 0.05 {
+        format!("{:.0}", rounded.round())
+    } else {
+        format!("{:.1}", rounded)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -242,26 +338,22 @@ impl ModelArtifact {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TargetCategory {
-    #[serde(alias = "checkpoints")]
     DiffusionModels,
     Vae,
-    #[serde(alias = "clip")]
-    #[serde(alias = "text_encoders")]
     TextEncoders,
     ClipVision,
     Unet,
     Loras,
     Ipadapter,
     Controlnet,
-    #[serde(other)]
-    Unknown,
+    Pulid,
+    Custom(String),
 }
 
 impl TargetCategory {
-    pub fn slug(&self) -> &'static str {
+    pub fn slug(&self) -> &str {
         match self {
             TargetCategory::DiffusionModels => "diffusion_models",
             TargetCategory::Vae => "vae",
@@ -271,50 +363,53 @@ impl TargetCategory {
             TargetCategory::Loras => "loras",
             TargetCategory::Ipadapter => "ipadapter",
             TargetCategory::Controlnet => "controlnet",
-            TargetCategory::Unknown => "unknown",
+            TargetCategory::Pulid => "pulid",
+            TargetCategory::Custom(value) => value,
         }
     }
 
-    pub fn from_slug(slug: &str) -> Option<Self> {
+    pub fn from_slug(slug: &str) -> Self {
         match slug {
-            "diffusion_models" | "checkpoints" => Some(TargetCategory::DiffusionModels),
-            "vae" => Some(TargetCategory::Vae),
-            "text_encoders" | "clip" => Some(TargetCategory::TextEncoders),
-            "clip_vision" => Some(TargetCategory::ClipVision),
-            "unet" => Some(TargetCategory::Unet),
-            "loras" => Some(TargetCategory::Loras),
-            "ipadapter" => Some(TargetCategory::Ipadapter),
-            "controlnet" => Some(TargetCategory::Controlnet),
-            "unknown" => Some(TargetCategory::Unknown),
-            _ => None,
+            "diffusion_models" | "checkpoints" => TargetCategory::DiffusionModels,
+            "vae" => TargetCategory::Vae,
+            "text_encoders" | "clip" => TargetCategory::TextEncoders,
+            "clip_vision" => TargetCategory::ClipVision,
+            "unet" => TargetCategory::Unet,
+            "loras" => TargetCategory::Loras,
+            "ipadapter" => TargetCategory::Ipadapter,
+            "controlnet" => TargetCategory::Controlnet,
+            "pulid" => TargetCategory::Pulid,
+            other => TargetCategory::Custom(other.to_string()),
         }
     }
 
-    pub fn comfyui_subdir(&self) -> &'static str {
+    pub fn comfyui_subdir(&self) -> String {
         match self {
-            TargetCategory::DiffusionModels => "models/diffusion_models",
-            TargetCategory::Vae => "models/vae",
-            TargetCategory::TextEncoders => "models/text_encoders",
-            TargetCategory::ClipVision => "models/clip_vision",
-            TargetCategory::Unet => "models/unet",
-            TargetCategory::Loras => "models/loras",
-            TargetCategory::Ipadapter => "models/ipadapter",
-            TargetCategory::Controlnet => "models/controlnet",
-            TargetCategory::Unknown => "models",
+            TargetCategory::DiffusionModels => "models/diffusion_models".to_string(),
+            TargetCategory::Vae => "models/vae".to_string(),
+            TargetCategory::TextEncoders => "models/text_encoders".to_string(),
+            TargetCategory::ClipVision => "models/clip_vision".to_string(),
+            TargetCategory::Unet => "models/unet".to_string(),
+            TargetCategory::Loras => "models/loras".to_string(),
+            TargetCategory::Ipadapter => "models/ipadapter".to_string(),
+            TargetCategory::Controlnet => "models/controlnet".to_string(),
+            TargetCategory::Pulid => "models/pulid".to_string(),
+            TargetCategory::Custom(slug) => format!("models/{slug}"),
         }
     }
 
-    pub fn display_name(&self) -> &'static str {
+    pub fn display_name(&self) -> String {
         match self {
-            TargetCategory::DiffusionModels => "Diffusion Model",
-            TargetCategory::Vae => "VAE",
-            TargetCategory::TextEncoders => "Text Encoder",
-            TargetCategory::ClipVision => "CLIP Vision",
-            TargetCategory::Unet => "UNet",
-            TargetCategory::Loras => "LoRA",
-            TargetCategory::Ipadapter => "IP-Adapter",
-            TargetCategory::Controlnet => "ControlNet",
-            TargetCategory::Unknown => "Other",
+            TargetCategory::DiffusionModels => "Diffusion Model".to_string(),
+            TargetCategory::Vae => "VAE".to_string(),
+            TargetCategory::TextEncoders => "Text Encoder".to_string(),
+            TargetCategory::ClipVision => "CLIP Vision".to_string(),
+            TargetCategory::Unet => "UNet".to_string(),
+            TargetCategory::Loras => "LoRA".to_string(),
+            TargetCategory::Ipadapter => "IP-Adapter".to_string(),
+            TargetCategory::Controlnet => "ControlNet".to_string(),
+            TargetCategory::Pulid => "PuLID".to_string(),
+            TargetCategory::Custom(slug) => slug.clone(),
         }
     }
 
@@ -328,8 +423,27 @@ impl TargetCategory {
             "LoRA" => Some(TargetCategory::Loras),
             "IP-Adapter" => Some(TargetCategory::Ipadapter),
             "ControlNet" => Some(TargetCategory::Controlnet),
-            "Other" => Some(TargetCategory::Unknown),
-            _ => None,
+            "PuLID" => Some(TargetCategory::Pulid),
+            other => Some(TargetCategory::Custom(other.to_string())),
         }
+    }
+}
+
+impl Serialize for TargetCategory {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.slug())
+    }
+}
+
+impl<'de> Deserialize<'de> for TargetCategory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(TargetCategory::from_slug(&value))
     }
 }

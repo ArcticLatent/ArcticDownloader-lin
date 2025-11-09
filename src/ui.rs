@@ -1,7 +1,7 @@
 use crate::{
     app::AppContext,
     download::{CivitaiPreview, DownloadError, DownloadSignal, DownloadStatus},
-    model::{LoraDefinition, ResolvedModel},
+    model::{LoraDefinition, ModelCatalog, ResolvedModel, ResolvedRamTierThresholds},
     ram::RamTier,
     vram::VramTier,
 };
@@ -229,15 +229,15 @@ fn build_model_page(
 
     let catalog = context.catalog.catalog_snapshot();
 
+    let family_dropdown = ComboBoxText::new();
+    family_dropdown.append(Some("all"), "All Families");
+    for family in catalog.model_families() {
+        family_dropdown.append(Some(family.as_str()), &family);
+    }
+    family_dropdown.set_active(Some(0));
+
     let model_dropdown = ComboBoxText::new();
-    let mut has_models = false;
-    for model in catalog.models {
-        model_dropdown.append(Some(&model.id), &model.display_name);
-        has_models = true;
-    }
-    if has_models {
-        model_dropdown.set_active(Some(0));
-    }
+    rebuild_model_dropdown(&model_dropdown, &catalog, None, None);
 
     let vram_dropdown = ComboBoxText::new();
     for tier in VramTier::all() {
@@ -246,15 +246,6 @@ fn build_model_page(
     vram_dropdown.set_active(Some(0));
 
     let ram_dropdown = ComboBoxText::new();
-    for tier in RamTier::all() {
-        ram_dropdown.append(Some(tier.identifier()), tier.description());
-    }
-    if let Some(tier) = context.ram_tier() {
-        ram_dropdown.set_active_id(Some(tier.identifier()));
-    }
-    if ram_dropdown.active().is_none() {
-        ram_dropdown.set_active(Some(0));
-    }
 
     let variant_dropdown = ComboBoxText::new();
     variant_dropdown.set_sensitive(false);
@@ -303,6 +294,18 @@ fn build_model_page(
     let status_label_clone_for_button = status_label.clone();
 
     let resolved_variant: Rc<RefCell<Option<ResolvedModel>>> = Rc::new(RefCell::new(None));
+
+    update_ram_dropdown_for_model(
+        &context,
+        &ram_dropdown,
+        model_dropdown.active_id().map(|id| id.to_string()),
+    );
+    if let Some(tier) = context.ram_tier() {
+        ram_dropdown.set_active_id(Some(tier.identifier()));
+    }
+    if ram_dropdown.active().is_none() {
+        ram_dropdown.set_active(Some(0));
+    }
 
     let apply_variant_selection: Rc<dyn Fn()> = {
         let context = context.clone();
@@ -383,7 +386,33 @@ fn build_model_page(
 
     {
         let refresh_variants = refresh_variants.clone();
-        model_dropdown.connect_changed(move |_| {
+        let context = context.clone();
+        let ram_dropdown = ram_dropdown.clone();
+        model_dropdown.connect_changed(move |combo| {
+            let model_id = combo.active_id().map(|id| id.to_string());
+            update_ram_dropdown_for_model(&context, &ram_dropdown, model_id);
+            refresh_variants();
+        });
+    }
+
+    {
+        let catalog = catalog.clone();
+        let model_dropdown = model_dropdown.clone();
+        let refresh_variants = refresh_variants.clone();
+        let family_dropdown = family_dropdown.clone();
+        let ram_dropdown = ram_dropdown.clone();
+        let context = context.clone();
+        family_dropdown.connect_changed(move |combo| {
+            let selected = combo.active_id().map(|id| id.to_string());
+            let filter = selected
+                .as_deref()
+                .filter(|value| !value.is_empty() && *value != "all");
+            let previous_model = model_dropdown.active_id().map(|id| id.to_string());
+
+            rebuild_model_dropdown(&model_dropdown, &catalog, filter, previous_model.as_deref());
+
+            let model_id = model_dropdown.active_id().map(|id| id.to_string());
+            update_ram_dropdown_for_model(&context, &ram_dropdown, model_id.clone());
             refresh_variants();
         });
     }
@@ -681,6 +710,7 @@ fn build_model_page(
 
     refresh_variants();
 
+    column.append(&labelled_row("Model Family", &family_dropdown));
     column.append(&labelled_row("Master Model", &model_dropdown));
     column.append(&labelled_row("GPU VRAM", &vram_dropdown));
     column.append(&labelled_row("System RAM", &ram_dropdown));
@@ -1581,6 +1611,35 @@ fn labelled_row(label: &str, widget: &impl IsA<gtk::Widget>) -> GtkBox {
     row
 }
 
+fn update_ram_dropdown_for_model(
+    context: &AppContext,
+    dropdown: &ComboBoxText,
+    model_id: Option<String>,
+) {
+    let snapshot = context.catalog.catalog_snapshot();
+    let thresholds = model_id
+        .as_deref()
+        .and_then(|id| snapshot.find_model(id))
+        .map(|model| model.resolved_ram_thresholds())
+        .unwrap_or_default();
+    rebuild_ram_dropdown(dropdown, &thresholds);
+}
+
+fn rebuild_ram_dropdown(dropdown: &ComboBoxText, thresholds: &ResolvedRamTierThresholds) {
+    let current = dropdown.active_id().map(|id| id.to_string());
+    dropdown.remove_all();
+    for tier in RamTier::all() {
+        let label = format!("{} ({})", tier.label(), thresholds.range_label(*tier));
+        dropdown.append(Some(tier.identifier()), &label);
+    }
+    if let Some(ref id) = current {
+        dropdown.set_active_id(Some(id));
+    }
+    if dropdown.active().is_none() {
+        dropdown.set_active(Some(0));
+    }
+}
+
 fn build_quant_legend() -> GtkBox {
     let legend = GtkBox::builder()
         .orientation(Orientation::Vertical)
@@ -1625,6 +1684,46 @@ fn build_quant_legend() -> GtkBox {
     legend.append(&quant_description);
 
     legend
+}
+
+fn rebuild_model_dropdown(
+    dropdown: &ComboBoxText,
+    catalog: &ModelCatalog,
+    family_filter: Option<&str>,
+    preferred_id: Option<&str>,
+) -> bool {
+    let filter = family_filter.map(|value| value.to_ascii_lowercase());
+    let prefer = preferred_id.map(str::to_string);
+    dropdown.remove_all();
+
+    let mut has_models = false;
+    let mut preferred_present = false;
+    for model in &catalog.models {
+        if let Some(ref filter_value) = filter {
+            if !model.family.eq_ignore_ascii_case(filter_value) {
+                continue;
+            }
+        }
+        dropdown.append(Some(&model.id), &model.display_name);
+        has_models = true;
+        if let Some(ref prefer_id) = prefer {
+            if prefer_id == &model.id {
+                preferred_present = true;
+            }
+        }
+    }
+
+    if has_models {
+        if preferred_present {
+            if let Some(ref prefer_id) = prefer {
+                dropdown.set_active_id(Some(prefer_id));
+            }
+        } else {
+            dropdown.set_active(Some(0));
+        }
+    }
+
+    has_models
 }
 
 #[derive(Clone)]

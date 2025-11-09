@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RamTier {
     TierA,
@@ -53,12 +53,36 @@ impl RamTier {
         }
     }
 
+    pub fn shorthand(self) -> &'static str {
+        match self {
+            RamTier::TierA => "A",
+            RamTier::TierB => "B",
+            RamTier::TierC => "C",
+        }
+    }
+
     pub fn from_identifier(id: &str) -> Option<Self> {
         match id {
             "tier_a" | "A" | "a" => Some(RamTier::TierA),
             "tier_b" | "B" | "b" => Some(RamTier::TierB),
             "tier_c" | "C" | "c" => Some(RamTier::TierC),
             _ => None,
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            RamTier::TierA => 0,
+            RamTier::TierB => 1,
+            RamTier::TierC => 2,
+        }
+    }
+
+    pub fn next_stronger(self) -> Option<RamTier> {
+        match self {
+            RamTier::TierA => None,
+            RamTier::TierB => Some(RamTier::TierA),
+            RamTier::TierC => Some(RamTier::TierB),
         }
     }
 

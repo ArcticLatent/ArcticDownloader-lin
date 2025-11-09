@@ -48,20 +48,7 @@ That’s it—browse the catalog, pick what you want, and click download. The ap
   sudo pacman -S flatpak
   ```
 
-- GStreamer media components (only needed for Civitai LoRAs that include video previews). Install them with:
-
-  ```bash
-  # Ubuntu / Debian / Linux Mint
-  sudo apt install libgtk-4-media-gstreamer
-
-  # Fedora
-  sudo dnf install gstreamer1-plugin-gtk4
-
-  # Arch / Manjaro
-  sudo pacman -S gstreamer gst-plugin-gtk
-  ```
-
-- If you already ran my post-install script from <https://github.com/ArcticLatent/post-linux> (the helper that installs GPU drivers, codecs, hardware acceleration, and other essentials per distro), you’re all set—those packages are included.
+- If you already ran my post-install script from <https://github.com/ArcticLatent/post-linux> (the helper that installs GPU drivers, codecs, hardware acceleration, and other essentials per distro), you’re all set—it already covers the Flatpak/runtime prerequisites.
 - Some Civitai creators require you to be logged in to download their LoRAs. If you see an “unauthorized” download error, create a free API key on the Civitai website, paste it into the LoRA section inside Arctic Downloader, and hit Save.
 - Your API key never leaves your machine. It’s stored in the local configuration file and only attached to the authenticated download request sent to Civitai.
 

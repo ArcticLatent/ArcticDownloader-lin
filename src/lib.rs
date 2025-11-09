@@ -2,6 +2,7 @@ pub mod app;
 pub mod catalog;
 pub mod config;
 pub mod download;
+pub mod env_flags;
 pub mod model;
 pub mod ram;
 pub mod ui;

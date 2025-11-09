@@ -8,13 +8,13 @@ use std::{
 
 use adw::{
     gtk::{self, prelude::*, Align, Orientation, ResponseType, SelectionMode, StackTransitionType},
-    prelude::ActionRowExt,
+    prelude::{ActionRowExt, PreferencesRowExt},
     Application, ApplicationWindow, HeaderBar, Toast, ToastOverlay,
 };
 use anyhow::{anyhow, Context, Result};
 use arctic_downloader::model::{
     AlwaysGroup, LoraDefinition, MasterModel, ModelArtifact, ModelCatalog, ModelVariant,
-    TargetCategory,
+    RamTierThresholds, ResolvedRamTierThresholds, TargetCategory,
 };
 use arctic_downloader::ram::RamTier;
 use arctic_downloader::vram::VramTier;
@@ -78,6 +78,7 @@ struct ArtifactEditor {
 fn build_artifact_editor(
     presets: Vec<ArtifactRowPreset>,
     include_ram_combo: bool,
+    ram_thresholds: Option<ResolvedRamTierThresholds>,
 ) -> ArtifactEditor {
     let artifacts_list = gtk::Box::new(Orientation::Vertical, 6);
     artifacts_list.set_hexpand(true);
@@ -121,7 +122,13 @@ fn build_artifact_editor(
                 let combo = gtk::ComboBoxText::new();
                 combo.append(Some("any"), "Any RAM");
                 for tier in RamTier::all() {
-                    combo.append(Some(tier.identifier()), tier.description());
+                    let label = ram_thresholds
+                        .as_ref()
+                        .map(|thresholds| {
+                            format!("{} ({})", tier.label(), thresholds.range_label(*tier))
+                        })
+                        .unwrap_or_else(|| tier.description().to_string());
+                    combo.append(Some(tier.identifier()), &label);
                 }
                 combo.set_active_id(Some("any"));
                 combo.set_hexpand(false);
@@ -212,6 +219,20 @@ fn build_artifact_editor(
     }
 }
 
+fn scroll_to_bottom(scroller: &gtk::ScrolledWindow) {
+    let adjustment = scroller.vadjustment();
+    gtk::glib::idle_add_local_once(move || {
+        let upper = adjustment.upper();
+        let page = adjustment.page_size();
+        let target = (upper - page).max(0.0);
+        adjustment.set_value(target);
+    });
+}
+
+fn escape_markup(text: &str) -> String {
+    gtk::glib::markup_escape_text(text).to_string()
+}
+
 fn artifact_presets_from(artifacts: &[ModelArtifact]) -> Vec<ArtifactRowPreset> {
     artifacts
         .iter()
@@ -254,15 +275,7 @@ fn artifacts_from_rows(
             return None;
         }
 
-        let target_category = match TargetCategory::from_slug(&target_slug) {
-            Some(category) => category,
-            None => {
-                overlay.add_toast(Toast::new(&format!(
-                    "Unknown target category: {target_slug}"
-                )));
-                return None;
-            }
-        };
+        let target_category = TargetCategory::from_slug(&target_slug);
 
         let url_text = row.url_entry.text().trim().to_string();
         if url_text.is_empty() {
@@ -514,15 +527,10 @@ fn refresh_model_list(
     }
 
     for (idx, model) in state.borrow().catalog.models.iter().enumerate() {
-        let row = adw::ActionRow::builder()
-            .title(&model.display_name)
-            .subtitle(&format!(
-                "{} • {} variant(s)",
-                model.id,
-                model.variants.len()
-            ))
-            .activatable(false)
-            .build();
+        let subtitle = format!("{} • {} variant(s)", model.id, model.variants.len());
+        let row = adw::ActionRow::builder().activatable(false).build();
+        row.set_title(&escape_markup(&model.display_name));
+        row.set_subtitle(&escape_markup(&subtitle));
 
         let edit_button = gtk::Button::with_label("Edit");
         edit_button.set_halign(Align::Center);
@@ -602,11 +610,9 @@ fn refresh_lora_list(list: &gtk::ListBox, state: &SharedState, overlay: &ToastOv
             .map(|family| format!("{} • {}", lora.id, family))
             .unwrap_or_else(|| lora.id.clone());
 
-        let row = adw::ActionRow::builder()
-            .title(&lora.display_name)
-            .subtitle(&subtitle)
-            .activatable(false)
-            .build();
+        let row = adw::ActionRow::builder().activatable(false).build();
+        row.set_title(&escape_markup(&lora.display_name));
+        row.set_subtitle(&escape_markup(&subtitle));
 
         let edit_button = gtk::Button::with_label("Edit");
         edit_button.set_halign(Align::Center);
@@ -691,6 +697,7 @@ fn edit_model_dialog(
             family: String::new(),
             variants: Vec::new(),
             always: Vec::new(),
+            ram_tier_thresholds: None,
         }
     };
 
@@ -745,6 +752,51 @@ fn edit_model_dialog(
 
     content.append(&form);
 
+    let ram_heading = gtk::Label::new(Some("System RAM Tier Overrides (optional)"));
+    ram_heading.set_halign(Align::Start);
+    ram_heading.add_css_class("heading");
+    content.append(&ram_heading);
+
+    let ram_help = gtk::Label::new(Some(
+        "Override the minimum system RAM (in GB) each tier represents for this model. Leave blank to use the global defaults.",
+    ));
+    ram_help.set_halign(Align::Start);
+    ram_help.set_wrap(true);
+    content.append(&ram_help);
+
+    let ram_grid = gtk::Grid::builder()
+        .column_spacing(12)
+        .row_spacing(6)
+        .hexpand(true)
+        .build();
+
+    let overrides = model.ram_tier_thresholds.clone().unwrap_or_default();
+
+    let tier_a_entry = gtk::Entry::new();
+    tier_a_entry.set_placeholder_text(Some("Default: 64"));
+    if let Some(value) = overrides.tier_a_min_gb {
+        tier_a_entry.set_text(&format_gb(value));
+    }
+    add_row(&ram_grid, 0, "Tier A minimum (GB)", &tier_a_entry);
+
+    let tier_b_entry = gtk::Entry::new();
+    tier_b_entry.set_placeholder_text(Some("Default: 32"));
+    if let Some(value) = overrides.tier_b_min_gb {
+        tier_b_entry.set_text(&format_gb(value));
+    }
+    add_row(&ram_grid, 1, "Tier B minimum (GB)", &tier_b_entry);
+
+    let tier_c_entry = gtk::Entry::new();
+    tier_c_entry.set_placeholder_text(Some("Default: 0"));
+    if let Some(value) = overrides.tier_c_min_gb {
+        tier_c_entry.set_text(&format_gb(value));
+    }
+    add_row(&ram_grid, 2, "Tier C minimum (GB)", &tier_c_entry);
+
+    content.append(&ram_grid);
+
+    let ram_thresholds = model.resolved_ram_thresholds();
+
     let always_label = gtk::Label::new(Some("Always Artifacts"));
     always_label.set_halign(Align::Start);
     always_label.add_css_class("heading");
@@ -754,12 +806,21 @@ fn edit_model_dialog(
 
     let always_list = gtk::ListBox::new();
     always_list.set_selection_mode(SelectionMode::None);
-    refresh_always_rows(&always_list, &always_state, overlay, &dialog);
+    refresh_always_rows(
+        &always_list,
+        &always_state,
+        overlay,
+        &dialog,
+        ram_thresholds.clone(),
+    );
 
     let always_scroller = gtk::ScrolledWindow::builder()
-        .min_content_height(160)
+        .min_content_height(220)
+        .hexpand(true)
+        .vexpand(true)
         .child(&always_list)
         .build();
+    always_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     content.append(&always_scroller);
 
     let add_always_button = gtk::Button::with_label("Add Always Group");
@@ -771,10 +832,21 @@ fn edit_model_dialog(
         let always_list = always_list.clone();
         let overlay = overlay.clone();
         let dialog = dialog.clone();
+        let scroller = always_scroller.clone();
+        let thresholds = ram_thresholds.clone();
         add_always_button.connect_clicked(move |_| {
-            if let Some(group) = edit_always_group_dialog(None, &dialog, overlay.clone()) {
+            if let Some(group) =
+                edit_always_group_dialog(None, &dialog, overlay.clone(), thresholds.clone())
+            {
                 always_state.borrow_mut().push(group);
-                refresh_always_rows(&always_list, &always_state, &overlay, &dialog);
+                refresh_always_rows(
+                    &always_list,
+                    &always_state,
+                    &overlay,
+                    &dialog,
+                    thresholds.clone(),
+                );
+                scroll_to_bottom(&scroller);
             }
         });
     }
@@ -837,6 +909,19 @@ fn edit_model_dialog(
             return Ok(());
         }
 
+        let tier_a_min = match parse_ram_entry(&tier_a_entry, "Tier A minimum (GB)", overlay) {
+            Ok(value) => value,
+            Err(()) => return Ok(()),
+        };
+        let tier_b_min = match parse_ram_entry(&tier_b_entry, "Tier B minimum (GB)", overlay) {
+            Ok(value) => value,
+            Err(()) => return Ok(()),
+        };
+        let tier_c_min = match parse_ram_entry(&tier_c_entry, "Tier C minimum (GB)", overlay) {
+            Ok(value) => value,
+            Err(()) => return Ok(()),
+        };
+
         let variants = variants_state.borrow();
         if variants.is_empty() {
             overlay.add_toast(Toast::new("At least one variant is required."));
@@ -872,6 +957,16 @@ fn edit_model_dialog(
         model.family = family;
         model.variants = variants.clone();
         model.always = always_groups.clone();
+        let overrides = RamTierThresholds {
+            tier_a_min_gb: tier_a_min,
+            tier_b_min_gb: tier_b_min,
+            tier_c_min_gb: tier_c_min,
+        };
+        model.ram_tier_thresholds = if overrides.is_empty() {
+            None
+        } else {
+            Some(overrides)
+        };
 
         drop(variants);
         drop(always_groups);
@@ -898,6 +993,7 @@ fn refresh_always_rows(
     always_state: &Rc<RefCell<Vec<AlwaysGroup>>>,
     overlay: &ToastOverlay,
     parent: &gtk::Dialog,
+    ram_thresholds: ResolvedRamTierThresholds,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
@@ -909,11 +1005,9 @@ fn refresh_always_rows(
         let title = group.label.as_deref().unwrap_or(&group.id);
         let subtitle = format!("{} • {} artifact(s)", group.id, group.artifacts.len());
 
-        let row = adw::ActionRow::builder()
-            .title(title)
-            .subtitle(&subtitle)
-            .activatable(false)
-            .build();
+        let row = adw::ActionRow::builder().activatable(false).build();
+        row.set_title(&escape_markup(title));
+        row.set_subtitle(&escape_markup(&subtitle));
 
         let edit_button = gtk::Button::with_label("Edit");
         edit_button.set_halign(Align::Center);
@@ -930,14 +1024,24 @@ fn refresh_always_rows(
             let parent = parent.clone();
             let preset = group.clone();
             let idx = index;
+            let thresholds = ram_thresholds.clone();
             edit_button.connect_clicked(move |_| {
-                if let Some(updated) =
-                    edit_always_group_dialog(Some(preset.clone()), &parent, overlay.clone())
-                {
+                if let Some(updated) = edit_always_group_dialog(
+                    Some(preset.clone()),
+                    &parent,
+                    overlay.clone(),
+                    thresholds.clone(),
+                ) {
                     if let Some(entry) = always_state.borrow_mut().get_mut(idx) {
                         *entry = updated;
                     }
-                    refresh_always_rows(&list, &always_state, &overlay, &parent);
+                    refresh_always_rows(
+                        &list,
+                        &always_state,
+                        &overlay,
+                        &parent,
+                        thresholds.clone(),
+                    );
                 }
             });
         }
@@ -948,11 +1052,18 @@ fn refresh_always_rows(
             let overlay = overlay.clone();
             let parent = parent.clone();
             let idx = index;
+            let thresholds = ram_thresholds.clone();
             delete_button.connect_clicked(move |_| {
                 if idx < always_state.borrow().len() {
                     always_state.borrow_mut().remove(idx);
                     overlay.add_toast(Toast::new("Always group removed."));
-                    refresh_always_rows(&list, &always_state, &overlay, &parent);
+                    refresh_always_rows(
+                        &list,
+                        &always_state,
+                        &overlay,
+                        &parent,
+                        thresholds.clone(),
+                    );
                 }
             });
         }
@@ -965,6 +1076,7 @@ fn edit_always_group_dialog(
     preset: Option<AlwaysGroup>,
     parent: &gtk::Dialog,
     overlay: ToastOverlay,
+    ram_thresholds: ResolvedRamTierThresholds,
 ) -> Option<AlwaysGroup> {
     let group = preset.unwrap_or(AlwaysGroup {
         id: String::new(),
@@ -1027,50 +1139,72 @@ fn edit_always_group_dialog(
         add_button: add_artifact_button,
         rows: artifact_rows,
         add_row: add_artifact_row,
-    } = build_artifact_editor(artifact_presets_from(&group.artifacts), true);
+    } = build_artifact_editor(
+        artifact_presets_from(&group.artifacts),
+        true,
+        Some(ram_thresholds.clone()),
+    );
+
+    let artifacts_scroller = gtk::ScrolledWindow::builder()
+        .min_content_height(220)
+        .hexpand(true)
+        .vexpand(true)
+        .child(&artifacts_box)
+        .build();
+    artifacts_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
 
     content.append(&add_artifact_button);
-    content.append(&artifacts_box);
+    content.append(&artifacts_scroller);
 
     {
         let add_artifact_row = add_artifact_row.clone();
+        let scroller = artifacts_scroller.clone();
         add_artifact_button.connect_clicked(move |_| {
             add_artifact_row(None);
+            scroll_to_bottom(&scroller);
         });
     }
 
     dialog.add_button("Cancel", ResponseType::Cancel);
     dialog.add_button("Save", ResponseType::Ok);
 
-    let response = run_dialog(&dialog);
-    if response != ResponseType::Ok {
-        return None;
+    loop {
+        let response = run_dialog(&dialog);
+        if response != ResponseType::Ok {
+            dialog.close();
+            return None;
+        }
+
+        let id = id_entry.text().trim().to_string();
+        if id.is_empty() {
+            overlay.add_toast(Toast::new("Provide a field key for this always group."));
+            continue;
+        }
+
+        let label = entry_to_option(&label_entry);
+
+        let artifacts = {
+            let artifact_entries = artifact_rows.borrow();
+            let result = artifacts_from_rows(
+                &artifact_entries,
+                &overlay,
+                "Add at least one artifact for this always group.",
+            );
+            drop(artifact_entries);
+            if let Some(values) = result {
+                values
+            } else {
+                continue;
+            }
+        };
+
+        dialog.close();
+        break Some(AlwaysGroup {
+            id,
+            label,
+            artifacts,
+        });
     }
-
-    let id = id_entry.text().trim().to_string();
-    if id.is_empty() {
-        overlay.add_toast(Toast::new("Provide a field key for this always group."));
-        return None;
-    }
-
-    let label = entry_to_option(&label_entry);
-
-    let artifact_entries = artifact_rows.borrow();
-    let artifacts = match artifacts_from_rows(
-        &artifact_entries,
-        &overlay,
-        "Add at least one artifact for this always group.",
-    ) {
-        Some(values) => values,
-        None => return None,
-    };
-    drop(artifact_entries);
-
-    Some(AlwaysGroup {
-        id,
-        label,
-        artifacts,
-    })
 }
 
 fn edit_lora_dialog(
@@ -1230,15 +1364,15 @@ fn refresh_variant_rows(
     }
 
     for (index, variant) in variants_state.borrow().iter().enumerate() {
-        let row = adw::ActionRow::builder()
-            .title(&variant.selection_label())
-            .subtitle(&format!(
-                "{} • {} artifact(s)",
-                variant.tier.description(),
-                variant.artifacts.len()
-            ))
-            .activatable(false)
-            .build();
+        let title = variant.selection_label();
+        let subtitle = format!(
+            "{} • {} artifact(s)",
+            variant.tier.description(),
+            variant.artifacts.len()
+        );
+        let row = adw::ActionRow::builder().activatable(false).build();
+        row.set_title(&escape_markup(&title));
+        row.set_subtitle(&escape_markup(&subtitle));
 
         let edit_button = gtk::Button::with_label("Edit");
         edit_button.set_halign(Align::Center);
@@ -1384,15 +1518,25 @@ fn edit_variant_dialog(
         add_button: add_artifact_button,
         rows: artifact_rows,
         add_row: add_artifact_row,
-    } = build_artifact_editor(artifact_presets_from(&variant.artifacts), false);
+    } = build_artifact_editor(artifact_presets_from(&variant.artifacts), false, None);
+
+    let artifacts_scroller = gtk::ScrolledWindow::builder()
+        .min_content_height(260)
+        .hexpand(true)
+        .vexpand(true)
+        .child(&artifacts_box)
+        .build();
+    artifacts_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
 
     content.append(&add_artifact_button);
-    content.append(&artifacts_box);
+    content.append(&artifacts_scroller);
 
     {
         let add_artifact_row = add_artifact_row.clone();
+        let scroller = artifacts_scroller.clone();
         add_artifact_button.connect_clicked(move |_| {
             add_artifact_row(None);
+            scroll_to_bottom(&scroller);
         });
     }
 
@@ -1458,6 +1602,34 @@ fn entry_to_option(entry: &gtk::Entry) -> Option<String> {
         None
     } else {
         Some(text)
+    }
+}
+
+fn parse_ram_entry(
+    entry: &gtk::Entry,
+    label: &str,
+    overlay: &ToastOverlay,
+) -> Result<Option<f64>, ()> {
+    let text = entry.text().trim().to_string();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let normalized = text.replace(',', ".");
+    match normalized.parse::<f64>() {
+        Ok(value) => Ok(Some(value)),
+        Err(_) => {
+            overlay.add_toast(Toast::new(&format!("Enter a valid number for {label}.")));
+            Err(())
+        }
+    }
+}
+
+fn format_gb(value: f64) -> String {
+    let rounded = (value * 10.0).round() / 10.0;
+    if (rounded.fract()).abs() < 0.05 {
+        format!("{:.0}", rounded.round())
+    } else {
+        format!("{:.1}", rounded)
     }
 }
 

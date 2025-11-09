@@ -1,5 +1,6 @@
 use crate::{
     config::{default_catalog_endpoint, ConfigStore},
+    env_flags::prefer_local_catalog,
     model::{LoraDefinition, ModelCatalog, ModelVariant, ResolvedModel},
     vram::VramTier,
 };
@@ -24,9 +25,19 @@ pub struct CatalogService {
 
 impl CatalogService {
     pub fn new(config: Arc<ConfigStore>) -> Result<Self> {
-        let catalog = load_cached_catalog(&config)
-            .or_else(resolve_catalog)
-            .unwrap_or_else(|| serde_json::from_str(BUNDLED_CATALOG).expect("valid bundled JSON"));
+        let catalog = if prefer_local_catalog() {
+            resolve_catalog()
+                .or_else(|| load_cached_catalog(&config))
+                .unwrap_or_else(|| {
+                    serde_json::from_str(BUNDLED_CATALOG).expect("valid bundled JSON")
+                })
+        } else {
+            load_cached_catalog(&config)
+                .or_else(resolve_catalog)
+                .unwrap_or_else(|| {
+                    serde_json::from_str(BUNDLED_CATALOG).expect("valid bundled JSON")
+                })
+        };
         info!(
             "Catalog initialised with {} models ({} LoRAs).",
             catalog.models.len(),

@@ -2,13 +2,14 @@ use crate::{
     catalog::CatalogService,
     config::ConfigStore,
     download::DownloadManager,
+    env_flags::remote_refresh_enabled,
     ram::{detect_ram_profile, RamProfile, RamTier},
     ui,
 };
 use adw::glib;
 use adw::{gio::ApplicationFlags, prelude::*, Application};
 use anyhow::{anyhow, Result};
-use log::warn;
+use log::{info, warn};
 use std::sync::Arc;
 use tokio::runtime::{Builder, Runtime};
 
@@ -55,8 +56,12 @@ impl ArcticDownloaderApp {
         let config = Arc::new(ConfigStore::new()?);
         let catalog = Arc::new(CatalogService::new(config.clone())?);
 
-        if let Err(err) = runtime.block_on(catalog.refresh_from_remote()) {
-            warn!("Unable to refresh catalog from remote source: {err:#}");
+        if remote_refresh_enabled() {
+            if let Err(err) = runtime.block_on(catalog.refresh_from_remote()) {
+                warn!("Unable to refresh catalog from remote source: {err:#}");
+            }
+        } else {
+            info!("Skipping remote catalog refresh (ARCTIC_SKIP_REMOTE_REFRESH present).");
         }
 
         let downloads = Arc::new(DownloadManager::new(runtime.clone()));
