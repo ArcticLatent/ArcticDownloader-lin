@@ -230,9 +230,10 @@ fn build_model_page(
     let catalog = context.catalog.catalog_snapshot();
 
     let family_dropdown = ComboBoxText::new();
-    family_dropdown.append(Some("all"), "All Families");
+    family_dropdown.append(Some("all"), "ALL FAMILIES");
     for family in catalog.model_families() {
-        family_dropdown.append(Some(family.as_str()), &family);
+        let display = family.to_ascii_uppercase();
+        family_dropdown.append(Some(family.as_str()), &display);
     }
     family_dropdown.set_active(Some(0));
 
@@ -442,199 +443,238 @@ fn build_model_page(
         let progress_bar = progress_bar_clone.clone();
         let status_label = status_label_clone_for_button.clone();
         let download_button_clone = download_button.clone();
-        download_button.connect_clicked(move |_| {
-            let Some(mut resolved) = resolved_variant.borrow().clone() else {
-                overlay.add_toast(Toast::new("Select a variant before downloading."));
-                return;
-            };
+        let cancel_state = Rc::new(RefCell::new(None::<CancellationHandle>));
+        download_button.connect_clicked({
+            let cancel_state = cancel_state.clone();
+            move |_| {
+                if let Some(handle) = cancel_state.borrow_mut().take() {
+                    handle.cancel();
+                    return;
+                }
 
-            let comfy_text = comfy_path_entry.text();
-            if comfy_text.is_empty() {
-                overlay.add_toast(Toast::new("Choose your ComfyUI folder first."));
-                return;
-            }
+                let Some(mut resolved) = resolved_variant.borrow().clone() else {
+                    overlay.add_toast(Toast::new("Select a variant before downloading."));
+                    return;
+                };
 
-            let comfy_path = PathBuf::from(comfy_text.as_str());
+                let comfy_text = comfy_path_entry.text();
+                if comfy_text.is_empty() {
+                    overlay.add_toast(Toast::new("Choose your ComfyUI folder first."));
+                    return;
+                }
 
-            let ram_tier = ram_dropdown
-                .active_id()
-                .as_ref()
-                .and_then(|id| RamTier::from_identifier(id.as_str()))
-                .or_else(|| {
-                    ram_dropdown
-                        .active()
-                        .and_then(|idx| RamTier::all().get(idx as usize).copied())
-                })
-                .or_else(|| context.ram_tier());
+                let comfy_path = PathBuf::from(comfy_text.as_str());
 
-            let plan_artifacts = resolved.artifacts_for_download(ram_tier);
+                let ram_tier = ram_dropdown
+                    .active_id()
+                    .as_ref()
+                    .and_then(|id| RamTier::from_identifier(id.as_str()))
+                    .or_else(|| {
+                        ram_dropdown
+                            .active()
+                            .and_then(|idx| RamTier::all().get(idx as usize).copied())
+                    })
+                    .or_else(|| context.ram_tier());
 
-            if plan_artifacts.is_empty() {
-                overlay.add_toast(Toast::new(
-                    "No artifacts match the selected RAM tier for this variant.",
-                ));
-                return;
-            }
+                let plan_artifacts = resolved.artifacts_for_download(ram_tier);
 
-            let all_present = plan_artifacts.iter().all(|artifact| {
-                comfy_path
-                    .join(artifact.target_category.comfyui_subdir())
-                    .join(resolved.master.id.as_str())
-                    .join(artifact.file_name())
-                    .exists()
-            });
+                if plan_artifacts.is_empty() {
+                    overlay.add_toast(Toast::new(
+                        "No artifacts match the selected RAM tier for this variant.",
+                    ));
+                    return;
+                }
 
-            if all_present {
-                let message = format!(
+                let all_present = plan_artifacts.iter().all(|artifact| {
+                    comfy_path
+                        .join(artifact.target_category.comfyui_subdir())
+                        .join(resolved.master.id.as_str())
+                        .join(artifact.file_name())
+                        .exists()
+                });
+
+                if all_present {
+                    let message = format!(
                     "All artifacts for {} are already downloaded for the selected GPU/RAM tier.",
                     resolved.master.display_name
                 );
-                overlay.add_toast(Toast::new(&message));
+                    overlay.add_toast(Toast::new(&message));
+                    progress_box.set_visible(true);
+                    progress_label.set_text(&message);
+                    progress_bar.set_fraction(1.0);
+                    progress_bar.set_text(Some("100%"));
+                    progress_bar.set_show_text(true);
+                    status_label.set_text(&message);
+                    return;
+                }
+
+                resolved.variant.artifacts = plan_artifacts;
+
+                let comfy_root_for_summary = comfy_path.clone();
+                let downloads = context.downloads.clone();
+                let overlay_clone = overlay.clone();
+                let master_name = resolved.master.display_name.clone();
+
+                let progress_box_async = progress_box.clone();
+                let progress_label_async = progress_label.clone();
+                let progress_bar_async = progress_bar.clone();
+                let download_button_async = download_button_clone.clone();
+                let status_label_async = status_label.clone();
+
                 progress_box.set_visible(true);
-                progress_label.set_text(&message);
-                progress_bar.set_fraction(1.0);
-                progress_bar.set_text(Some("100%"));
+                progress_label.set_text(&format!("Preparing download for {master_name}…"));
+                progress_bar.set_fraction(0.0);
                 progress_bar.set_show_text(true);
-                status_label.set_text(&message);
-                return;
-            }
+                progress_bar.set_text(Some("0%"));
+                progress_bar.set_pulse_step(0.02);
+                progress_bar.pulse();
+                download_button_clone.set_label("Cancel Download");
+                download_button_clone.set_sensitive(true);
 
-            resolved.variant.artifacts = plan_artifacts;
+                let (progress_sender, progress_receiver) = mpsc::channel::<DownloadSignal>();
+                let progress_state = Rc::new(RefCell::new(DownloadProgressState::default()));
+                let receiver_cell = Rc::new(RefCell::new(progress_receiver));
+                let progress_bar_updates = progress_bar.clone();
+                let progress_label_updates = progress_label.clone();
+                let progress_box_updates = progress_box.clone();
+                let state_for_updates = progress_state.clone();
+                let receiver_for_updates = receiver_cell.clone();
 
-            let comfy_root_for_summary = comfy_path.clone();
-            let downloads = context.downloads.clone();
-            let overlay_clone = overlay.clone();
-            let master_name = resolved.master.display_name.clone();
+                adw::glib::timeout_add_local(Duration::from_millis(50), move || {
+                    let mut receiver_ref = receiver_for_updates.borrow_mut();
+                    let receiver = &mut *receiver_ref;
+                    let mut state = state_for_updates.borrow_mut();
 
-            let progress_box_async = progress_box.clone();
-            let progress_label_async = progress_label.clone();
-            let progress_bar_async = progress_bar.clone();
-            let download_button_async = download_button_clone.clone();
-            let status_label_async = status_label.clone();
-
-            progress_box.set_visible(true);
-            progress_label.set_text(&format!("Preparing download for {master_name}…"));
-            progress_bar.set_fraction(0.0);
-            progress_bar.set_show_text(true);
-            progress_bar.set_text(Some("0%"));
-            progress_bar.set_pulse_step(0.02);
-            progress_bar.pulse();
-            download_button_clone.set_sensitive(false);
-
-            let (progress_sender, progress_receiver) = mpsc::channel::<DownloadSignal>();
-            let progress_state = Rc::new(RefCell::new(DownloadProgressState::default()));
-            let receiver_cell = Rc::new(RefCell::new(progress_receiver));
-            let progress_bar_updates = progress_bar.clone();
-            let progress_label_updates = progress_label.clone();
-            let progress_box_updates = progress_box.clone();
-            let state_for_updates = progress_state.clone();
-            let receiver_for_updates = receiver_cell.clone();
-
-            adw::glib::timeout_add_local(Duration::from_millis(50), move || {
-                let mut receiver_ref = receiver_for_updates.borrow_mut();
-                let receiver = &mut *receiver_ref;
-                let mut state = state_for_updates.borrow_mut();
-
-                loop {
-                    match receiver.try_recv() {
-                        Ok(DownloadSignal::Started {
-                            artifact,
-                            index,
-                            total,
-                            size,
-                        }) => {
-                            state.total = total;
-                            state.entries.insert(
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(DownloadSignal::Started {
+                                artifact,
                                 index,
-                                EntryState {
+                                total,
+                                size,
+                            }) => {
+                                state.total = total;
+                                state.entries.insert(
+                                    index,
+                                    EntryState {
+                                        received: 0,
+                                        size,
+                                        finished: false,
+                                    },
+                                );
+                                state.current_index = Some(index);
+                                progress_label_updates.set_text(&format!("Starting {artifact}…"));
+                                progress_bar_updates.set_fraction(0.0);
+                                update_progress_text(&progress_bar_updates, &state, Some(0.0));
+                            }
+                            Ok(DownloadSignal::Progress {
+                                artifact,
+                                index,
+                                received,
+                                size,
+                            }) => {
+                                let entry = state.entries.entry(index).or_insert(EntryState {
                                     received: 0,
                                     size,
                                     finished: false,
-                                },
-                            );
-                            progress_label_updates.set_text(&format!("Starting {artifact}…"));
-                            progress_bar_updates.set_fraction(0.0);
-                            progress_bar_updates.set_text(Some("0%"));
-                        }
-                        Ok(DownloadSignal::Progress {
-                            artifact,
-                            index,
-                            received,
-                            size,
-                        }) => {
-                            let entry = state.entries.entry(index).or_insert(EntryState {
-                                received: 0,
-                                size,
-                                finished: false,
-                            });
-                            entry.received = received;
-                            entry.size = size;
-                            if let Some(fraction) = state.fraction() {
-                                progress_bar_updates.set_fraction(fraction.clamp(0.0, 1.0));
-                                progress_bar_updates
-                                    .set_text(Some(&format!("{:.0}%", fraction * 100.0)));
-                            }
-                            progress_label_updates.set_text(&format!("Downloading {artifact}…"));
-                        }
-                        Ok(DownloadSignal::Finished { index, size }) => {
-                            if let Some(entry) = state.entries.get_mut(&index) {
-                                entry.finished = true;
+                                });
+                                entry.received = received;
                                 entry.size = size;
-                                if let Some(size_bytes) = size {
-                                    entry.received = size_bytes;
+                                let fraction = state.fraction();
+                                if let Some(value) = fraction {
+                                    progress_bar_updates.set_fraction(value.clamp(0.0, 1.0));
+                                }
+                                update_progress_text(&progress_bar_updates, &state, fraction);
+                                progress_label_updates
+                                    .set_text(&format!("Downloading {artifact}…"));
+                            }
+                            Ok(DownloadSignal::Finished { index, size }) => {
+                                if let Some(entry) = state.entries.get_mut(&index) {
+                                    entry.finished = true;
+                                    entry.size = size;
+                                    if let Some(size_bytes) = size {
+                                        entry.received = size_bytes;
+                                    }
+                                }
+
+                                let fraction = state.fraction();
+                                if let Some(value) = fraction {
+                                    progress_bar_updates.set_fraction(value.clamp(0.0, 1.0));
+                                }
+                                update_progress_text(&progress_bar_updates, &state, fraction);
+
+                                if state.is_complete() {
+                                    progress_label_updates.set_text("All downloads complete.");
+                                    progress_bar_updates.set_fraction(1.0);
+                                    update_progress_text(&progress_bar_updates, &state, Some(1.0));
+                                    progress_box_updates.set_visible(false);
                                 }
                             }
-
-                            if let Some(fraction) = state.fraction() {
-                                progress_bar_updates.set_fraction(fraction.clamp(0.0, 1.0));
-                                progress_bar_updates
-                                    .set_text(Some(&format!("{:.0}%", fraction * 100.0)));
-                            }
-
-                            if state.is_complete() {
-                                progress_label_updates.set_text("All downloads complete.");
-                                progress_bar_updates.set_fraction(1.0);
-                                progress_bar_updates.set_text(Some("100%"));
-                                progress_box_updates.set_visible(false);
-                            }
-                        }
-                        Ok(DownloadSignal::Failed { artifact, error }) => {
-                            state.failed = true;
-                            progress_label_updates
-                                .set_text(&format!("Failed to download {artifact}: {error}"));
-                            progress_bar_updates.set_fraction(0.0);
-                            progress_bar_updates.set_text(Some("Failed"));
-                            progress_box_updates.set_visible(true);
-                        }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            if !state.is_complete() {
+                            Ok(DownloadSignal::Failed { artifact, error }) => {
                                 state.failed = true;
-                                progress_label_updates.set_text("Download interrupted.");
+                                progress_label_updates
+                                    .set_text(&format!("Failed to download {artifact}: {error}"));
                                 progress_bar_updates.set_fraction(0.0);
-                                progress_bar_updates.set_text(Some("Interrupted"));
+                                progress_bar_updates.set_text(Some("Failed"));
                                 progress_box_updates.set_visible(true);
                             }
-                            break;
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => {
+                                if !state.is_complete() {
+                                    state.failed = true;
+                                    progress_label_updates.set_text("Download interrupted.");
+                                    progress_bar_updates.set_fraction(0.0);
+                                    progress_bar_updates.set_text(Some("Interrupted"));
+                                    progress_box_updates.set_visible(true);
+                                }
+                                break;
+                            }
                         }
                     }
-                }
 
-                if state.failed {
-                    adw::glib::ControlFlow::Break
-                } else if state.is_complete() {
-                    adw::glib::ControlFlow::Break
-                } else {
-                    adw::glib::ControlFlow::Continue
-                }
-            });
+                    if state.failed {
+                        adw::glib::ControlFlow::Break
+                    } else if state.is_complete() {
+                        adw::glib::ControlFlow::Break
+                    } else {
+                        adw::glib::ControlFlow::Continue
+                    }
+                });
 
-            adw::glib::MainContext::default().spawn_local(async move {
+                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+                {
+                    let mut slot = cancel_state.borrow_mut();
+                    *slot = Some(CancellationHandle {
+                        cancel: Some(cancel_tx),
+                    });
+                }
+                let cancel_slot = cancel_state.clone();
+
+                adw::glib::MainContext::default().spawn_local(async move {
                 let start_message = format!("Downloading {} artifacts…", master_name);
                 overlay_clone.add_toast(Toast::new(&start_message));
 
-                let handle = downloads.download_variant(comfy_path, resolved, progress_sender);
-                match handle.await {
+                let handle =
+                    downloads.download_variant(comfy_path, resolved, progress_sender);
+                tokio::pin!(handle);
+
+                tokio::select! {
+                    _ = cancel_rx => {
+                        handle.as_mut().abort();
+                        let _ = handle.await;
+                        progress_label_async.set_text("Download cancelled.");
+                        progress_bar_async.set_fraction(0.0);
+                        progress_bar_async.set_text(Some("Cancelled"));
+                        progress_box_async.set_visible(true);
+                        download_button_async.set_label("Download Assets");
+                        download_button_async.set_sensitive(true);
+                        status_label_async.set_text("Download cancelled.");
+                        overlay_clone.add_toast(Toast::new("Download cancelled."));
+                        *cancel_slot.borrow_mut() = None;
+                    }
+                    result = &mut handle => {
+                        *cancel_slot.borrow_mut() = None;
+                        match result {
                     Ok(Ok(outcomes)) => {
                         let downloaded = outcomes
                             .iter()
@@ -649,6 +689,7 @@ fn build_model_page(
                         progress_bar_async.set_text(Some("100%"));
                         progress_label_async.set_text("All downloads complete.");
                         progress_box_async.set_visible(false);
+                        download_button_async.set_label("Download Assets");
                         download_button_async.set_sensitive(true);
                         status_label_async.set_text("Downloads complete.");
 
@@ -688,6 +729,7 @@ fn build_model_page(
                         progress_bar_async.set_fraction(0.0);
                         progress_bar_async.set_text(Some("Failed"));
                         progress_box_async.set_visible(true);
+                        download_button_async.set_label("Download Assets");
                         download_button_async.set_sensitive(true);
                         status_label_async.set_text("Download failed.");
                         overlay_clone.add_toast(Toast::new(&format!("Download failed: {err}")));
@@ -701,10 +743,14 @@ fn build_model_page(
                         status_label_async.set_text(&format!("Download task panicked: {join_err}"));
                         let message = format!("Download task panicked: {join_err}");
                         overlay_clone.add_toast(Toast::new(&message));
+                        download_button_async.set_label("Download Assets");
                         download_button_async.set_sensitive(true);
+                    }
+                        }
                     }
                 }
             });
+            }
         });
     }
 
@@ -1356,9 +1402,10 @@ fn build_lora_page(
                                 finished: false,
                             },
                         );
+                        state.current_index = Some(0);
                         progress_label_updates.set_text(&format!("Starting {artifact}…"));
                         progress_bar_updates.set_fraction(0.0);
-                        progress_bar_updates.set_text(Some("0%"));
+                        update_progress_text(&progress_bar_updates, &state, Some(0.0));
                     }
                     Ok(DownloadSignal::Progress {
                         artifact,
@@ -1373,11 +1420,11 @@ fn build_lora_page(
                         });
                         entry.received = received;
                         entry.size = size;
-                        if let Some(fraction) = state.fraction() {
-                            progress_bar_updates.set_fraction(fraction.clamp(0.0, 1.0));
-                            progress_bar_updates
-                                .set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+                        let fraction = state.fraction();
+                        if let Some(value) = fraction {
+                            progress_bar_updates.set_fraction(value.clamp(0.0, 1.0));
                         }
+                        update_progress_text(&progress_bar_updates, &state, fraction);
                         progress_label_updates.set_text(&format!("Downloading {artifact}…"));
                     }
                     Ok(DownloadSignal::Finished { size, .. }) => {
@@ -1390,7 +1437,7 @@ fn build_lora_page(
                         }
 
                         progress_bar_updates.set_fraction(1.0);
-                        progress_bar_updates.set_text(Some("100%"));
+                        update_progress_text(&progress_bar_updates, &state, Some(1.0));
                         progress_label_updates.set_text("LoRA download complete.");
                         progress_box_updates.set_visible(false);
                     }
@@ -1648,10 +1695,10 @@ fn build_quant_legend() -> GtkBox {
 
     legend.append(&Separator::new(Orientation::Horizontal));
     let guidance = [
-        "(S) Tier S: 32 GB+ VRAM  (fp16 UNET - Best Quality)",
-        "(A) Tier A: 16-31 GB VRAM (fp8 UNET - High Quality)",
-        "(B) Tier B: 12-15 GB VRAM (GGUF Q4 - Balanced Quality)",
-        "(C) Tier C: <12 GB VRAM   (GGUF Q3 - Preview Quality)",
+        "(S) Tier S: 32 GB+ VRAM  (fp16 UNET - Best Quality - Largest downloads)",
+        "(A) Tier A: 16-31 GB VRAM (fp8 UNET - High Quality - Large downloads)",
+        "(B) Tier B: 12-15 GB VRAM (GGUF Q4 - Balanced Quality - Medium downloads)",
+        "(C) Tier C: <12 GB VRAM   (GGUF Q3 - Preview Quality - Small downloads)",
     ];
 
     for line in guidance.iter() {
@@ -1896,6 +1943,19 @@ struct DownloadProgressState {
     total: usize,
     entries: HashMap<usize, EntryState>,
     failed: bool,
+    current_index: Option<usize>,
+}
+
+struct CancellationHandle {
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl CancellationHandle {
+    fn cancel(mut self) {
+        if let Some(sender) = self.cancel.take() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 impl Default for DownloadProgressState {
@@ -1904,6 +1964,7 @@ impl Default for DownloadProgressState {
             total: 0,
             entries: HashMap::new(),
             failed: false,
+            current_index: None,
         }
     }
 }
@@ -1933,11 +1994,63 @@ impl DownloadProgressState {
         }
     }
 
+    fn byte_progress(&self) -> (u64, Option<u64>) {
+        if let Some(index) = self.current_index {
+            if let Some(entry) = self.entries.get(&index) {
+                return (entry.received, entry.size);
+            }
+        }
+        (0, None)
+    }
+
     fn is_complete(&self) -> bool {
         self.total > 0
             && self.entries.len() == self.total
             && self.entries.values().all(|entry| entry.finished)
     }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+
+    let value = bytes as f64;
+    if value >= GB {
+        format!("{:.1} GB", value / GB)
+    } else if value >= MB {
+        format!("{:.1} MB", value / MB)
+    } else if value >= KB {
+        format!("{:.1} KB", value / KB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn update_progress_text(
+    bar: &gtk::ProgressBar,
+    state: &DownloadProgressState,
+    fraction: Option<f64>,
+) {
+    let (received, total_opt) = state.byte_progress();
+    let text = match (fraction, total_opt) {
+        (Some(frac), Some(total)) if total > 0 => format!(
+            "{:.0}% • {} / {}",
+            (frac * 100.0),
+            format_bytes(received),
+            format_bytes(total)
+        ),
+        (Some(frac), _) => format!(
+            "{:.0}% • {} downloaded",
+            (frac * 100.0),
+            format_bytes(received)
+        ),
+        (None, Some(total)) if total > 0 => {
+            format!("{} / {}", format_bytes(received), format_bytes(total))
+        }
+        _ => format!("{} downloaded", format_bytes(received)),
+    };
+    bar.set_text(Some(&text));
 }
 
 fn open_folder_picker(
