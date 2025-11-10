@@ -393,15 +393,29 @@ impl TargetCategory {
 
     pub fn comfyui_subdir(&self) -> String {
         match self {
-            TargetCategory::DiffusionModels(_) => "models/diffusion_models".to_string(),
-            TargetCategory::Vae(_) => "models/vae".to_string(),
-            TargetCategory::TextEncoders(_) => "models/text_encoders".to_string(),
-            TargetCategory::ClipVision(_) => "models/clip_vision".to_string(),
-            TargetCategory::Unet(_) => "models/unet".to_string(),
-            TargetCategory::Loras(_) => "models/loras".to_string(),
-            TargetCategory::Ipadapter(_) => "models/ipadapter".to_string(),
-            TargetCategory::Controlnet(_) => "models/controlnet".to_string(),
-            TargetCategory::Pulid(_) => "models/pulid".to_string(),
+            TargetCategory::DiffusionModels(alias) => {
+                format!("models/{}", alias.as_deref().unwrap_or("diffusion_models"))
+            }
+            TargetCategory::Vae(alias) => format!("models/{}", alias.as_deref().unwrap_or("vae")),
+            TargetCategory::TextEncoders(alias) => {
+                format!("models/{}", alias.as_deref().unwrap_or("text_encoders"))
+            }
+            TargetCategory::ClipVision(alias) => {
+                format!("models/{}", alias.as_deref().unwrap_or("clip_vision"))
+            }
+            TargetCategory::Unet(alias) => format!("models/{}", alias.as_deref().unwrap_or("unet")),
+            TargetCategory::Loras(alias) => {
+                format!("models/{}", alias.as_deref().unwrap_or("loras"))
+            }
+            TargetCategory::Ipadapter(alias) => {
+                format!("models/{}", alias.as_deref().unwrap_or("ipadapter"))
+            }
+            TargetCategory::Controlnet(alias) => {
+                format!("models/{}", alias.as_deref().unwrap_or("controlnet"))
+            }
+            TargetCategory::Pulid(alias) => {
+                format!("models/{}", alias.as_deref().unwrap_or("pulid"))
+            }
             TargetCategory::Custom(slug) => format!("models/{slug}"),
         }
     }
