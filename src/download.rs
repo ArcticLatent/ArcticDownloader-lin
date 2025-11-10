@@ -174,7 +174,7 @@ impl DownloadManager {
                 .map(normalize_folder_name)
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| sanitize_file_name(&lora.id));
-            let loras_root = comfy_root.join(TargetCategory::Loras.comfyui_subdir());
+            let loras_root = comfy_root.join(TargetCategory::from_slug("loras").comfyui_subdir());
             let lora_dir = loras_root.join(&folder_name);
 
             let base_url = lora.download_url.clone();

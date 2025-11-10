@@ -340,92 +340,108 @@ impl ModelArtifact {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TargetCategory {
-    DiffusionModels,
-    Vae,
-    TextEncoders,
-    ClipVision,
-    Unet,
-    Loras,
-    Ipadapter,
-    Controlnet,
-    Pulid,
+    DiffusionModels(Option<String>),
+    Vae(Option<String>),
+    TextEncoders(Option<String>),
+    ClipVision(Option<String>),
+    Unet(Option<String>),
+    Loras(Option<String>),
+    Ipadapter(Option<String>),
+    Controlnet(Option<String>),
+    Pulid(Option<String>),
     Custom(String),
 }
 
 impl TargetCategory {
     pub fn slug(&self) -> &str {
         match self {
-            TargetCategory::DiffusionModels => "diffusion_models",
-            TargetCategory::Vae => "vae",
-            TargetCategory::TextEncoders => "text_encoders",
-            TargetCategory::ClipVision => "clip_vision",
-            TargetCategory::Unet => "unet",
-            TargetCategory::Loras => "loras",
-            TargetCategory::Ipadapter => "ipadapter",
-            TargetCategory::Controlnet => "controlnet",
-            TargetCategory::Pulid => "pulid",
+            TargetCategory::DiffusionModels(alias) => {
+                alias.as_deref().unwrap_or("diffusion_models")
+            }
+            TargetCategory::Vae(alias) => alias.as_deref().unwrap_or("vae"),
+            TargetCategory::TextEncoders(alias) => alias.as_deref().unwrap_or("text_encoders"),
+            TargetCategory::ClipVision(alias) => alias.as_deref().unwrap_or("clip_vision"),
+            TargetCategory::Unet(alias) => alias.as_deref().unwrap_or("unet"),
+            TargetCategory::Loras(alias) => alias.as_deref().unwrap_or("loras"),
+            TargetCategory::Ipadapter(alias) => alias.as_deref().unwrap_or("ipadapter"),
+            TargetCategory::Controlnet(alias) => alias.as_deref().unwrap_or("controlnet"),
+            TargetCategory::Pulid(alias) => alias.as_deref().unwrap_or("pulid"),
             TargetCategory::Custom(value) => value,
         }
     }
 
     pub fn from_slug(slug: &str) -> Self {
-        match slug {
-            "diffusion_models" | "checkpoints" => TargetCategory::DiffusionModels,
-            "vae" => TargetCategory::Vae,
-            "text_encoders" | "clip" => TargetCategory::TextEncoders,
-            "clip_vision" => TargetCategory::ClipVision,
-            "unet" => TargetCategory::Unet,
-            "loras" => TargetCategory::Loras,
-            "ipadapter" => TargetCategory::Ipadapter,
-            "controlnet" => TargetCategory::Controlnet,
-            "pulid" => TargetCategory::Pulid,
-            other => TargetCategory::Custom(other.to_string()),
+        let trimmed = slug.trim();
+        let normalized = trimmed.to_ascii_lowercase();
+        match normalized.as_str() {
+            "diffusion_models" | "checkpoints" => {
+                TargetCategory::DiffusionModels(alias_override(trimmed, "diffusion_models"))
+            }
+            "vae" => TargetCategory::Vae(alias_override(trimmed, "vae")),
+            "text_encoders" | "clip" => {
+                TargetCategory::TextEncoders(alias_override(trimmed, "text_encoders"))
+            }
+            "clip_vision" => TargetCategory::ClipVision(alias_override(trimmed, "clip_vision")),
+            "unet" => TargetCategory::Unet(alias_override(trimmed, "unet")),
+            "loras" => TargetCategory::Loras(alias_override(trimmed, "loras")),
+            "ipadapter" => TargetCategory::Ipadapter(alias_override(trimmed, "ipadapter")),
+            "controlnet" => TargetCategory::Controlnet(alias_override(trimmed, "controlnet")),
+            "pulid" => TargetCategory::Pulid(alias_override(trimmed, "pulid")),
+            _ => TargetCategory::Custom(trimmed.to_string()),
         }
     }
 
     pub fn comfyui_subdir(&self) -> String {
         match self {
-            TargetCategory::DiffusionModels => "models/diffusion_models".to_string(),
-            TargetCategory::Vae => "models/vae".to_string(),
-            TargetCategory::TextEncoders => "models/text_encoders".to_string(),
-            TargetCategory::ClipVision => "models/clip_vision".to_string(),
-            TargetCategory::Unet => "models/unet".to_string(),
-            TargetCategory::Loras => "models/loras".to_string(),
-            TargetCategory::Ipadapter => "models/ipadapter".to_string(),
-            TargetCategory::Controlnet => "models/controlnet".to_string(),
-            TargetCategory::Pulid => "models/pulid".to_string(),
+            TargetCategory::DiffusionModels(_) => "models/diffusion_models".to_string(),
+            TargetCategory::Vae(_) => "models/vae".to_string(),
+            TargetCategory::TextEncoders(_) => "models/text_encoders".to_string(),
+            TargetCategory::ClipVision(_) => "models/clip_vision".to_string(),
+            TargetCategory::Unet(_) => "models/unet".to_string(),
+            TargetCategory::Loras(_) => "models/loras".to_string(),
+            TargetCategory::Ipadapter(_) => "models/ipadapter".to_string(),
+            TargetCategory::Controlnet(_) => "models/controlnet".to_string(),
+            TargetCategory::Pulid(_) => "models/pulid".to_string(),
             TargetCategory::Custom(slug) => format!("models/{slug}"),
         }
     }
 
     pub fn display_name(&self) -> String {
         match self {
-            TargetCategory::DiffusionModels => "Diffusion Model".to_string(),
-            TargetCategory::Vae => "VAE".to_string(),
-            TargetCategory::TextEncoders => "Text Encoder".to_string(),
-            TargetCategory::ClipVision => "CLIP Vision".to_string(),
-            TargetCategory::Unet => "UNet".to_string(),
-            TargetCategory::Loras => "LoRA".to_string(),
-            TargetCategory::Ipadapter => "IP-Adapter".to_string(),
-            TargetCategory::Controlnet => "ControlNet".to_string(),
-            TargetCategory::Pulid => "PuLID".to_string(),
+            TargetCategory::DiffusionModels(_) => "Diffusion Model".to_string(),
+            TargetCategory::Vae(_) => "VAE".to_string(),
+            TargetCategory::TextEncoders(_) => "Text Encoder".to_string(),
+            TargetCategory::ClipVision(_) => "CLIP Vision".to_string(),
+            TargetCategory::Unet(_) => "UNet".to_string(),
+            TargetCategory::Loras(_) => "LoRA".to_string(),
+            TargetCategory::Ipadapter(_) => "IP-Adapter".to_string(),
+            TargetCategory::Controlnet(_) => "ControlNet".to_string(),
+            TargetCategory::Pulid(_) => "PuLID".to_string(),
             TargetCategory::Custom(slug) => slug.clone(),
         }
     }
 
     pub fn from_display_name(name: &str) -> Option<Self> {
         match name {
-            "Diffusion Model" => Some(TargetCategory::DiffusionModels),
-            "VAE" => Some(TargetCategory::Vae),
-            "Text Encoder" => Some(TargetCategory::TextEncoders),
-            "CLIP Vision" => Some(TargetCategory::ClipVision),
-            "UNet" => Some(TargetCategory::Unet),
-            "LoRA" => Some(TargetCategory::Loras),
-            "IP-Adapter" => Some(TargetCategory::Ipadapter),
-            "ControlNet" => Some(TargetCategory::Controlnet),
-            "PuLID" => Some(TargetCategory::Pulid),
+            "Diffusion Model" => Some(TargetCategory::DiffusionModels(None)),
+            "VAE" => Some(TargetCategory::Vae(None)),
+            "Text Encoder" => Some(TargetCategory::TextEncoders(None)),
+            "CLIP Vision" => Some(TargetCategory::ClipVision(None)),
+            "UNet" => Some(TargetCategory::Unet(None)),
+            "LoRA" => Some(TargetCategory::Loras(None)),
+            "IP-Adapter" => Some(TargetCategory::Ipadapter(None)),
+            "ControlNet" => Some(TargetCategory::Controlnet(None)),
+            "PuLID" => Some(TargetCategory::Pulid(None)),
             other => Some(TargetCategory::Custom(other.to_string())),
         }
+    }
+}
+
+fn alias_override(input: &str, canonical: &str) -> Option<String> {
+    if input == canonical {
+        None
+    } else {
+        Some(input.to_string())
     }
 }
 

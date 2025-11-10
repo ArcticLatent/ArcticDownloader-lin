@@ -269,7 +269,7 @@ fn artifacts_from_rows(
 
     let mut artifacts = Vec::new();
     for row in rows.iter() {
-        let target_slug = row.target_entry.text().trim().to_ascii_lowercase();
+        let target_slug = row.target_entry.text().trim().to_string();
         if target_slug.is_empty() {
             overlay.add_toast(Toast::new("Artifact target_category is required."));
             return None;

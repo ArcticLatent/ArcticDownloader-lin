@@ -855,14 +855,15 @@ fn build_model_page(
         .spacing(6)
         .halign(Align::Center)
         .build();
-    let patreon_icon: gtk::Widget = if let Some(texture) = texture_from_image_bytes(PATREON_ICON_BYTES) {
-        let image = Image::from_paintable(Some(&texture));
-        image.set_pixel_size(18);
-        image.upcast()
-    } else {
-        warn!("Failed to decode Patreon icon PNG; falling back to font glyph.");
-        Label::new(Some("\u{f109}")).upcast()
-    };
+    let patreon_icon: gtk::Widget =
+        if let Some(texture) = texture_from_image_bytes(PATREON_ICON_BYTES) {
+            let image = Image::from_paintable(Some(&texture));
+            image.set_pixel_size(18);
+            image.upcast()
+        } else {
+            warn!("Failed to decode Patreon icon PNG; falling back to font glyph.");
+            Label::new(Some("\u{f109}")).upcast()
+        };
     patreon_icon.add_css_class("link-icon");
     patreon_icon.add_css_class("patreon-icon");
     patreon_content.append(&patreon_icon);
