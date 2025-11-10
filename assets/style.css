@@ -20,11 +20,12 @@ button.link-pill > box {
 }
 
 .link-icon {
+    font-size: 1.2em;
+    font-family: "JetBrainsMono Nerd Font Mono", "JetBrainsMono Nerd Font", "JetBrains Mono",
+        monospace;
     min-width: 16px;
     min-height: 16px;
     margin-right: 6px;
-    font-size: 1.2em;
-    font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", monospace;
 }
 
 .link-label {
@@ -47,6 +48,11 @@ button.github-link .link-icon {
 
 button.github-link .link-label {
     color: #f0f0f0;
+}
+
+button.patreon-link .link-icon,
+button.patreon-link .link-label {
+    color: #ff6c5f;
 }
 
 .legend-text {

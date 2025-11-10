@@ -8,8 +8,8 @@ use crate::{
 use adw::gio;
 use adw::gtk::{
     self, gdk, prelude::*, Align, Box as GtkBox, Button, ComboBoxText, CssProvider, Entry,
-    FileChooserAction, FileChooserNative, FlowBox, Label, ListBox, MediaFile, Orientation, Picture,
-    ResponseType, Separator,
+    FileChooserAction, FileChooserNative, FlowBox, Image, Label, ListBox, MediaFile, Orientation,
+    Picture, ResponseType, Separator,
 };
 use adw::{Application, ApplicationWindow, HeaderBar, Toast, ToastOverlay, WindowTitle};
 use anyhow::Result;
@@ -26,6 +26,7 @@ use std::{
 };
 
 const APP_CSS: &str = include_str!("../assets/style.css");
+const PATREON_ICON_BYTES: &[u8] = include_bytes!("../assets/patreon.png");
 
 pub fn bootstrap(app: &Application, context: AppContext) -> Result<()> {
     if let Err(err) = adw::init() {
@@ -838,6 +839,36 @@ fn build_model_page(
     github_content.append(&github_label);
     github_button.set_child(Some(&github_content));
 
+    let patreon_button = Button::builder()
+        .tooltip_text("Open Arctic Latent on Patreon")
+        .build();
+    patreon_button.add_css_class("flat");
+    patreon_button.add_css_class("link-pill");
+    patreon_button.add_css_class("patreon-link");
+    patreon_button.set_halign(Align::Center);
+    let patreon_label = Label::builder()
+        .label("Patreon")
+        .css_classes(vec![String::from("link-label")])
+        .build();
+    let patreon_content = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(6)
+        .halign(Align::Center)
+        .build();
+    let patreon_icon: gtk::Widget = if let Some(texture) = texture_from_image_bytes(PATREON_ICON_BYTES) {
+        let image = Image::from_paintable(Some(&texture));
+        image.set_pixel_size(18);
+        image.upcast()
+    } else {
+        warn!("Failed to decode Patreon icon PNG; falling back to font glyph.");
+        Label::new(Some("\u{f109}")).upcast()
+    };
+    patreon_icon.add_css_class("link-icon");
+    patreon_icon.add_css_class("patreon-icon");
+    patreon_content.append(&patreon_icon);
+    patreon_content.append(&patreon_label);
+    patreon_button.set_child(Some(&patreon_content));
+
     {
         let overlay = overlay.clone();
         youtube_button.connect_clicked(move |_| {
@@ -866,8 +897,23 @@ fn build_model_page(
         });
     }
 
+    {
+        let overlay = overlay.clone();
+        patreon_button.connect_clicked(move |_| {
+            if let Err(err) = gio::AppInfo::launch_default_for_uri(
+                "https://patreon.com/ArcticLatent",
+                None::<&gio::AppLaunchContext>,
+            ) {
+                let message = format!("Failed to open Patreon: {err}");
+                overlay.add_toast(Toast::new(&message));
+                adw::glib::g_warning!(crate::app::APP_ID, "{message}");
+            }
+        });
+    }
+
     links_box.append(&youtube_button);
     links_box.append(&github_button);
+    links_box.append(&patreon_button);
     column.append(&links_box);
 
     column
