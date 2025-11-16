@@ -1,6 +1,7 @@
 use crate::{
     app::AppContext,
     download::{CivitaiPreview, DownloadError, DownloadSignal, DownloadStatus},
+    env_flags::auto_update_enabled,
     model::{LoraDefinition, ModelCatalog, ResolvedModel, ResolvedRamTierThresholds},
     ram::RamTier,
     vram::VramTier,
@@ -11,10 +12,10 @@ use adw::gtk::{
     FileChooserAction, FileChooserNative, FlowBox, Image, Label, ListBox, MediaFile, Orientation,
     Picture, ResponseType, Separator,
 };
-use adw::{Application, ApplicationWindow, HeaderBar, Toast, ToastOverlay, WindowTitle};
+use adw::{Application, ApplicationWindow, HeaderBar, Toast, ToastOverlay};
 use anyhow::Result;
 use gdk_pixbuf::PixbufLoader;
-use log::warn;
+use log::{info, warn};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -36,12 +37,15 @@ pub fn bootstrap(app: &Application, context: AppContext) -> Result<()> {
     register_application_fonts();
     install_application_css();
 
+    let overlay = build_shell(&context);
+    kickoff_update_check(&context, &overlay);
+
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Arctic Downloader")
         .default_width(960)
         .default_height(720)
-        .content(&build_shell(&context))
+        .content(&overlay)
         .build();
 
     window.present();
@@ -104,6 +108,56 @@ fn register_application_fonts() {
     }
 }
 
+fn kickoff_update_check(context: &AppContext, overlay: &ToastOverlay) {
+    if !auto_update_enabled() {
+        info!("Auto-update is disabled via environment toggle.");
+        return;
+    }
+
+    let updater = context.updater.clone();
+    let overlay_for_update = overlay.clone();
+
+    adw::glib::MainContext::default().spawn_local(async move {
+        let check_handle = updater.check_for_update();
+        let update = match check_handle.await {
+            Ok(Ok(Some(update))) => update,
+            Ok(Ok(None)) => return,
+            Ok(Err(err)) => {
+                warn!("Update check failed: {err:#}");
+                return;
+            }
+            Err(join_err) => {
+                warn!("Update check task failed: {join_err}");
+                return;
+            }
+        };
+
+        overlay_for_update.add_toast(Toast::new(&format!(
+            "Updating Arctic Downloader to v{}…",
+            update.version
+        )));
+
+        let install_handle = updater.download_and_install(update);
+        match install_handle.await {
+            Ok(Ok(applied)) => {
+                overlay_for_update.add_toast(Toast::new(&format!(
+                    "Update to v{} installed. Restart to finish.",
+                    applied.version
+                )));
+            }
+            Ok(Err(err)) => {
+                warn!("Update install failed: {err:#}");
+                overlay_for_update.add_toast(Toast::new(&format!("Update failed: {err}")));
+            }
+            Err(join_err) => {
+                warn!("Update install task failed: {join_err}");
+                overlay_for_update
+                    .add_toast(Toast::new("Update failed: unexpected background error."));
+            }
+        }
+    });
+}
+
 fn discover_font_files() -> Vec<PathBuf> {
     let mut fonts = Vec::new();
     let directories = ["assets/fonts", "data/fonts", "resources/fonts", "fonts"];
@@ -163,7 +217,7 @@ fn build_shell(context: &AppContext) -> ToastOverlay {
         .margin_end(12)
         .build();
 
-    root.append(&build_header());
+    root.append(&build_header(context));
     root.append(&Separator::new(Orientation::Horizontal));
 
     let main_controls = build_main_controls(context, overlay.clone());
@@ -179,13 +233,40 @@ fn build_shell(context: &AppContext) -> ToastOverlay {
     overlay
 }
 
-fn build_header() -> HeaderBar {
-    let title = WindowTitle::builder()
-        .title("Arctic Downloader")
-        .subtitle("ComfyUI Asset Helper by Arctic Latent")
+fn build_header(context: &AppContext) -> HeaderBar {
+    let title_row = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(8)
+        .halign(Align::Center)
         .build();
 
-    HeaderBar::builder().title_widget(&title).build()
+    let title_label = Label::builder()
+        .label("Arctic Downloader")
+        .xalign(0.0)
+        .build();
+    let version_label = Label::new(None);
+    version_label.set_use_markup(true);
+    version_label.set_markup(&format!("<i>v{}</i>", context.display_version));
+    version_label.add_css_class("dim-label");
+
+    title_row.append(&title_label);
+    title_row.append(&version_label);
+
+    let subtitle_label = Label::builder()
+        .label("ComfyUI Asset Helper by Arctic Latent")
+        .xalign(0.5)
+        .build();
+    subtitle_label.add_css_class("dim-label");
+
+    let title_column = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(2)
+        .halign(Align::Center)
+        .build();
+    title_column.append(&title_row);
+    title_column.append(&subtitle_label);
+
+    HeaderBar::builder().title_widget(&title_column).build()
 }
 
 fn build_main_controls(context: &AppContext, overlay: ToastOverlay) -> GtkBox {

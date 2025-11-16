@@ -82,6 +82,29 @@ flatpak-builder --user --install --force-clean build-dir flatpak/io.github.Arcti
 flatpak run io.github.ArcticDownloader
 ```
 
+## Releases & Auto-Update Manifest
+
+- On startup the app fetches an update manifest from
+  `https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/update.json`
+  (override with `ARCTIC_UPDATE_MANIFEST_URL`). If the manifest advertises a higher semver version,
+  the app downloads the bundled `.flatpak`, verifies its SHA-256, and reinstalls it via
+  `flatpak-spawn --host flatpak install --user --reinstall <bundle>`.
+- Manifest schema:
+
+  ```json
+  {
+    "version": "0.1.0",
+    "download_url": "https://github.com/ArcticLatent/ArcticDownloader-flatpak/releases/download/v0.1.0/ArcticDownloader.flatpak",
+    "sha256": "<sha256sum-of-the-flatpak>",
+    "notes": "Optional release notes"
+  }
+  ```
+
+- Release steps: build the Flatpak, calculate `sha256sum ArcticDownloader.flatpak`, upload it to the
+  GitHub Release, update `update.json` in `ArcticLatent/ArcticDownloader-flatpak` with the new
+  version/download URL/checksum, and push it. Restart the app after auto-install completes.
+- Disable the automatic check with `ARCTIC_SKIP_AUTO_UPDATE=1`; re-enable with `ARCTIC_AUTO_UPDATE=1`.
+
 ## Catalog Curation
 
 The app ships and trusts the checked-in `data/catalog.json`. Each entry maps:

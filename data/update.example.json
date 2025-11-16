@@ -1,0 +1,6 @@
+{
+  "version": "0.1.0",
+  "download_url": "https://github.com/ArcticLatent/ArcticDownloader-flatpak/releases/download/v0.1.0/ArcticDownloader.flatpak",
+  "sha256": "<replace-with-sha256sum-of-the-flatpak>",
+  "notes": "Optional release notes displayed in your README or release description."
+}

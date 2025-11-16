@@ -1,6 +1,6 @@
 [package]
 name = "arctic-downloader"
-version = "0.1.0"
+version = "0.2.9"
 edition = "2021"
 rust-version = "1.76"
 
@@ -15,10 +15,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
 directories = "5"
 env_logger = "0.11"
 log = "0.4"
 gdk-pixbuf = "0.19"
 percent-encoding = "2"
 sysinfo = "0.30"
+semver = "1"

@@ -18,3 +18,11 @@ pub fn remote_refresh_enabled() -> bool {
 pub fn prefer_local_catalog() -> bool {
     parse_env_bool("ARCTIC_USE_LOCAL_CATALOG").unwrap_or_else(|| !remote_refresh_enabled())
 }
+
+pub fn auto_update_enabled() -> bool {
+    if let Some(skip) = parse_env_bool("ARCTIC_SKIP_AUTO_UPDATE") {
+        return !skip;
+    }
+
+    parse_env_bool("ARCTIC_AUTO_UPDATE").unwrap_or(true)
+}

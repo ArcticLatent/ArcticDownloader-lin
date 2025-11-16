@@ -26,6 +26,24 @@ Arctic Downloader is a helper app for people who run ComfyUI and want a simple w
 
 That’s it—browse the catalog, pick what you want, and click download. The app handles the rest.
 
+## Automatic updates
+
+- On launch, the app checks for a new version using a small manifest at `https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/update.json` (override with `ARCTIC_UPDATE_MANIFEST_URL`).
+- Manifest format:
+
+  ```json
+  {
+    "version": "0.1.0",
+    "download_url": "https://github.com/ArcticLatent/ArcticDownloader-flatpak/releases/download/v0.1.0/ArcticDownloader.flatpak",
+    "sha256": "<sha256-of-the-flatpak>",
+    "notes": "Optional release notes"
+  }
+  ```
+
+- Publish a new build: attach the `.flatpak` to a GitHub Release, calculate `sha256sum ArcticDownloader.flatpak`, update `update.json` with the new version, URL, and checksum, and push it to the repo (or the Release assets).
+- When a new version exists, the app downloads the `.flatpak` into `~/.var/app/io.github.ArcticDownloader/cache/updates/` and reinstalls it silently with `flatpak-spawn --host flatpak install --user --reinstall …`. Restart the app to finish the upgrade.
+- To disable the auto-check (for testing), set `ARCTIC_SKIP_AUTO_UPDATE=1`. Re-enable with `ARCTIC_AUTO_UPDATE=1`.
+
 ## Tips
 
 - The VRAM tiers (S, A, B, C) give you a quick way to match files to your GPU size. If you’re unsure, pick the lowest tier that matches your card to avoid running out of memory.

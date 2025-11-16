@@ -116,6 +116,8 @@ pub struct AppSettings {
     pub catalog_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub civitai_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_installed_version: Option<String>,
 }
 
 impl AppSettings {
@@ -136,6 +138,7 @@ impl Default for AppSettings {
             last_catalog_etag: None,
             catalog_endpoint: default_catalog_endpoint(),
             civitai_token: None,
+            last_installed_version: None,
         }
     }
 }

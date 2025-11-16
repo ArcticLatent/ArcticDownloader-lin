@@ -5,12 +5,13 @@ use crate::{
     env_flags::remote_refresh_enabled,
     ram::{detect_ram_profile, RamProfile, RamTier},
     ui,
+    updater::Updater,
 };
 use adw::glib;
 use adw::{gio::ApplicationFlags, prelude::*, Application};
 use anyhow::{anyhow, Result};
 use log::{info, warn};
-use std::sync::Arc;
+use std::{process::Command, sync::Arc};
 use tokio::runtime::{Builder, Runtime};
 
 pub const APP_ID: &str = "io.github.ArcticDownloader";
@@ -21,7 +22,9 @@ pub struct AppContext {
     pub config: Arc<ConfigStore>,
     pub catalog: Arc<CatalogService>,
     pub downloads: Arc<DownloadManager>,
+    pub updater: Arc<Updater>,
     pub ram_profile: Option<RamProfile>,
+    pub display_version: String,
 }
 
 impl AppContext {
@@ -64,7 +67,13 @@ impl ArcticDownloaderApp {
             info!("Skipping remote catalog refresh (ARCTIC_SKIP_REMOTE_REFRESH present).");
         }
 
+        let display_version = resolve_display_version(&config);
         let downloads = Arc::new(DownloadManager::new(runtime.clone()));
+        let updater = Arc::new(Updater::new(
+            runtime.clone(),
+            config.clone(),
+            display_version.clone(),
+        )?);
         let ram_profile = detect_ram_profile();
 
         let context = AppContext {
@@ -72,7 +81,9 @@ impl ArcticDownloaderApp {
             config,
             catalog,
             downloads,
+            updater,
             ram_profile,
+            display_version,
         };
 
         Ok(Self {
@@ -99,4 +110,45 @@ impl ArcticDownloaderApp {
             ))
         }
     }
+}
+
+fn resolve_display_version(config: &ConfigStore) -> String {
+    if let Some(version) = config.settings().last_installed_version {
+        if !version.trim().is_empty() {
+            return version;
+        }
+    }
+
+    if let Some(installed) = installed_flatpak_version() {
+        return installed;
+    }
+
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn installed_flatpak_version() -> Option<String> {
+    if std::env::var("FLATPAK_ID").is_err() {
+        return None;
+    }
+
+    let mut command = Command::new("flatpak-spawn");
+    command.args(["--host", "flatpak", "info", APP_ID]);
+
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("Version:") {
+            let version = rest.trim();
+            if !version.is_empty() {
+                return Some(version.to_string());
+            }
+        }
+    }
+
+    None
 }
