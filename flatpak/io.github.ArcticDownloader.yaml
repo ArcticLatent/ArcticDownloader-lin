@@ -28,7 +28,7 @@ modules:
       - type: dir
         path: ../
     build-commands:
-      - cargo --offline fetch --manifest-path Cargo.toml || cargo fetch --manifest-path Cargo.toml
+      - cargo fetch --locked --manifest-path Cargo.toml
       - cargo build --release --locked --manifest-path Cargo.toml
       - install -Dm755 target/release/arctic-downloader /app/bin/arctic-downloader
       - install -Dm644 assets/icon.svg /app/share/icons/hicolor/scalable/apps/io.github.ArcticDownloader.svg
