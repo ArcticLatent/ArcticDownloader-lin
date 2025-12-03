@@ -5,9 +5,10 @@ use log::{info, warn};
 use percent_encoding::percent_decode_str;
 use reqwest::{header, Client, Url};
 use serde::Deserialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{mpsc::Sender, Arc},
 };
@@ -791,6 +792,12 @@ async fn fetch_civitai_model_metadata_internal(
         }
     }
 
+    if usage_strength.is_none() {
+        if let Some(strength) = fetch_strength_from_html(client, model_id, model_version_id).await {
+            usage_strength = Some(strength);
+        }
+    }
+
     Ok(CivitaiModelMetadata {
         file_name,
         preview,
@@ -988,6 +995,111 @@ fn normalized_strength(value: Option<f64>) -> Option<f64> {
         Some(v) if v.is_finite() && v > 0.0 => Some(v),
         _ => None,
     }
+}
+
+async fn fetch_strength_from_html(
+    client: &Client,
+    model_id: Option<u64>,
+    model_version_id: u64,
+) -> Option<f64> {
+    let mut urls = Vec::new();
+    if let Some(id) = model_id {
+        urls.push(format!(
+            "https://civitai.com/models/{id}?modelVersionId={model_version_id}"
+        ));
+    }
+    urls.push(format!(
+        "https://civitai.com/model-versions/{model_version_id}"
+    ));
+
+    for url in urls {
+        let response = match client.get(&url).send().await {
+            Ok(response) => response,
+            Err(err) => {
+                warn!("Failed to fetch model page {url}: {err}");
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            warn!(
+                "Model page request for version {model_version_id} returned status {}",
+                response.status()
+            );
+            continue;
+        }
+
+        let html = match response.text().await {
+            Ok(body) => body,
+            Err(err) => {
+                warn!("Failed to read model page body {url}: {err}");
+                continue;
+            }
+        };
+
+        if let Some(strength) = parse_strength_from_html(&html, model_version_id) {
+            return Some(strength);
+        }
+    }
+
+    None
+}
+
+fn parse_strength_from_html(html: &str, model_version_id: u64) -> Option<f64> {
+    let marker = "<script id=\"__NEXT_DATA__\" type=\"application/json\">";
+    let start = html.find(marker)?;
+    let after = &html[start + marker.len()..];
+    let end = after.find("</script>")?;
+    let json_str = &after[..end];
+
+    let value: Value = serde_json::from_str(json_str).ok()?;
+    find_strength_in_value(&value, model_version_id)
+}
+
+fn find_strength_in_value(value: &Value, model_version_id: u64) -> Option<f64> {
+    let mut queue: VecDeque<&Value> = VecDeque::new();
+    queue.push_back(value);
+    let mut visited = 0usize;
+    const MAX_VISITED: usize = 500;
+
+    while let Some(current) = queue.pop_front() {
+        visited += 1;
+        if visited > MAX_VISITED {
+            warn!("Aborting HTML strength scan after {MAX_VISITED} nodes to avoid stack overflow.");
+            break;
+        }
+
+        if let Some(obj) = current.as_object() {
+            if let Some(id) = obj.get("id").and_then(|v| v.as_u64()) {
+                if id == model_version_id {
+                    if let Some(s) = normalized_strength(
+                        obj.get("settings")
+                            .and_then(|s| s.get("strength"))
+                            .and_then(|v| v.as_f64()),
+                    ) {
+                        return Some(s);
+                    }
+                    if let Some(s) = normalized_strength(
+                        obj.get("meta")
+                            .and_then(|m| m.get("strength"))
+                            .and_then(|v| v.as_f64()),
+                    ) {
+                        return Some(s);
+                    }
+                }
+            }
+
+            for val in obj.values() {
+                queue.push_back(val);
+            }
+        } else if let Some(array) = current.as_array() {
+            for item in array {
+                queue.push_back(item);
+            }
+        }
+    }
+
+    None
 }
 
 #[derive(Debug, Deserialize)]

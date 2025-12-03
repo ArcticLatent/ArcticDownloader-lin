@@ -16,7 +16,6 @@ button.link-pill:focus-visible {
 }
 
 button.link-pill > box {
-    align-items: center;
 }
 
 .link-icon {

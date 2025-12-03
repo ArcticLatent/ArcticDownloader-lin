@@ -1067,6 +1067,8 @@ fn build_lora_page(
     let metadata_box = GtkBox::builder()
         .orientation(Orientation::Vertical)
         .spacing(8)
+        .hexpand(true)
+        .halign(Align::Fill)
         .build();
     metadata_box.append(&metadata_status);
     metadata_box.append(&metadata_picture);
@@ -1075,7 +1077,7 @@ fn build_lora_page(
         .use_markup(true)
         .halign(Align::Start)
         .wrap(true)
-        .css_classes(vec![String::from("legend-text")])
+        .css_classes(vec![String::from("legend-text"), String::from("heading")])
         .build();
     metadata_creator_label.set_visible(false);
     metadata_box.append(&metadata_creator_label);
@@ -1084,7 +1086,7 @@ fn build_lora_page(
         .label("Suggested strength: ")
         .halign(Align::Start)
         .wrap(true)
-        .css_classes(vec![String::from("legend-text")])
+        .css_classes(vec![String::from("legend-text"), String::from("heading")])
         .build();
     metadata_usage_label.set_visible(false);
     metadata_box.append(&metadata_usage_label);
@@ -1106,16 +1108,20 @@ fn build_lora_page(
     metadata_description_label.set_visible(false);
 
     let metadata_description = Label::builder()
-        .halign(Align::Start)
+        .halign(Align::Fill)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .xalign(0.0)
+        .use_markup(true)
+        .hexpand(true)
         .build();
     metadata_description.set_text("Select a LoRA to view its description.");
 
     let metadata_description_scroller = ScrolledWindow::builder()
         .min_content_height(180)
         .max_content_height(360)
+        .hexpand(true)
+        .halign(Align::Fill)
         .child(&metadata_description)
         .build();
     metadata_description_scroller.set_visible(false);
@@ -1124,6 +1130,8 @@ fn build_lora_page(
     metadata_box.append(&metadata_description_scroller);
 
     let metadata_row = labelled_row("LoRA Details", &metadata_box);
+    metadata_row.set_hexpand(true);
+    metadata_row.set_halign(Align::Fill);
     metadata_row.set_visible(false);
 
     let progress_box = GtkBox::builder()
@@ -1181,7 +1189,7 @@ fn build_lora_page(
             metadata_usage_label.set_visible(false);
             metadata_description_scroller.set_visible(false);
             metadata_description_label.set_visible(false);
-            metadata_description.set_text("");
+            metadata_description.set_markup("");
             metadata_status.set_visible(false);
             metadata_row.set_visible(false);
             *current_preview_request.borrow_mut() = None;
@@ -1278,13 +1286,16 @@ fn build_lora_page(
 
                         metadata_description_label_clone.set_visible(false);
                         metadata_description_scroller_clone.set_visible(false);
-                        metadata_description_clone.set_text("");
+                        metadata_description_clone.set_markup("");
                         if let Some(description) = metadata
                             .description
                             .as_deref()
                             .and_then(|html| html_to_plain_text(html))
                         {
-                            metadata_description_clone.set_text(&description);
+                            let read_more_url = civitai_read_more_url(&lora.download_url);
+                            let formatted =
+                                format_description_with_read_more(&description, 100, read_more_url);
+                            metadata_description_clone.set_markup(&formatted);
                             metadata_description_label_clone.set_visible(true);
                             metadata_description_scroller_clone.set_visible(true);
                             has_content = true;
@@ -1864,6 +1875,78 @@ fn is_icon(ch: char) -> bool {
             | 0xFE00..=0xFE0F // Variation selectors
             | 0x1F000..=0x1FFFF // Misc symbols & emoji planes
     )
+}
+
+fn format_description_with_read_more(
+    text: &str,
+    max_words: usize,
+    read_more_url: Option<String>,
+) -> String {
+    if max_words == 0 {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    let mut in_word = false;
+    let mut word_count = 0usize;
+    let mut truncated = false;
+
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if in_word {
+                in_word = false;
+            }
+            output.push(ch);
+        } else {
+            if !in_word {
+                word_count += 1;
+                in_word = true;
+                if word_count > max_words {
+                    truncated = true;
+                    break;
+                }
+            }
+            output.push(ch);
+        }
+    }
+
+    while output.ends_with(|c: char| c.is_whitespace()) {
+        output.pop();
+    }
+
+    let mut markup = gtk::glib::markup_escape_text(&output).to_string();
+
+    if truncated {
+        markup.push('…');
+        if let Some(url) = read_more_url {
+            let escaped_url = gtk::glib::markup_escape_text(&url).to_string();
+            markup.push(' ');
+            markup.push_str(&format!("<a href=\"{escaped_url}\">Read More</a>"));
+        }
+    }
+
+    markup
+}
+
+fn civitai_read_more_url(download_url: &str) -> Option<String> {
+    let lower = download_url.to_ascii_lowercase();
+    if !lower.contains("civitai.com") {
+        return None;
+    }
+
+    let patterns = ["/model-versions/", "/models/", "/api/download/models/"];
+    for pattern in patterns {
+        if let Some(pos) = lower.find(pattern) {
+            let start = pos + pattern.len();
+            let slice = &download_url[start..];
+            let id_str: String = slice.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+            if let Ok(id) = id_str.parse::<u64>() {
+                return Some(format!("https://civitai.com/model-versions/{id}"));
+            }
+        }
+    }
+
+    None
 }
 
 fn escape_markup(text: &str) -> String {
