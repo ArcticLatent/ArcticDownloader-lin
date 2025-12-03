@@ -1156,6 +1156,15 @@ fn build_lora_page(
     let current_preview_request: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let active_media: Rc<RefCell<Option<MediaFile>>> = Rc::new(RefCell::new(None));
 
+    {
+        let active_media = Rc::clone(&active_media);
+        metadata_row.connect_unrealize(move |_| {
+            if let Some(media) = active_media.borrow_mut().take() {
+                media.set_playing(false);
+            }
+        });
+    }
+
     let downloads_for_preview = context.downloads.clone();
     let config_for_preview = context.config.clone();
 
@@ -1294,7 +1303,7 @@ fn build_lora_page(
                         {
                             let read_more_url = civitai_read_more_url(&lora.download_url);
                             let formatted =
-                                format_description_with_read_more(&description, 100, read_more_url);
+                                format_description_with_read_more(&description, 400, read_more_url);
                             metadata_description_clone.set_markup(&formatted);
                             metadata_description_label_clone.set_visible(true);
                             metadata_description_scroller_clone.set_visible(true);
@@ -1916,13 +1925,20 @@ fn format_description_with_read_more(
 
     let mut markup = gtk::glib::markup_escape_text(&output).to_string();
 
-    if truncated {
-        markup.push('…');
-        if let Some(url) = read_more_url {
-            let escaped_url = gtk::glib::markup_escape_text(&url).to_string();
-            markup.push(' ');
-            markup.push_str(&format!("<a href=\"{escaped_url}\">Read More</a>"));
+    let mut appended_link = false;
+
+    if let Some(url) = read_more_url {
+        let escaped_url = gtk::glib::markup_escape_text(&url).to_string();
+        if truncated {
+            markup.push('…');
         }
+        markup.push(' ');
+        markup.push_str(&format!("<a href=\"{escaped_url}\">Read More</a>"));
+        appended_link = true;
+    }
+
+    if truncated && !appended_link {
+        markup.push('…');
     }
 
     markup

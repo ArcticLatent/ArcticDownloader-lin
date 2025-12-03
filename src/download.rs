@@ -738,6 +738,11 @@ async fn fetch_civitai_model_metadata_internal(
         .await
         .with_context(|| format!("failed to parse metadata payload for {api_url}"))?;
 
+    let model_description = payload
+        .model
+        .as_ref()
+        .and_then(|model| model.description.clone());
+
     let CivitaiModelVersion {
         trained_words,
         images,
@@ -755,7 +760,7 @@ async fn fetch_civitai_model_metadata_internal(
 
     let preview = resolve_preview(client, &images, token, model_version_id).await;
 
-    let mut description = normalize_description(description);
+    let mut description = select_richest_description(description, model_description);
     let mut usage_strength = extract_usage_strength(settings.as_ref(), meta.as_ref(), &images);
     let mut creator_username = None;
     let mut creator_link = None;
@@ -770,13 +775,21 @@ async fn fetch_civitai_model_metadata_internal(
         }
     }
 
-    if creator_username.is_none() || description.is_none() || usage_strength.is_none() {
+    let description_too_short = description
+        .as_ref()
+        .map(|text| description_word_count(text) < 400)
+        .unwrap_or(true);
+
+    if creator_username.is_none()
+        || description.is_none()
+        || usage_strength.is_none()
+        || description_too_short
+    {
         if let Some(model_id) = model_id {
             match fetch_civitai_model_details(client, model_id, model_version_id, token).await {
                 Ok(details) => {
-                    if description.is_none() {
-                        description = normalize_description(details.description);
-                    }
+                    description =
+                        select_richest_description(description, details.description.clone());
                     if creator_username.is_none() {
                         if let Some(creator) = details.creator {
                             creator_username = creator.username;
@@ -813,6 +826,31 @@ fn normalize_description(description: Option<String>) -> Option<String> {
     description
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+}
+
+fn select_richest_description(
+    version_description: Option<String>,
+    model_description: Option<String>,
+) -> Option<String> {
+    let version_description = normalize_description(version_description);
+    let model_description = normalize_description(model_description);
+
+    match (version_description, model_description) {
+        (Some(version), Some(model)) => {
+            if description_word_count(&model) > description_word_count(&version) {
+                Some(model)
+            } else {
+                Some(version)
+            }
+        }
+        (Some(version), None) => Some(version),
+        (None, Some(model)) => Some(model),
+        (None, None) => None,
+    }
+}
+
+fn description_word_count(text: &str) -> usize {
+    text.split_whitespace().count()
 }
 
 fn fallback_file_name_from_url(url: &str, model_version_id: u64) -> String {
