@@ -10,7 +10,7 @@ use adw::gio;
 use adw::gtk::{
     self, gdk, prelude::*, Align, Box as GtkBox, Button, ComboBoxText, CssProvider, Entry,
     FileChooserAction, FileChooserNative, FlowBox, Image, Label, ListBox, MediaFile, Orientation,
-    Picture, ResponseType, Separator,
+    Picture, ResponseType, ScrolledWindow, Separator,
 };
 use adw::{Application, ApplicationWindow, HeaderBar, Toast, ToastOverlay};
 use anyhow::Result;
@@ -18,7 +18,7 @@ use gdk_pixbuf::PixbufLoader;
 use log::{info, warn};
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     rc::Rc,
@@ -1080,6 +1080,15 @@ fn build_lora_page(
     metadata_creator_label.set_visible(false);
     metadata_box.append(&metadata_creator_label);
 
+    let metadata_usage_label = Label::builder()
+        .label("Suggested strength: ")
+        .halign(Align::Start)
+        .wrap(true)
+        .css_classes(vec![String::from("legend-text")])
+        .build();
+    metadata_usage_label.set_visible(false);
+    metadata_box.append(&metadata_usage_label);
+
     let metadata_triggers_label = Label::builder()
         .label("Trigger Words")
         .halign(Align::Start)
@@ -1088,6 +1097,31 @@ fn build_lora_page(
     metadata_triggers_label.set_visible(false);
     metadata_box.append(&metadata_triggers_label);
     metadata_box.append(&metadata_triggers);
+
+    let metadata_description_label = Label::builder()
+        .label("Description")
+        .halign(Align::Start)
+        .css_classes(vec![String::from("heading")])
+        .build();
+    metadata_description_label.set_visible(false);
+
+    let metadata_description = Label::builder()
+        .halign(Align::Start)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .build();
+    metadata_description.set_text("Select a LoRA to view its description.");
+
+    let metadata_description_scroller = ScrolledWindow::builder()
+        .min_content_height(180)
+        .max_content_height(360)
+        .child(&metadata_description)
+        .build();
+    metadata_description_scroller.set_visible(false);
+
+    metadata_box.append(&metadata_description_label);
+    metadata_box.append(&metadata_description_scroller);
 
     let metadata_row = labelled_row("LoRA Details", &metadata_box);
     metadata_row.set_visible(false);
@@ -1123,6 +1157,10 @@ fn build_lora_page(
         let metadata_triggers = metadata_triggers.clone();
         let metadata_triggers_label = metadata_triggers_label.clone();
         let metadata_creator_label = metadata_creator_label.clone();
+        let metadata_usage_label = metadata_usage_label.clone();
+        let metadata_description_label = metadata_description_label.clone();
+        let metadata_description = metadata_description.clone();
+        let metadata_description_scroller = metadata_description_scroller.clone();
         let metadata_row = metadata_row.clone();
         let current_preview_request = Rc::clone(&current_preview_request);
         let downloads = downloads_for_preview.clone();
@@ -1140,6 +1178,10 @@ fn build_lora_page(
             metadata_triggers.set_visible(false);
             metadata_triggers_label.set_visible(false);
             metadata_creator_label.set_visible(false);
+            metadata_usage_label.set_visible(false);
+            metadata_description_scroller.set_visible(false);
+            metadata_description_label.set_visible(false);
+            metadata_description.set_text("");
             metadata_status.set_visible(false);
             metadata_row.set_visible(false);
             *current_preview_request.borrow_mut() = None;
@@ -1172,6 +1214,10 @@ fn build_lora_page(
             let metadata_triggers_clone = metadata_triggers.clone();
             let metadata_triggers_label_clone = metadata_triggers_label.clone();
             let metadata_creator_label_clone = metadata_creator_label.clone();
+            let metadata_usage_label_clone = metadata_usage_label.clone();
+            let metadata_description_label_clone = metadata_description_label.clone();
+            let metadata_description_clone = metadata_description.clone();
+            let metadata_description_scroller_clone = metadata_description_scroller.clone();
             let metadata_row_clone = metadata_row.clone();
             let current_preview_request_clone = Rc::clone(&current_preview_request);
             let downloads = downloads.clone();
@@ -1219,6 +1265,28 @@ fn build_lora_page(
                                 "Creator: <a href=\"{escaped_link}\">{escaped_username}</a>"
                             ));
                             metadata_creator_label_clone.set_visible(true);
+                            has_content = true;
+                        }
+
+                        metadata_usage_label_clone.set_visible(false);
+                        if let Some(weight) = metadata.usage_strength {
+                            metadata_usage_label_clone
+                                .set_label(&format!("Suggested strength: {:.2}", weight));
+                            metadata_usage_label_clone.set_visible(true);
+                            has_content = true;
+                        }
+
+                        metadata_description_label_clone.set_visible(false);
+                        metadata_description_scroller_clone.set_visible(false);
+                        metadata_description_clone.set_text("");
+                        if let Some(description) = metadata
+                            .description
+                            .as_deref()
+                            .and_then(|html| html_to_plain_text(html))
+                        {
+                            metadata_description_clone.set_text(&description);
+                            metadata_description_label_clone.set_visible(true);
+                            metadata_description_scroller_clone.set_visible(true);
                             has_content = true;
                         }
 
@@ -1688,11 +1756,11 @@ fn build_lora_page(
         });
     });
 
+    column.append(&labelled_row("ComfyUI Folder", &comfy_path_entry));
+    column.append(&select_folder_button);
     column.append(&labelled_row("Family Filter", &family_dropdown));
     column.append(&labelled_row("LoRA", &lora_dropdown));
     column.append(&metadata_row);
-    column.append(&labelled_row("ComfyUI Folder", &comfy_path_entry));
-    column.append(&select_folder_button);
     column.append(&download_button);
     column.append(&progress_box);
     column.append(&status_label);
@@ -1712,6 +1780,90 @@ fn clear_flow_box(flow_box: &gtk::FlowBox) {
     while let Some(child) = flow_box.child_at_index(0) {
         flow_box.remove(&child);
     }
+}
+
+fn html_to_plain_text(html: &str) -> Option<String> {
+    let trimmed = html.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let replacements = [
+        ("<br />", "\n"),
+        ("<br/>", "\n"),
+        ("<br>", "\n"),
+        ("<p>", ""),
+        ("</p>", "\n\n"),
+        ("<ul>", ""),
+        ("</ul>", "\n"),
+        ("<ol>", ""),
+        ("</ol>", "\n"),
+        ("<li>", "- "),
+        ("</li>", "\n"),
+    ];
+
+    let mut preprocessed = trimmed.to_string();
+    for (from, to) in replacements {
+        preprocessed = preprocessed.replace(from, to);
+    }
+
+    let mut builder = ammonia::Builder::default();
+    builder.tags(HashSet::<&str>::new());
+    builder.generic_attributes(HashSet::<&str>::new());
+    let cleaned = builder.clean(&preprocessed).to_string();
+
+    let normalized = cleaned
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let normalized = normalized.trim_matches('\n').to_string();
+    let normalized = collapse_blank_lines(&normalized);
+    let normalized = strip_icons(&normalized);
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn strip_icons(text: &str) -> String {
+    text.chars().filter(|ch| !is_icon(*ch)).collect()
+}
+
+fn collapse_blank_lines(text: &str) -> String {
+    let mut result = String::new();
+    let mut last_blank = true;
+
+    for line in text.lines() {
+        let is_blank = line.trim().is_empty();
+        if is_blank {
+            if last_blank {
+                continue;
+            }
+            result.push('\n');
+            last_blank = true;
+        } else {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(line.trim_end());
+            last_blank = false;
+        }
+    }
+
+    result.trim_end_matches('\n').to_string()
+}
+
+fn is_icon(ch: char) -> bool {
+    let code = ch as u32;
+    matches!(
+        code,
+        0x2600..=0x27BF // Misc symbols and dingbats
+            | 0xFE00..=0xFE0F // Variation selectors
+            | 0x1F000..=0x1FFFF // Misc symbols & emoji planes
+    )
 }
 
 fn escape_markup(text: &str) -> String {

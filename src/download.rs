@@ -33,6 +33,8 @@ pub struct CivitaiModelMetadata {
     pub file_name: String,
     pub preview: Option<CivitaiPreview>,
     pub trained_words: Vec<String>,
+    pub description: Option<String>,
+    pub usage_strength: Option<f64>,
     pub creator_username: Option<String>,
     pub creator_link: Option<String>,
 }
@@ -308,7 +310,9 @@ impl DownloadManager {
                 let cache_guard = cache.lock().await;
                 cache_guard.get(&model_version_id).cloned()
             } {
-                return Ok(cached);
+                if cached.usage_strength.is_some() {
+                    return Ok(cached);
+                }
             }
 
             let metadata = fetch_civitai_model_metadata_internal(
@@ -594,12 +598,42 @@ fn parse_content_disposition(value: &str) -> Option<String> {
 }
 
 fn extract_civitai_model_version_id(url: &str) -> Option<u64> {
-    let idx = url.to_ascii_lowercase().find("/models/")?;
-    let remainder = &url[idx + "/models/".len()..];
-    let id_str = remainder
-        .split(|c| c == '?' || c == '/' || c == '&')
-        .next()?;
-    id_str.parse().ok()
+    let lower = url.to_ascii_lowercase();
+
+    if let Some(pos) = lower.find("modelversionid=") {
+        let remainder = &url[pos + "modelversionid=".len()..];
+        let id_str = remainder
+            .split(|c| c == '&' || c == '#' || c == '/')
+            .next()
+            .unwrap_or_default();
+        if let Ok(id) = id_str.parse() {
+            return Some(id);
+        }
+    }
+
+    if let Some(pos) = lower.find("/model-versions/") {
+        let remainder = &url[pos + "/model-versions/".len()..];
+        let id_str = remainder
+            .split(|c| c == '?' || c == '/' || c == '&')
+            .next()
+            .unwrap_or_default();
+        if let Ok(id) = id_str.parse() {
+            return Some(id);
+        }
+    }
+
+    if let Some(pos) = lower.find("/models/") {
+        let remainder = &url[pos + "/models/".len()..];
+        let id_str = remainder
+            .split(|c| c == '?' || c == '/' || c == '&')
+            .next()
+            .unwrap_or_default();
+        if let Ok(id) = id_str.parse() {
+            return Some(id);
+        }
+    }
+
+    None
 }
 
 fn sanitize_file_name(name: &str) -> String {
@@ -709,6 +743,9 @@ async fn fetch_civitai_model_metadata_internal(
         files,
         model,
         model_id,
+        description,
+        meta,
+        settings,
     } = payload;
 
     let file_name = select_civitai_file(&files, download_url)
@@ -717,6 +754,8 @@ async fn fetch_civitai_model_metadata_internal(
 
     let preview = resolve_preview(client, &images, token, model_version_id).await;
 
+    let mut description = normalize_description(description);
+    let mut usage_strength = extract_usage_strength(settings.as_ref(), meta.as_ref(), &images);
     let mut creator_username = None;
     let mut creator_link = None;
 
@@ -725,16 +764,28 @@ async fn fetch_civitai_model_metadata_internal(
             creator_username = creator.username;
             creator_link = creator.link;
         }
+        if description.is_none() {
+            description = normalize_description(model.description);
+        }
     }
 
-    if creator_username.is_none() {
+    if creator_username.is_none() || description.is_none() || usage_strength.is_none() {
         if let Some(model_id) = model_id {
-            match fetch_civitai_model_creator(client, model_id, token).await {
-                Ok(Some(creator)) => {
-                    creator_username = creator.username;
-                    creator_link = creator.link;
+            match fetch_civitai_model_details(client, model_id, model_version_id, token).await {
+                Ok(details) => {
+                    if description.is_none() {
+                        description = normalize_description(details.description);
+                    }
+                    if creator_username.is_none() {
+                        if let Some(creator) = details.creator {
+                            creator_username = creator.username;
+                            creator_link = creator.link;
+                        }
+                    }
+                    if usage_strength.is_none() {
+                        usage_strength = details.version_strength;
+                    }
                 }
-                Ok(None) => {}
                 Err(err) => warn!("Failed to fetch creator info for model {model_id}: {err}"),
             }
         }
@@ -744,9 +795,17 @@ async fn fetch_civitai_model_metadata_internal(
         file_name,
         preview,
         trained_words,
+        description,
+        usage_strength,
         creator_username,
         creator_link,
     })
+}
+
+fn normalize_description(description: Option<String>) -> Option<String> {
+    description
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn fallback_file_name_from_url(url: &str, model_version_id: u64) -> String {
@@ -879,6 +938,58 @@ fn append_token_if_needed(url: &str, token: Option<&str>) -> String {
     url.to_string()
 }
 
+fn extract_usage_strength(
+    settings: Option<&CivitaiModelSettings>,
+    meta: Option<&CivitaiVersionMeta>,
+    images: &[CivitaiImage],
+) -> Option<f64> {
+    if let Some(strength) = settings.and_then(|s| normalized_strength(s.strength)) {
+        return Some(strength);
+    }
+
+    if let Some(strength) = meta.and_then(|m| normalized_strength(m.strength)) {
+        return Some(strength);
+    }
+
+    for image in images {
+        let Some(meta) = image.meta.as_ref() else {
+            continue;
+        };
+
+        for resource in &meta.resources {
+            if let Some(weight) = normalized_strength(resource.weight) {
+                let is_lora = resource
+                    .r#type
+                    .as_deref()
+                    .map(|t| t.eq_ignore_ascii_case("lora"))
+                    .unwrap_or(true);
+                if is_lora {
+                    return Some(weight);
+                }
+            }
+            if let Some(weight) = normalized_strength(resource.strength) {
+                let is_lora = resource
+                    .r#type
+                    .as_deref()
+                    .map(|t| t.eq_ignore_ascii_case("lora"))
+                    .unwrap_or(true);
+                if is_lora {
+                    return Some(weight);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn normalized_strength(value: Option<f64>) -> Option<f64> {
+    match value {
+        Some(v) if v.is_finite() && v > 0.0 => Some(v),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CivitaiModelVersion {
@@ -892,11 +1003,19 @@ struct CivitaiModelVersion {
     model: Option<CivitaiModel>,
     #[serde(default)]
     model_id: Option<u64>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    meta: Option<CivitaiVersionMeta>,
+    #[serde(default)]
+    settings: Option<CivitaiModelSettings>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CivitaiImage {
     url: Option<String>,
+    #[serde(default)]
+    meta: Option<CivitaiImageMeta>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -913,6 +1032,8 @@ struct CivitaiFile {
 struct CivitaiModel {
     #[serde(default)]
     creator: Option<CivitaiCreator>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -929,13 +1050,68 @@ struct CivitaiCreator {
 struct CivitaiModelResponse {
     #[serde(default)]
     creator: Option<CivitaiCreator>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    model_versions: Vec<CivitaiModelVersionSummary>,
 }
 
-async fn fetch_civitai_model_creator(
+#[derive(Debug)]
+struct CivitaiModelDetails {
+    creator: Option<CivitaiCreator>,
+    description: Option<String>,
+    version_strength: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CivitaiImageMeta {
+    #[serde(default)]
+    resources: Vec<CivitaiResource>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CivitaiResource {
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    weight: Option<f64>,
+    #[serde(default)]
+    strength: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CivitaiVersionMeta {
+    #[serde(default)]
+    strength: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CivitaiModelSettings {
+    #[serde(default)]
+    strength: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CivitaiModelVersionSummary {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    meta: Option<CivitaiVersionMeta>,
+    #[serde(default)]
+    settings: Option<CivitaiModelSettings>,
+}
+
+async fn fetch_civitai_model_details(
     client: &Client,
     model_id: u64,
+    model_version_id: u64,
     token: Option<&str>,
-) -> Result<Option<CivitaiCreator>> {
+) -> Result<CivitaiModelDetails> {
     let api_url = format!("https://civitai.com/api/v1/models/{model_id}");
     let mut request = client.get(&api_url);
     if let Some(token) = token {
@@ -960,5 +1136,25 @@ async fn fetch_civitai_model_creator(
         .await
         .with_context(|| format!("failed to parse metadata payload for {api_url}"))?;
 
-    Ok(payload.creator)
+    let mut version_strength = payload
+        .model_versions
+        .iter()
+        .find(|version| version.id == Some(model_version_id))
+        .and_then(|version| {
+            normalized_strength(version.settings.as_ref().and_then(|s| s.strength))
+                .or_else(|| normalized_strength(version.meta.as_ref().and_then(|m| m.strength)))
+        });
+
+    if version_strength.is_none() {
+        version_strength = payload.model_versions.iter().find_map(|version| {
+            normalized_strength(version.settings.as_ref().and_then(|s| s.strength))
+                .or_else(|| normalized_strength(version.meta.as_ref().and_then(|m| m.strength)))
+        });
+    }
+
+    Ok(CivitaiModelDetails {
+        creator: payload.creator,
+        description: payload.description,
+        version_strength,
+    })
 }
