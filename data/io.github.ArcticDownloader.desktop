@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Arctic Downloader
+Comment=Download curated models and LoRAs for ComfyUI
+Exec=arctic-downloader
+Icon=io.github.ArcticDownloader
+Terminal=false
+Type=Application
+Categories=Utility;Network;
+StartupNotify=true
+Keywords=ComfyUI;LoRA;Model;Download;
