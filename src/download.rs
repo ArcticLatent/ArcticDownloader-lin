@@ -56,6 +56,7 @@ pub struct LoraDownloadOutcome {
 pub struct CivitaiModelMetadata {
     pub file_name: String,
     pub preview: Option<CivitaiPreview>,
+    pub preview_url: Option<String>,
     pub trained_words: Vec<String>,
     pub description: Option<String>,
     pub usage_strength: Option<f64>,
@@ -111,6 +112,7 @@ pub struct DownloadManager {
     api_client: Client,
     download_clients: Vec<Client>,
     civitai_metadata_cache: Arc<Mutex<HashMap<u64, CivitaiModelMetadata>>>,
+    civitai_metadata_order: Arc<Mutex<VecDeque<u64>>>,
 }
 
 impl DownloadManager {
@@ -123,6 +125,7 @@ impl DownloadManager {
             api_client,
             download_clients,
             civitai_metadata_cache: Arc::new(Mutex::new(HashMap::new())),
+            civitai_metadata_order: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -343,6 +346,7 @@ impl DownloadManager {
     ) -> tokio::task::JoinHandle<Result<CivitaiModelMetadata>> {
         let client = self.api_client.clone();
         let cache = Arc::clone(&self.civitai_metadata_cache);
+        let order = Arc::clone(&self.civitai_metadata_order);
         self.runtime.spawn(async move {
             let model_version_id = extract_civitai_model_version_id(&download_url)
                 .ok_or_else(|| anyhow!("unable to parse model version ID from {download_url}"))?;
@@ -366,10 +370,36 @@ impl DownloadManager {
 
             {
                 let mut cache_guard = cache.lock().await;
-                cache_guard.insert(model_version_id, metadata.clone());
+                let mut order_guard = order.lock().await;
+                let mut cached_metadata = metadata.clone();
+                if matches!(cached_metadata.preview, Some(CivitaiPreview::Image(_))) {
+                    cached_metadata.preview = None;
+                }
+                cache_guard.insert(model_version_id, cached_metadata);
+                order_guard.retain(|id| *id != model_version_id);
+                order_guard.push_back(model_version_id);
+                const MAX_CIVITAI_CACHE: usize = 200;
+                while order_guard.len() > MAX_CIVITAI_CACHE {
+                    if let Some(oldest) = order_guard.pop_front() {
+                        cache_guard.remove(&oldest);
+                    }
+                }
             }
 
             Ok(metadata)
+        })
+    }
+
+    pub fn civitai_preview_image(
+        &self,
+        image_url: String,
+        token: Option<String>,
+    ) -> tokio::task::JoinHandle<Result<Vec<u8>>> {
+        let client = self.api_client.clone();
+        self.runtime.spawn(async move {
+            fetch_preview_image_bytes(&client, &image_url, token.as_deref())
+                .await
+                .ok_or_else(|| anyhow!("failed to download preview image"))
         })
     }
 }
@@ -1375,7 +1405,8 @@ async fn fetch_civitai_model_metadata_internal(
         .and_then(|file| file.name.clone())
         .unwrap_or_else(|| fallback_file_name_from_url(download_url, model_version_id));
 
-    let preview = resolve_preview(client, &images, token, model_version_id).await;
+    let (preview, preview_url) =
+        resolve_preview(client, &images, token, model_version_id).await;
 
     let mut description = select_richest_description(description, model_description);
     let mut usage_strength = extract_usage_strength(settings.as_ref(), meta.as_ref(), &images);
@@ -1431,6 +1462,7 @@ async fn fetch_civitai_model_metadata_internal(
     Ok(CivitaiModelMetadata {
         file_name,
         preview,
+        preview_url,
         trained_words,
         description,
         usage_strength,
@@ -1528,7 +1560,7 @@ async fn resolve_preview(
     images: &[CivitaiImage],
     token: Option<&str>,
     model_version_id: u64,
-) -> Option<CivitaiPreview> {
+) -> (Option<CivitaiPreview>, Option<String>) {
     let mut first_image: Option<&str> = None;
 
     for image in images {
@@ -1539,20 +1571,34 @@ async fn resolve_preview(
             continue;
         }
 
-        if is_video_url(url) {
-            let resolved = append_token_if_needed(url, token);
-            return Some(CivitaiPreview::Video { url: resolved });
-        }
-
-        if first_image.is_none() {
+        if !is_video_url(url) && first_image.is_none() {
             first_image = Some(url);
         }
     }
 
     let Some(image_url) = first_image else {
-        return None;
+        return (None, None);
     };
 
+    let preview_url = Some(image_url.to_string());
+    let bytes = fetch_preview_image_bytes(client, image_url, token).await;
+    let preview = bytes.map(CivitaiPreview::Image);
+    if preview.is_none() {
+        warn!("Failed to download image bytes for model version {model_version_id}");
+    }
+    (preview, preview_url)
+}
+
+fn is_video_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.ends_with(".mp4") || lower.ends_with(".webm") || lower.ends_with(".mov")
+}
+
+async fn fetch_preview_image_bytes(
+    client: &Client,
+    image_url: &str,
+    token: Option<&str>,
+) -> Option<Vec<u8>> {
     let mut image_request = client.get(image_url);
     if let Some(token) = token {
         image_request = image_request.header("Authorization", format!("Bearer {}", token));
@@ -1562,42 +1608,25 @@ async fn resolve_preview(
         Ok(response) => {
             if response.status().is_success() {
                 match response.bytes().await {
-                    Ok(bytes) => Some(CivitaiPreview::Image(bytes.to_vec())),
+                    Ok(bytes) => Some(bytes.to_vec()),
                     Err(err) => {
-                        warn!(
-                            "Failed to download image bytes for model version {model_version_id}: {err}"
-                        );
+                        warn!("Failed to download image bytes from {image_url}: {err}");
                         None
                     }
                 }
             } else {
                 warn!(
-                    "Image request for model version {model_version_id} returned status {}",
+                    "Image request for {image_url} returned status {}",
                     response.status()
                 );
                 None
             }
         }
         Err(err) => {
-            warn!("Failed to request image for model version {model_version_id}: {err}");
+            warn!("Failed to request image for {image_url}: {err}");
             None
         }
     }
-}
-
-fn is_video_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.ends_with(".mp4") || lower.ends_with(".webm") || lower.ends_with(".mov")
-}
-
-fn append_token_if_needed(url: &str, token: Option<&str>) -> String {
-    if let Some(token) = token {
-        if !token.trim().is_empty() && !url.contains("token=") {
-            let separator = if url.contains('?') { '&' } else { '?' };
-            return format!("{url}{separator}token={token}");
-        }
-    }
-    url.to_string()
 }
 
 fn extract_usage_strength(

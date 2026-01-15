@@ -14,7 +14,7 @@ use adw::gtk::{
 };
 use adw::{Application, ApplicationWindow, HeaderBar, Toast, ToastOverlay};
 use anyhow::Result;
-use gdk_pixbuf::PixbufLoader;
+use gdk_pixbuf::{InterpType, PixbufLoader};
 use log::{info, warn};
 use std::{
     cell::RefCell,
@@ -1243,8 +1243,8 @@ fn build_lora_page(
             let active_media_clone = Rc::clone(&active_media);
 
             adw::glib::MainContext::default().spawn_local(async move {
-                let token = config.settings().civitai_token.clone();
-                let handle = downloads.civitai_model_metadata(download_url, token);
+                let token_value = config.settings().civitai_token.clone();
+                let handle = downloads.civitai_model_metadata(download_url, token_value.clone());
                 match handle.await {
                     Ok(Ok(metadata)) => {
                         if current_preview_request_clone.borrow().as_deref()
@@ -1322,15 +1322,44 @@ fn build_lora_page(
                                     }
                                 }
                                 CivitaiPreview::Video { url } => {
-                                    let file = gio::File::for_uri(&url);
-                                    let media = MediaFile::for_file(&file);
-                                    media.set_loop(true);
-                                    media.set_muted(true);
-                                    media.play();
-                                    metadata_picture_clone.set_paintable(Some(&media));
-                                    metadata_picture_clone.set_visible(true);
-                                    *active_media_clone.borrow_mut() = Some(media);
-                                    has_content = true;
+                                    let _ = url;
+                                    metadata_status_clone
+                                        .set_text("Video previews are disabled; image previews only.");
+                                    metadata_status_clone.set_visible(true);
+                                }
+                            }
+                        } else if let Some(preview_url) = metadata.preview_url.clone() {
+                            metadata_status_clone.set_text("Fetching preview image…");
+                            metadata_status_clone.set_visible(true);
+                            let handle = downloads
+                                .civitai_preview_image(preview_url.clone(), token_value.clone());
+                            match handle.await {
+                                Ok(Ok(bytes)) => {
+                                    if current_preview_request_clone.borrow().as_deref()
+                                        != Some(lora_id.as_str())
+                                    {
+                                        return;
+                                    }
+                                    if let Some(texture) = texture_from_image_bytes(&bytes) {
+                                        metadata_picture_clone.set_paintable(Some(&texture));
+                                        metadata_picture_clone.set_visible(true);
+                                        metadata_status_clone.set_visible(false);
+                                        has_content = true;
+                                    } else {
+                                        metadata_status_clone
+                                            .set_text("Failed to decode preview image.");
+                                        metadata_status_clone.set_visible(true);
+                                    }
+                                }
+                                Ok(Err(err)) => {
+                                    metadata_status_clone
+                                        .set_text(&format!("Failed to load preview: {err}"));
+                                    metadata_status_clone.set_visible(true);
+                                }
+                                Err(join_err) => {
+                                    metadata_status_clone
+                                        .set_text(&format!("Preview task failed: {join_err}"));
+                                    metadata_status_clone.set_visible(true);
                                 }
                             }
                         }
@@ -1793,7 +1822,18 @@ fn texture_from_image_bytes(bytes: &[u8]) -> Option<gdk::Texture> {
     loader.write(bytes).ok()?;
     loader.close().ok()?;
     let pixbuf = loader.pixbuf()?;
-    Some(gdk::Texture::for_pixbuf(&pixbuf))
+    let max_dim = 512;
+    let width = pixbuf.width();
+    let height = pixbuf.height();
+    let scaled = if width > max_dim || height > max_dim {
+        let scale = (max_dim as f64 / width as f64).min(max_dim as f64 / height as f64);
+        let new_width = (width as f64 * scale).round().max(1.0) as i32;
+        let new_height = (height as f64 * scale).round().max(1.0) as i32;
+        pixbuf.scale_simple(new_width, new_height, InterpType::Bilinear)?
+    } else {
+        pixbuf
+    };
+    Some(gdk::Texture::for_pixbuf(&scaled))
 }
 
 fn clear_flow_box(flow_box: &gtk::FlowBox) {
