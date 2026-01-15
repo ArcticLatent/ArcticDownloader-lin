@@ -99,7 +99,6 @@ impl ArcticDownloaderApp {
                 glib::g_warning!(APP_ID, "failed to initialize UI: {err}");
             }
         });
-
         let exit_status = self.application.run();
         if exit_status == glib::ExitCode::SUCCESS {
             Ok(())

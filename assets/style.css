@@ -57,3 +57,10 @@ button.patreon-link .link-label {
 .legend-text {
     font-size: 10.5pt;
 }
+
+headerbar,
+.titlebar,
+.header-bar {
+    background: transparent;
+    box-shadow: none;
+}

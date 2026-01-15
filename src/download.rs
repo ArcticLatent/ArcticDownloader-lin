@@ -1,6 +1,6 @@
 use crate::model::{LoraDefinition, ModelArtifact, ResolvedModel, TargetCategory};
 use anyhow::{anyhow, Context, Result};
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use log::{info, warn};
 use percent_encoding::percent_decode_str;
 use reqwest::{header, Client, Url};
@@ -8,12 +8,35 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
-    sync::{mpsc::Sender, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::Sender,
+        Arc,
+    },
+    time::Instant,
 };
 use thiserror::Error;
-use tokio::{fs, io::AsyncWriteExt, runtime::Runtime, sync::Mutex};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom},
+    runtime::Runtime,
+    sync::{Mutex, Semaphore},
+};
+use tokio_util::io::StreamReader;
+
+const MULTIPART_MIN_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const CHUNK_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+const CHUNK_CONCURRENCY: usize = 4;
+const IO_BUFFER_INITIAL: usize = 128 * 1024;
+const IO_BUFFER_MIN: usize = 64 * 1024;
+const IO_BUFFER_MAX: usize = 1024 * 1024;
+const ADAPTIVE_STEP_BYTES: u64 = 5 * 1024 * 1024;
+const ADAPTIVE_GROW_MBPS: f64 = 50.0;
+const ADAPTIVE_SHRINK_MBPS: f64 = 5.0;
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct DownloadOutcome {
@@ -85,24 +108,20 @@ pub enum DownloadError {
 #[derive(Debug)]
 pub struct DownloadManager {
     runtime: Arc<Runtime>,
-    client: Client,
+    api_client: Client,
+    download_clients: Vec<Client>,
     civitai_metadata_cache: Arc<Mutex<HashMap<u64, CivitaiModelMetadata>>>,
 }
 
 impl DownloadManager {
     pub fn new(runtime: Arc<Runtime>) -> Self {
-        let client = Client::builder()
-            .user_agent(format!(
-                "ArcticDownloader/{} ({})",
-                env!("CARGO_PKG_VERSION"),
-                env!("CARGO_PKG_NAME")
-            ))
-            .build()
-            .expect("failed to construct reqwest client");
+        let api_client = make_http_client();
+        let download_clients = make_download_clients();
 
         Self {
             runtime,
-            client,
+            api_client,
+            download_clients,
             civitai_metadata_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -113,48 +132,67 @@ impl DownloadManager {
         resolved: ResolvedModel,
         progress: Sender<DownloadSignal>,
     ) -> tokio::task::JoinHandle<Result<Vec<DownloadOutcome>>> {
-        let client = self.client.clone();
+        let download_clients = self.download_clients.clone();
         self.runtime.spawn(async move {
             let mut outcomes = Vec::new();
             let model_folder = resolved.master.id.clone();
-            let artifacts = resolved.variant.artifacts.clone();
+            let artifacts = dedupe_artifacts(resolved.variant.artifacts);
             let total = artifacts.len();
 
-            for (index, artifact) in artifacts.into_iter().enumerate() {
-                let artifact_name = artifact.file_name().to_string();
-                let _ = progress.send(DownloadSignal::Started {
-                    artifact: artifact_name.clone(),
-                    index,
-                    total,
-                    size: artifact.size_bytes,
-                });
+            let mut stream = futures::stream::iter(
+                artifacts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, artifact)| {
+                        let download_clients = download_clients.clone();
+                        let comfy_root = comfy_root.clone();
+                        let model_folder = model_folder.clone();
+                        let progress = progress.clone();
+                        async move {
+                            let artifact_name = artifact.file_name().to_string();
+                            let _ = progress.send(DownloadSignal::Started {
+                                artifact: artifact_name.clone(),
+                                index,
+                                total,
+                                size: artifact.size_bytes,
+                            });
 
-                info!("Starting download: {}", artifact.file_name());
-                match download_artifact(
-                    &client,
-                    &comfy_root,
-                    &model_folder,
-                    &artifact,
-                    Some((progress.clone(), index, artifact_name.clone())),
-                )
-                .await
-                {
+                            info!("Starting download: {}", artifact.file_name());
+                            match download_artifact(
+                                &download_clients,
+                                &comfy_root,
+                                &model_folder,
+                                &artifact,
+                                Some((progress.clone(), index, artifact_name.clone())),
+                            )
+                            .await
+                            {
+                                Ok(outcome) => Ok(outcome),
+                                Err(err) => {
+                                    let _ = progress.send(DownloadSignal::Failed {
+                                        artifact: artifact_name,
+                                        error: err.to_string(),
+                                    });
+                                    Err(err)
+                                }
+                            }
+                        }
+                    }),
+            )
+            .buffer_unordered(1);
+
+            while let Some(result) = stream.next().await {
+                match result {
                     Ok(outcome) => {
                         info!(
                             "{} -> {:?} ({:?})",
-                            artifact.file_name(),
+                            outcome.artifact.file_name(),
                             outcome.destination,
                             outcome.status
                         );
                         outcomes.push(outcome);
                     }
-                    Err(err) => {
-                        let _ = progress.send(DownloadSignal::Failed {
-                            artifact: artifact_name,
-                            error: err.to_string(),
-                        });
-                        return Err(err);
-                    }
+                    Err(err) => return Err(err),
                 }
             }
 
@@ -169,7 +207,8 @@ impl DownloadManager {
         token: Option<String>,
         progress: Sender<DownloadSignal>,
     ) -> tokio::task::JoinHandle<Result<LoraDownloadOutcome>> {
-        let client = self.client.clone();
+        let download_clients = self.download_clients.clone();
+        let api_client = self.api_client.clone();
         self.runtime.spawn(async move {
             let folder_name = lora
                 .family
@@ -193,7 +232,8 @@ impl DownloadManager {
             let mut file_name = lora.derived_file_name();
 
             if base_url.contains("civitai.com") {
-                match fetch_civitai_model_metadata(&client, &base_url, token_value.as_deref()).await
+                match fetch_civitai_model_metadata(&api_client, &base_url, token_value.as_deref())
+                    .await
                 {
                     Ok(metadata) => {
                         file_name = metadata.file_name.clone();
@@ -253,7 +293,7 @@ impl DownloadManager {
             });
 
             match download_direct(
-                &client,
+                &download_clients,
                 &url,
                 &lora_dir,
                 &file_name,
@@ -301,7 +341,7 @@ impl DownloadManager {
         download_url: String,
         token: Option<String>,
     ) -> tokio::task::JoinHandle<Result<CivitaiModelMetadata>> {
-        let client = self.client.clone();
+        let client = self.api_client.clone();
         let cache = Arc::clone(&self.civitai_metadata_cache);
         self.runtime.spawn(async move {
             let model_version_id = extract_civitai_model_version_id(&download_url)
@@ -334,8 +374,55 @@ impl DownloadManager {
     }
 }
 
+fn make_http_client() -> Client {
+    Client::builder()
+        .user_agent(format!(
+            "ArcticDownloader/{} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_NAME")
+        ))
+        .tcp_nodelay(true)
+        .http2_adaptive_window(true)
+        .pool_max_idle_per_host(4)
+        .build()
+        .expect("failed to construct reqwest client")
+}
+
+fn make_download_clients() -> Vec<Client> {
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        header::USER_AGENT,
+        header::HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        ),
+    );
+    headers.insert(
+        header::ACCEPT,
+        header::HeaderValue::from_static(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        ),
+    );
+    headers.insert(
+        header::ACCEPT_LANGUAGE,
+        header::HeaderValue::from_static("en-US,en;q=0.5"),
+    );
+
+    let mut clients = Vec::new();
+    for _ in 0..CHUNK_CONCURRENCY {
+        let client = Client::builder()
+            .default_headers(headers.clone())
+            .http1_only()
+            .tcp_keepalive(std::time::Duration::from_secs(15))
+            .build()
+            .expect("failed to construct download HTTP client");
+        clients.push(client);
+    }
+    clients
+}
+
 async fn download_artifact(
-    client: &Client,
+    clients: &[Client],
     comfy_root: &Path,
     model_folder: &str,
     artifact: &ModelArtifact,
@@ -368,23 +455,29 @@ async fn download_artifact(
     }
 
     let url = if let Some(direct) = &artifact.direct_url {
-        direct.clone()
+        ensure_hf_download_url(direct)
     } else {
         build_download_url(&artifact.repo, &artifact.path)?
     };
     log::info!("Requesting {}", url);
+    let mut content_length = None;
+    let mut accept_ranges = false;
+    let mut final_file_name = initial_file_name.clone();
 
-    let response = client
-        .get(url.clone())
-        .send()
-        .await
-        .with_context(|| format!("request failed for {url}"))?
-        .error_for_status()
-        .with_context(|| format!("unexpected status downloading {url}"))?;
+    let client = clients
+        .first()
+        .ok_or_else(|| anyhow!("missing HTTP client for downloads"))?;
 
-    let content_length = response.content_length();
+    if let Ok(Some(metadata)) =
+        fetch_head_metadata(client, &url, None, &initial_file_name).await
+    {
+        if let Some(name) = metadata.file_name {
+            final_file_name = name;
+        }
+        content_length = metadata.content_length;
+        accept_ranges = metadata.accept_ranges;
+    }
 
-    let final_file_name = filename_from_headers(response.headers(), &initial_file_name);
     if final_file_name != initial_file_name {
         dest_path = dest_dir.join(&final_file_name);
         if fs::try_exists(&dest_path)
@@ -405,10 +498,87 @@ async fn download_artifact(
         }
     }
 
-    let tmp_path = dest_dir.join(format!("{}.part", final_file_name));
-    let mut file = fs::File::create(&tmp_path)
+    let mut part_total = content_length;
+    if part_total.is_none() || !accept_ranges {
+        if let Ok(Some(total)) = probe_range_support(client, &url, None).await {
+            accept_ranges = true;
+            part_total = Some(total);
+        }
+    }
+
+    if accept_ranges {
+        if let Some(total_size) = part_total {
+            if total_size >= MULTIPART_MIN_BYTES {
+                let dest_path = download_ranged_to_file(
+                    clients,
+                    &url,
+                    &dest_dir,
+                    &final_file_name,
+                    total_size,
+                    progress.clone(),
+                    None,
+                    artifact.sha256.as_deref(),
+                )
+                .await?;
+
+                if let Some((sender, index, _artifact_name)) = progress {
+                    let _ = sender.send(DownloadSignal::Finished {
+                        index,
+                        size: Some(total_size),
+                    });
+                }
+
+                return Ok(DownloadOutcome {
+                    artifact: artifact.clone(),
+                    destination: dest_path,
+                    status: DownloadStatus::Downloaded,
+                });
+            }
+        }
+    }
+
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .with_context(|| format!("request failed for {url}"))?
+        .error_for_status()
+        .with_context(|| format!("unexpected status downloading {url}"))?;
+
+    if content_length.is_none() {
+        content_length = response.content_length();
+    }
+
+    if final_file_name == initial_file_name {
+        final_file_name = filename_from_headers(response.headers(), &initial_file_name);
+    }
+    if accept_ranges {
+    }
+    if final_file_name != initial_file_name {
+        dest_path = dest_dir.join(&final_file_name);
+        if fs::try_exists(&dest_path)
+            .await
+            .with_context(|| format!("failed to check {:?} existence", dest_path))?
+        {
+            if let Some((sender, index, _artifact_name)) = progress.as_ref() {
+                let _ = sender.send(DownloadSignal::Finished {
+                    index: *index,
+                    size: Some(0),
+                });
+            }
+            return Ok(DownloadOutcome {
+                artifact: artifact.clone(),
+                destination: dest_path,
+                status: DownloadStatus::SkippedExisting,
+            });
+        }
+    }
+
+    let tmp_path = unique_tmp_path(&dest_dir, &final_file_name);
+    let file = fs::File::create(&tmp_path)
         .await
         .with_context(|| format!("failed to create temporary file {:?}", tmp_path))?;
+    let mut file = BufWriter::new(file);
 
     log::info!(
         "Streaming into temporary file {:?} (destination {:?})",
@@ -416,19 +586,33 @@ async fn download_artifact(
         dest_path
     );
 
-    let mut stream = response.bytes_stream();
+    let stream = response
+        .bytes_stream()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
+    let mut reader = StreamReader::new(stream);
     let mut hasher = artifact.sha256.as_ref().map(|_| Sha256::new());
     let mut received: u64 = 0;
+    let mut buffer = vec![0u8; IO_BUFFER_INITIAL];
+    let mut bytes_since = 0u64;
+    let mut last_adjust = Instant::now();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.with_context(|| format!("failed streaming {url}"))?;
-        file.write_all(&chunk)
+    loop {
+        let n = reader
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("failed streaming {url}"))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])
             .await
             .with_context(|| format!("failed writing to {:?}", tmp_path))?;
-        received += chunk.len() as u64;
+        received += n as u64;
         if let Some(hasher) = hasher.as_mut() {
-            hasher.update(&chunk);
+            hasher.update(&buffer[..n]);
         }
+        bytes_since += n as u64;
+        adapt_buffer_size(&mut buffer, &mut bytes_since, &mut last_adjust);
         if let Some((sender, index, artifact_name)) = progress.as_ref() {
             let _ = sender.send(DownloadSignal::Progress {
                 artifact: artifact_name.clone(),
@@ -460,9 +644,28 @@ async fn download_artifact(
         }
     }
 
-    fs::rename(&tmp_path, &dest_path)
-        .await
-        .with_context(|| format!("failed to move {:?} to {:?}", tmp_path, dest_path))?;
+    if fs::try_exists(&dest_path).await.unwrap_or(false) {
+        fs::remove_file(&tmp_path).await.ok();
+        return Ok(DownloadOutcome {
+            artifact: artifact.clone(),
+            destination: dest_path,
+            status: DownloadStatus::SkippedExisting,
+        });
+    }
+
+    if let Err(err) = fs::rename(&tmp_path, &dest_path).await {
+        if fs::try_exists(&dest_path).await.unwrap_or(false) {
+            fs::remove_file(&tmp_path).await.ok();
+            return Ok(DownloadOutcome {
+                artifact: artifact.clone(),
+                destination: dest_path,
+                status: DownloadStatus::SkippedExisting,
+            });
+        }
+        return Err(err).with_context(|| {
+            format!("failed to move {:?} to {:?}", tmp_path, dest_path)
+        });
+    }
 
     log::info!("Finished download: {:?}", dest_path);
 
@@ -481,32 +684,39 @@ async fn download_artifact(
 }
 
 async fn download_direct(
-    client: &Client,
+    clients: &[Client],
     url: &str,
     dest_dir: &Path,
     file_name: &str,
     progress: Option<(Sender<DownloadSignal>, usize, String)>,
     auth_token: Option<&str>,
 ) -> Result<PathBuf> {
-    let mut request = client.get(url);
-    if let Some(token) = auth_token {
-        request = request.header("Authorization", format!("Bearer {}", token));
-    }
+    let url = ensure_hf_download_url(url);
+    let mut content_length = None;
+    let mut accept_ranges = false;
+    let mut final_file_name = file_name.to_string();
 
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("request failed for {url}"))?;
+    let client = clients
+        .first()
+        .ok_or_else(|| anyhow!("missing HTTP client for downloads"))?;
 
-    if response.status().is_client_error() || response.status().is_server_error() {
-        let status = response.status();
-        if url.contains("civitai.com") && matches!(status.as_u16(), 401 | 403) {
-            return Err(DownloadError::Unauthorized.into());
+    if let Ok(Some(metadata)) =
+        fetch_head_metadata(client, &url, auth_token, &final_file_name).await
+    {
+        if let Some(name) = metadata.file_name {
+            final_file_name = name;
         }
-        return Err(anyhow!("download failed for {url} (status {status})"));
+        content_length = metadata.content_length;
+        accept_ranges = metadata.accept_ranges;
     }
 
-    let final_file_name = filename_from_headers(response.headers(), file_name);
+    let mut part_total = content_length;
+    if part_total.is_none() || !accept_ranges {
+        if let Ok(Some(total)) = probe_range_support(client, &url, auth_token).await {
+            accept_ranges = true;
+            part_total = Some(total);
+        }
+    }
 
     let dest_path = dest_dir.join(&final_file_name);
 
@@ -527,21 +737,104 @@ async fn download_direct(
         return Ok(dest_path);
     }
 
-    let content_length = response.content_length();
-    let tmp_path = dest_dir.join(format!("{}.part", final_file_name));
-    let mut file = fs::File::create(&tmp_path)
+    if accept_ranges {
+        if let Some(total_size) = part_total {
+            if total_size >= MULTIPART_MIN_BYTES {
+                let dest_path = download_ranged_to_file(
+                    clients,
+                    &url,
+                    dest_dir,
+                    &final_file_name,
+                    total_size,
+                    progress.clone(),
+                    auth_token,
+                    None,
+                )
+                .await?;
+
+                if let Some((sender, index, _artifact_name)) = progress {
+                    let _ = sender.send(DownloadSignal::Finished {
+                        index,
+                        size: Some(total_size),
+                    });
+                }
+
+                return Ok(dest_path);
+            }
+        }
+    }
+
+    let mut request = client.get(&url);
+    if let Some(token) = auth_token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("request failed for {url}"))?;
+
+    if response.status().is_client_error() || response.status().is_server_error() {
+        let status = response.status();
+        if url.contains("civitai.com") && matches!(status.as_u16(), 401 | 403) {
+            return Err(DownloadError::Unauthorized.into());
+        }
+        return Err(anyhow!("download failed for {url} (status {status})"));
+    }
+
+    if content_length.is_none() {
+        content_length = response.content_length();
+    }
+
+    if final_file_name == file_name {
+        final_file_name = filename_from_headers(response.headers(), file_name);
+    }
+    if accept_ranges {
+    }
+
+    let dest_path = dest_dir.join(&final_file_name);
+    if fs::try_exists(&dest_path).await.unwrap_or(false) {
+        if let Some((sender, index, _artifact_name)) = progress {
+            let _ = sender.send(DownloadSignal::Finished {
+                index,
+                size: Some(0),
+            });
+        }
+        return Ok(dest_path);
+    }
+
+    if content_length.is_none() {
+        content_length = response.content_length();
+    }
+    let tmp_path = unique_tmp_path(dest_dir, &final_file_name);
+    let file = fs::File::create(&tmp_path)
         .await
         .with_context(|| format!("failed to create temporary file {:?}", tmp_path))?;
+    let mut file = BufWriter::new(file);
 
-    let mut stream = response.bytes_stream();
+    let stream = response
+        .bytes_stream()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
+    let mut reader = StreamReader::new(stream);
     let mut received: u64 = 0;
+    let mut buffer = vec![0u8; IO_BUFFER_INITIAL];
+    let mut bytes_since = 0u64;
+    let mut last_adjust = Instant::now();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.with_context(|| format!("failed streaming {url}"))?;
-        file.write_all(&chunk)
+    loop {
+        let n = reader
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("failed streaming {url}"))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])
             .await
             .with_context(|| format!("failed writing to {:?}", tmp_path))?;
-        received += chunk.len() as u64;
+        received += n as u64;
+        bytes_since += n as u64;
+        adapt_buffer_size(&mut buffer, &mut bytes_since, &mut last_adjust);
         if let Some((sender, index, artifact_name)) = progress.as_ref() {
             let _ = sender.send(DownloadSignal::Progress {
                 artifact: artifact_name.clone(),
@@ -557,14 +850,281 @@ async fn download_direct(
         .with_context(|| format!("failed flushing {:?}", tmp_path))?;
     drop(file);
 
-    fs::rename(&tmp_path, &dest_path)
-        .await
-        .with_context(|| format!("failed to move {:?} to {:?}", tmp_path, dest_path))?;
+    if fs::try_exists(&dest_path).await.unwrap_or(false) {
+        fs::remove_file(&tmp_path).await.ok();
+        return Ok(dest_path);
+    }
+
+    if let Err(err) = fs::rename(&tmp_path, &dest_path).await {
+        if fs::try_exists(&dest_path).await.unwrap_or(false) {
+            fs::remove_file(&tmp_path).await.ok();
+            return Ok(dest_path);
+        }
+        return Err(err).with_context(|| {
+            format!("failed to move {:?} to {:?}", tmp_path, dest_path)
+        });
+    }
 
     if let Some((sender, index, _artifact_name)) = progress {
         let _ = sender.send(DownloadSignal::Finished {
             index,
             size: content_length,
+        });
+    }
+
+    Ok(dest_path)
+}
+
+struct HeadMetadata {
+    content_length: Option<u64>,
+    file_name: Option<String>,
+    accept_ranges: bool,
+}
+
+async fn fetch_head_metadata(
+    client: &Client,
+    url: &str,
+    auth_token: Option<&str>,
+    fallback_name: &str,
+) -> Result<Option<HeadMetadata>> {
+    let mut request = client.head(url);
+    if let Some(token) = auth_token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(_) => return Ok(None),
+    };
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let headers = response.headers();
+    let file_name = Some(filename_from_headers(headers, fallback_name));
+    let accept_ranges = headers
+        .get(header::ACCEPT_RANGES)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().contains("bytes"))
+        .unwrap_or(false);
+
+    let content_length = response.content_length().filter(|value| *value > 0);
+
+    Ok(Some(HeadMetadata {
+        content_length,
+        file_name,
+        accept_ranges,
+    }))
+}
+
+async fn probe_range_support(
+    client: &Client,
+    url: &str,
+    auth_token: Option<&str>,
+) -> Result<Option<u64>> {
+    let mut request = client.get(url).header(header::RANGE, "bytes=0-0");
+    if let Some(token) = auth_token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(_) => return Ok(None),
+    };
+
+    if response.status().as_u16() != 206 {
+        return Ok(None);
+    }
+
+    let total = response
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_content_range_total);
+
+    if let Some(total) = total {
+        Ok(Some(total))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_content_range_total(value: &str) -> Option<u64> {
+    let range = value.trim();
+    let total = range.split('/').nth(1)?;
+    total.parse().ok()
+}
+
+async fn download_ranged_to_file(
+    clients: &[Client],
+    url: &str,
+    dest_dir: &Path,
+    final_file_name: &str,
+    total_size: u64,
+    progress: Option<(Sender<DownloadSignal>, usize, String)>,
+    auth_token: Option<&str>,
+    expected_sha: Option<&str>,
+) -> Result<PathBuf> {
+    fs::create_dir_all(dest_dir)
+        .await
+        .with_context(|| format!("failed to create directory {:?}", dest_dir))?;
+
+    let dest_path = dest_dir.join(final_file_name);
+    if fs::try_exists(&dest_path).await.unwrap_or(false) {
+        return Ok(dest_path);
+    }
+
+    let tmp_path = unique_tmp_path(dest_dir, final_file_name);
+    let file = fs::File::create(&tmp_path)
+        .await
+        .with_context(|| format!("failed to create temporary file {:?}", tmp_path))?;
+    file.set_len(total_size)
+        .await
+        .with_context(|| format!("failed to size {:?}", tmp_path))?;
+    drop(file);
+
+    let chunk_size = CHUNK_SIZE_BYTES;
+    let mut ranges = Vec::new();
+    let mut offset = 0u64;
+    while offset < total_size {
+        let end = std::cmp::min(total_size - 1, offset + chunk_size - 1);
+        ranges.push((offset, end));
+        offset = end + 1;
+    }
+
+    let semaphore = Arc::new(Semaphore::new(CHUNK_CONCURRENCY));
+    let received = Arc::new(AtomicU64::new(0));
+    let artifact_name = progress.as_ref().map(|(_, _, name)| name.clone());
+    let total_size = total_size;
+
+    let client_count = clients.len();
+    if client_count == 0 {
+        return Err(anyhow!("missing HTTP client for ranged download"));
+    }
+
+    let tasks = futures::stream::iter(ranges.into_iter().enumerate()).map(|(idx, (start, end))| {
+        let tmp_path = tmp_path.clone();
+        let semaphore = Arc::clone(&semaphore);
+        let client = clients[idx % client_count].clone();
+        let url = url.to_string();
+        let progress = progress.clone();
+        let auth_token = auth_token.map(|token| token.to_string());
+        let received = Arc::clone(&received);
+        let artifact_name = artifact_name.clone();
+        async move {
+            let _permit = semaphore.acquire().await?;
+            let mut request = client
+                .get(&url)
+                .header(header::RANGE, format!("bytes={start}-{end}"));
+            if let Some(token) = auth_token.as_deref() {
+                request = request.header("Authorization", format!("Bearer {}", token));
+            }
+
+            let response = request
+                .send()
+                .await
+                .with_context(|| format!("request failed for {url}"))?
+                .error_for_status()
+                .with_context(|| format!("unexpected status downloading {url}"))?;
+
+            if response.status().as_u16() != 206 {
+                return Err(anyhow!("server did not honor range request for {url}"));
+            }
+
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .open(&tmp_path)
+                .await
+                .with_context(|| format!("failed to open {:?}", tmp_path))?;
+            file.seek(SeekFrom::Start(start))
+                .await
+                .with_context(|| format!("failed to seek in {:?}", tmp_path))?;
+            let stream = response
+                .bytes_stream()
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
+            let mut reader = StreamReader::new(stream);
+            let mut buffer = vec![0u8; IO_BUFFER_INITIAL];
+            let mut bytes_since = 0u64;
+            let mut last_adjust = Instant::now();
+
+            loop {
+                let n = reader
+                    .read(&mut buffer)
+                    .await
+                    .with_context(|| format!("failed streaming {url}"))?;
+                if n == 0 {
+                    break;
+                }
+                file.write_all(&buffer[..n])
+                    .await
+                    .with_context(|| format!("failed writing to {:?}", tmp_path))?;
+                let new_total =
+                    received.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+                bytes_since += n as u64;
+                adapt_buffer_size(&mut buffer, &mut bytes_since, &mut last_adjust);
+                if let (Some((sender, index, _)), Some(name)) =
+                    (progress.as_ref(), artifact_name.as_ref())
+                {
+                    let _ = sender.send(DownloadSignal::Progress {
+                        artifact: name.clone(),
+                        index: *index,
+                        received: new_total,
+                        size: Some(total_size),
+                    });
+                }
+            }
+
+            Ok::<_, anyhow::Error>(())
+        }
+    });
+
+    let mut tasks = tasks.buffer_unordered(CHUNK_CONCURRENCY);
+    while let Some(result) = tasks.next().await {
+        result?;
+    }
+
+    if let Some(expected) = expected_sha {
+        let mut file = fs::File::open(&tmp_path)
+            .await
+            .with_context(|| format!("failed to read {:?}", tmp_path))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; IO_BUFFER_INITIAL];
+        loop {
+            let n = file
+                .read(&mut buffer)
+                .await
+                .with_context(|| format!("failed to read {:?}", tmp_path))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        let digest = hasher.finalize();
+        let actual = format!("{:x}", digest);
+        if actual != expected {
+            fs::remove_file(&tmp_path).await.ok();
+            return Err(anyhow!(
+                "checksum mismatch for {} (expected {}, got {})",
+                final_file_name,
+                expected,
+                actual
+            ));
+        }
+    }
+
+    if fs::try_exists(&dest_path).await.unwrap_or(false) {
+        fs::remove_file(&tmp_path).await.ok();
+        return Ok(dest_path);
+    }
+
+    if let Err(err) = fs::rename(&tmp_path, &dest_path).await {
+        if fs::try_exists(&dest_path).await.unwrap_or(false) {
+            fs::remove_file(&tmp_path).await.ok();
+            return Ok(dest_path);
+        }
+        return Err(err).with_context(|| {
+            format!("failed to move {:?} to {:?}", tmp_path, dest_path)
         });
     }
 
@@ -664,6 +1224,63 @@ fn normalize_folder_name(name: &str) -> String {
         }
     }
     normalized.trim_matches('_').to_string()
+}
+
+fn unique_tmp_path(dest_dir: &Path, final_file_name: &str) -> PathBuf {
+    let suffix = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    dest_dir.join(format!("{final_file_name}.part.{suffix}"))
+}
+
+fn adapt_buffer_size(buffer: &mut Vec<u8>, bytes_since: &mut u64, last_adjust: &mut Instant) {
+    if *bytes_since < ADAPTIVE_STEP_BYTES {
+        return;
+    }
+
+    let elapsed = last_adjust.elapsed().as_secs_f64().max(0.001);
+    let mbps = *bytes_since as f64 / 1024.0 / 1024.0 / elapsed;
+    if mbps > ADAPTIVE_GROW_MBPS && buffer.len() < IO_BUFFER_MAX {
+        let next = (buffer.len() * 2).min(IO_BUFFER_MAX);
+        buffer.resize(next, 0);
+    } else if mbps < ADAPTIVE_SHRINK_MBPS && buffer.len() > IO_BUFFER_MIN {
+        let next = (buffer.len() / 2).max(IO_BUFFER_MIN);
+        buffer.resize(next, 0);
+    }
+
+    *bytes_since = 0;
+    *last_adjust = Instant::now();
+}
+
+fn dedupe_artifacts(artifacts: Vec<ModelArtifact>) -> Vec<ModelArtifact> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for artifact in artifacts {
+        let key = (
+            artifact.target_category.slug().to_string(),
+            artifact.repo.clone(),
+            artifact.path.clone(),
+            artifact.direct_url.clone(),
+            artifact.file_name().to_string(),
+        );
+        if seen.insert(key) {
+            deduped.push(artifact);
+        }
+    }
+    deduped
+}
+
+fn ensure_hf_download_url(url: &str) -> String {
+    if let Ok(mut parsed) = Url::parse(url) {
+        if parsed.host_str() == Some("huggingface.co") && parsed.path().contains("/resolve/") {
+            let has_download = parsed
+                .query_pairs()
+                .any(|(k, _)| k.eq_ignore_ascii_case("download"));
+            if !has_download {
+                parsed.query_pairs_mut().append_pair("download", "1");
+                return parsed.to_string();
+            }
+        }
+    }
+    url.to_string()
 }
 
 fn build_download_url(repo: &str, path: &str) -> Result<String> {
