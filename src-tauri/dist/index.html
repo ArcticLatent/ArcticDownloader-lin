@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arctic ComfyUI Helper</title>
+    <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="title-wrap">
+          <img class="title-icon" src="./icon.svg" alt="Arctic icon" />
+          <h1>Arctic ComfyUI Helper</h1>
+          <p id="version" class="title-meta">Version</p>
+        </div>
+        <div class="top-actions">
+          <button id="check-updates">Check Updates</button>
+          <span id="update-status">Update: idle</span>
+        </div>
+      </header>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="models" id="tab-models">Models</button>
+        <button class="tab" data-tab="loras" id="tab-loras">LoRAs</button>
+      </nav>
+
+      <section class="panel" id="tab-content-models">
+        <div class="row folder-row">
+          <input id="comfy-root" type="text" placeholder="Select your ComfyUI root folder" />
+          <button id="choose-root">Choose Folder</button>
+          <button id="save-root">Save Folder</button>
+        </div>
+
+        <div class="row model-row">
+          <select id="model-family"></select>
+          <select id="model-id"></select>
+          <select id="vram-tier"></select>
+          <select id="ram-tier"></select>
+          <select id="variant-id"></select>
+        </div>
+
+        <div class="row">
+          <button id="download-model" class="primary">Download Model Assets</button>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="tab-content-loras">
+        <div class="row folder-row">
+          <input id="comfy-root-lora" type="text" placeholder="Select your ComfyUI root folder" />
+          <button id="choose-root-lora">Choose Folder</button>
+          <button id="save-root-lora">Save Folder</button>
+        </div>
+
+        <div class="row lora-row">
+          <select id="lora-family"></select>
+          <select id="lora-id"></select>
+          <button id="download-lora" class="primary">Download LoRA</button>
+        </div>
+
+        <div class="row token-row">
+          <input id="civitai-token" type="password" placeholder="Civitai API token (optional)" />
+          <button id="save-token">Save Token</button>
+        </div>
+
+        <div class="lora-meta">
+          <div><strong>Owner:</strong> <a id="meta-creator-link" href="#" target="_blank" rel="noopener noreferrer"><span id="meta-creator">-</span></a></div>
+          <div><strong>Strength:</strong> <span id="meta-strength">-</span></div>
+          <div><strong>Triggers:</strong> <span id="meta-triggers">-</span></div>
+          <div><strong>Description:</strong> <span id="meta-description">-</span></div>
+        </div>
+
+        <div class="preview" id="preview-container">
+          <img id="preview-image" class="hidden" alt="LoRA preview" />
+          <video id="preview-video" class="hidden" controls autoplay muted loop playsinline></video>
+          <p id="preview-caption">No preview loaded.</p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Status</h2>
+        <div id="download-progress" class="progress-line">Idle</div>
+        <div id="overall-progress" class="overall-progress hidden" aria-label="Overall download progress">
+          <span id="overall-progress-fill"></span>
+        </div>
+        <div id="overall-progress-meta" class="transfer-sub hidden">Waiting for transfer data...</div>
+        <div class="transfer-grid">
+          <div>
+            <h3>Active Transfers</h3>
+            <div id="transfer-list" class="transfer-list"></div>
+          </div>
+          <div>
+            <h3>Completed</h3>
+            <div id="completed-list" class="transfer-list"></div>
+          </div>
+        </div>
+        <pre id="status-log">Ready</pre>
+      </section>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

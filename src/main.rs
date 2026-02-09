@@ -15,8 +15,8 @@ fn main() -> anyhow::Result<()> {
     register_inter_font();
 
     if std::env::var("SLINT_STYLE").is_err() {
-        // Prefer Fluent controls on Windows 11 while still allowing overrides.
-        std::env::set_var("SLINT_STYLE", "fluent");
+        // Use Material controls by default; allow override via SLINT_STYLE.
+        std::env::set_var("SLINT_STYLE", "material");
     }
 
     ArcticDownloaderApp::new()?.run()

@@ -3,6 +3,7 @@ use crate::{
     download::{CivitaiModelMetadata, CivitaiPreview, DownloadSignal, DownloadStatus},
     env_flags::auto_update_enabled,
     model::{LoraDefinition, ModelCatalog, ResolvedModel, ResolvedRamTierThresholds},
+    preview,
     ram::RamTier,
     vram::VramTier,
 };
@@ -19,7 +20,7 @@ use std::{
 };
 
 slint::slint! {
-import { Button, ComboBox, HorizontalBox, LineEdit, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, HorizontalBox, LineEdit, ScrollView, VerticalBox } from "std-widgets.slint";
 
 export component MainWindow inherits Window {
     title: "Arctic Downloader";
@@ -72,7 +73,6 @@ export component MainWindow inherits Window {
     callback download_lora_asset();
     callback save_token();
     callback open_last_folder();
-    callback open_lora_preview();
     callback open_lora_creator();
     callback open_summary_folder();
     callback clear_summary();
@@ -93,185 +93,237 @@ export component MainWindow inherits Window {
             text: "Arctic Downloader";
             font-size: 26px;
             font-weight: 700;
+            vertical-stretch: 0;
         }
 
         Text {
             text: "Version " + root.version_text;
             color: #556070;
-        }
-
-        Button {
-            text: "Check Updates Now";
-            clicked => { root.check_updates_now(); }
-        }
-
-        Text {
-            text: "Update: " + root.update_state_text;
-            color: #556070;
+            vertical-stretch: 0;
         }
 
         HorizontalBox {
             spacing: 8px;
-            LineEdit {
-                text <=> root.comfy_path;
-                placeholder-text: "Select your ComfyUI root folder";
-            }
-            Button {
-                text: "Choose Folder";
-                clicked => { root.choose_folder(); }
-            }
-            Button {
-                text: "Open Last Folder";
-                clicked => { root.open_last_folder(); }
-            }
-        }
-
-        HorizontalBox {
-            spacing: 8px;
+            vertical-stretch: 0;
             Button {
                 text: "Models";
+                height: 32px;
+                width: 120px;
+                enabled: root.active_tab != 0;
                 clicked => { root.active_tab = 0; }
             }
             Button {
                 text: "LoRAs";
+                height: 32px;
+                width: 120px;
+                enabled: root.active_tab != 1;
                 clicked => { root.active_tab = 1; }
             }
         }
 
-        if root.active_tab == 0 : VerticalBox {
-            spacing: 8px;
-
-            Text {
-                text: "Models";
-                font-size: 18px;
-                font-weight: 600;
-            }
-
-            HorizontalBox {
+        ScrollView {
+            GridLayout {
                 spacing: 8px;
-                ComboBox { model: root.family_options; current-index <=> root.family_index; }
-                ComboBox { model: root.model_options; current-index <=> root.model_index; }
-                ComboBox { model: root.vram_options; current-index <=> root.vram_index; }
-                ComboBox { model: root.ram_options; current-index <=> root.ram_index; }
-                ComboBox { model: root.variant_options; current-index <=> root.variant_index; }
-            }
+                spacing-vertical: 8px;
+                spacing-horizontal: 8px;
 
-            Button {
-                text: "Download Model Assets";
-                clicked => { root.download_model_assets(); }
-            }
-        }
-
-        if root.active_tab == 1 : VerticalBox {
-            spacing: 8px;
-
-            Text {
-                text: "LoRAs";
-                font-size: 18px;
-                font-weight: 600;
-            }
-
-            HorizontalBox {
-                spacing: 8px;
-                ComboBox { model: root.lora_family_options; current-index <=> root.lora_family_index; }
-                ComboBox { model: root.lora_options; current-index <=> root.lora_index; }
-                Button {
-                    text: "Download LoRA";
-                    clicked => { root.download_lora_asset(); }
+                if root.active_tab == 0 : Row {
+                    Button {
+                        text: "Check Updates Now";
+                        height: 36px;
+                        clicked => { root.check_updates_now(); }
+                    }
                 }
-            }
 
-            HorizontalBox {
-                spacing: 8px;
-                LineEdit {
-                    text <=> root.civitai_token;
-                    placeholder-text: "Civitai API token (optional)";
+                if root.active_tab == 0 : Row {
+                    Text {
+                        text: "Update: " + root.update_state_text;
+                        color: #556070;
+                    }
                 }
-                Button {
-                    text: "Save Token";
-                    clicked => { root.save_token(); }
+
+                if root.active_tab == 0 : Row {
+                    LineEdit {
+                        text <=> root.comfy_path;
+                        placeholder-text: "Select your ComfyUI root folder";
+                        height: 36px;
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: "Choose Folder";
+                        height: 36px;
+                        clicked => { root.choose_folder(); }
+                    }
+                    Button {
+                        text: "Open Last Folder";
+                        height: 36px;
+                        clicked => { root.open_last_folder(); }
+                    }
                 }
-            }
 
-            HorizontalBox {
-                spacing: 8px;
-                Button {
-                    text: "Open LoRA Preview";
-                    clicked => { root.open_lora_preview(); }
+                if root.active_tab == 0 : Row {
+                    ComboBox { model: root.family_options; current-index <=> root.family_index; height: 36px; horizontal-stretch: 1; }
+                    ComboBox { model: root.model_options; current-index <=> root.model_index; height: 36px; horizontal-stretch: 1; }
+                    ComboBox { model: root.vram_options; current-index <=> root.vram_index; height: 36px; horizontal-stretch: 1; }
+                    ComboBox { model: root.ram_options; current-index <=> root.ram_index; height: 36px; horizontal-stretch: 1; }
+                    ComboBox { model: root.variant_options; current-index <=> root.variant_index; height: 36px; horizontal-stretch: 1; }
                 }
-                Button {
-                    text: "Open Creator Page";
-                    clicked => { root.open_lora_creator(); }
+
+                if root.active_tab == 0 : Row {
+                    Button {
+                        text: "Download Model Assets";
+                        height: 36px;
+                        clicked => { root.download_model_assets(); }
+                    }
                 }
-            }
 
-            Text {
-                text: "LoRA Creator: " + root.lora_creator_text;
-                wrap: word-wrap;
-            }
-
-            Text {
-                text: "Recommended Strength: " + root.lora_strength_text;
-                wrap: word-wrap;
-            }
-
-            Text {
-                text: "Trigger Words: " + root.lora_triggers_text;
-                wrap: word-wrap;
-            }
-
-            Text {
-                text: "Description: " + root.lora_description_text;
-                wrap: word-wrap;
-            }
-
-            Image {
-                source: root.lora_preview_image;
-                width: 420px;
-                height: 220px;
-                image-fit: contain;
-            }
-
-            Button {
-                text: root.lora_preview_caption;
-                clicked => { root.open_lora_preview(); }
-            }
-        }
-
-        Text {
-            text: root.progress_text;
-            color: #3f4c5e;
-            wrap: word-wrap;
-        }
-
-        Text {
-            text: root.status_text;
-            wrap: word-wrap;
-        }
-
-        if root.download_summary_visible : VerticalBox {
-            spacing: 6px;
-
-            Text {
-                text: "Downloads Complete";
-                font-size: 16px;
-                font-weight: 600;
-            }
-
-            ComboBox {
-                model: root.download_summary_entries;
-                current-index <=> root.download_summary_index;
-            }
-
-            HorizontalBox {
-                spacing: 8px;
-                Button {
-                    text: "Open Selected Folder";
-                    clicked => { root.open_summary_folder(); }
+                if root.active_tab == 1 : Row {
+                    Button {
+                        text: "Check Updates Now";
+                        height: 36px;
+                        clicked => { root.check_updates_now(); }
+                    }
                 }
-                Button {
-                    text: "Dismiss Summary";
-                    clicked => { root.clear_summary(); }
+
+                if root.active_tab == 1 : Row {
+                    Text {
+                        text: "Update: " + root.update_state_text;
+                        color: #556070;
+                    }
+                }
+
+                if root.active_tab == 1 : Row {
+                    LineEdit {
+                        text <=> root.comfy_path;
+                        placeholder-text: "Select your ComfyUI root folder";
+                        height: 36px;
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: "Choose Folder";
+                        height: 36px;
+                        clicked => { root.choose_folder(); }
+                    }
+                    Button {
+                        text: "Open Last Folder";
+                        height: 36px;
+                        clicked => { root.open_last_folder(); }
+                    }
+                }
+
+                if root.active_tab == 1 : Row {
+                    ComboBox { model: root.lora_family_options; current-index <=> root.lora_family_index; height: 36px; horizontal-stretch: 1; }
+                    ComboBox { model: root.lora_options; current-index <=> root.lora_index; height: 36px; horizontal-stretch: 1; }
+                    Button {
+                        text: "Download LoRA";
+                        height: 36px;
+                        clicked => { root.download_lora_asset(); }
+                    }
+                }
+
+                if root.active_tab == 1 : Row {
+                    LineEdit {
+                        text <=> root.civitai_token;
+                        placeholder-text: "Civitai API token (optional)";
+                        height: 36px;
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: "Save Token";
+                        height: 36px;
+                        clicked => { root.save_token(); }
+                    }
+                    Button {
+                        text: "Open Creator Page";
+                        height: 36px;
+                        clicked => { root.open_lora_creator(); }
+                    }
+                }
+
+                if root.active_tab == 1 : Row {
+                    Text {
+                        text: "LoRA Creator: " + root.lora_creator_text;
+                        wrap: word-wrap;
+                    }
+                }
+
+                if root.active_tab == 1 : Row {
+                    Text {
+                        text: "Recommended Strength: " + root.lora_strength_text;
+                        wrap: word-wrap;
+                    }
+                }
+
+                if root.active_tab == 1 : Row {
+                    Text {
+                        text: "Trigger Words: " + root.lora_triggers_text;
+                        wrap: word-wrap;
+                    }
+                }
+
+                if root.active_tab == 1 : Row {
+                    Text {
+                        text: "Description: " + root.lora_description_text;
+                        wrap: word-wrap;
+                    }
+                }
+
+                if root.active_tab == 1 : Row {
+                    Image {
+                        source: root.lora_preview_image;
+                        width: 560px;
+                        height: 320px;
+                        image-fit: contain;
+                    }
+                }
+
+                if root.active_tab == 1 : Row {
+                    Text {
+                        text: root.lora_preview_caption;
+                        color: #556070;
+                        wrap: word-wrap;
+                    }
+                }
+
+                Row {
+                    Text {
+                        text: root.progress_text;
+                        color: #3f4c5e;
+                        wrap: word-wrap;
+                    }
+                }
+
+                Row {
+                    Text {
+                        text: root.status_text;
+                        wrap: word-wrap;
+                    }
+                }
+
+                if root.download_summary_visible : Row {
+                    VerticalBox {
+                        spacing: 6px;
+                        Text {
+                            text: "Downloads Complete";
+                            font-size: 16px;
+                            font-weight: 600;
+                        }
+                        ComboBox {
+                            model: root.download_summary_entries;
+                            current-index <=> root.download_summary_index;
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Button {
+                                text: "Open Selected Folder";
+                                clicked => { root.open_summary_folder(); }
+                            }
+                            Button {
+                                text: "Dismiss Summary";
+                                clicked => { root.clear_summary(); }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -575,13 +627,14 @@ fn fetch_lora_metadata(
         Ok(Ok(mut metadata)) => {
             let mut preview_caption = String::from("Preview image loaded.");
             let mut has_video_preview = false;
+            let mut video_preview_url: Option<String> = None;
             let mut preview_bytes = match metadata.preview.take() {
                 Some(CivitaiPreview::Image(bytes)) => Some(bytes),
                 Some(CivitaiPreview::Video { url }) => {
-                    metadata.preview_url = Some(url);
+                    metadata.preview_url = Some(url.clone());
+                    video_preview_url = Some(url);
                     has_video_preview = true;
-                    preview_caption =
-                        "Video preview detected. Inline autoplay is not supported yet.".to_string();
+                    preview_caption = "Video preview opened automatically.".to_string();
                     None
                 }
                 None => None,
@@ -597,6 +650,12 @@ fn fetch_lora_metadata(
                         preview_bytes = Some(bytes);
                         preview_caption = "Preview image loaded.".to_string();
                     }
+                }
+            }
+
+            if let Some(video_url) = video_preview_url {
+                if let Err(err) = preview::open_lora_preview(&video_url) {
+                    log::warn!("failed to open automatic video preview: {err:#}");
                 }
             }
 
@@ -679,7 +738,7 @@ fn apply_lora_metadata(
     } else {
         ui.set_lora_preview_image(SlintImage::default());
         if state.lora_preview_url.is_some() {
-            ui.set_lora_preview_caption("Preview link available. Use Open LoRA Preview.".into());
+            ui.set_lora_preview_caption("Video preview opened automatically.".into());
         } else {
             ui.set_lora_preview_caption("No preview available.".into());
         }
@@ -705,10 +764,42 @@ fn apply_lora_metadata(
 
     let description = metadata
         .description
+        .map(|text| strip_html_tags(&text))
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| "No description available.".to_string());
     ui.set_lora_description_text(description.into());
+}
+
+fn strip_html_tags(input: &str) -> String {
+    let mut raw = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                if in_tag {
+                    in_tag = false;
+                    raw.push(' ');
+                }
+            }
+            _ if !in_tag => raw.push(ch),
+            _ => {}
+        }
+    }
+
+    let mut decoded = raw
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    decoded = decoded
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    decoded
 }
 
 fn decode_preview_image(bytes: &[u8]) -> Option<SlintImage> {
@@ -959,26 +1050,6 @@ fn wire_callbacks(ui: &MainWindow, context: AppContext, state: Arc<Mutex<UiState
                     ui.set_lora_description_text("-".into());
                     ui.set_lora_preview_image(SlintImage::default());
                     ui.set_lora_preview_caption("No preview loaded.".into());
-                }
-            }
-        });
-    }
-
-    {
-        let state = Arc::clone(&state);
-        let weak = weak.clone();
-        ui.on_open_lora_preview(move || {
-            if let Some(ui) = weak.upgrade() {
-                let url = state
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.lora_preview_url.clone());
-                if let Some(url) = url {
-                    if let Err(err) = open::that(url) {
-                        ui.set_status_text(format!("Failed to open preview: {err}").into());
-                    }
-                } else {
-                    ui.set_status_text("No preview URL available for this LoRA.".into());
                 }
             }
         });

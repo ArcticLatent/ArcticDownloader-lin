@@ -88,18 +88,7 @@ impl CatalogService {
 
     pub async fn refresh_from_remote(&self) -> Result<bool> {
         let settings = self.config.settings();
-        let endpoint = settings
-            .catalog_endpoint
-            .clone()
-            .and_then(|value| {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            })
-            .or_else(default_catalog_endpoint);
+        let endpoint = default_catalog_endpoint();
 
         let Some(url) = endpoint else {
             info!("No remote catalog endpoint configured; using bundled data.");
@@ -169,9 +158,6 @@ impl CatalogService {
 
         self.config.update_settings(|settings| {
             settings.last_catalog_etag = etag.clone();
-            if settings.catalog_endpoint.is_none() {
-                settings.catalog_endpoint = Some(url.clone());
-            }
         })?;
 
         info!("Catalog updated from remote source.");

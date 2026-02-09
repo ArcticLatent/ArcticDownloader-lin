@@ -41,6 +41,17 @@ pub struct ArcticDownloaderApp {
 
 impl ArcticDownloaderApp {
     pub fn new() -> Result<Self> {
+        Ok(Self {
+            context: build_context()?,
+        })
+    }
+
+    pub fn run(self) -> Result<()> {
+        ui::run(self.context)
+    }
+}
+
+pub fn build_context() -> Result<AppContext> {
         let runtime = Arc::new(
             Builder::new_multi_thread()
                 .enable_all()
@@ -68,7 +79,7 @@ impl ArcticDownloaderApp {
         )?);
         let ram_profile = detect_ram_profile();
 
-        let context = AppContext {
+        Ok(AppContext {
             runtime,
             config,
             catalog,
@@ -76,14 +87,7 @@ impl ArcticDownloaderApp {
             updater,
             ram_profile,
             display_version,
-        };
-
-        Ok(Self { context })
-    }
-
-    pub fn run(self) -> Result<()> {
-        ui::run(self.context)
-    }
+        })
 }
 
 fn resolve_display_version(config: &ConfigStore) -> String {

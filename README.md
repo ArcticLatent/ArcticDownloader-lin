@@ -39,6 +39,24 @@ This repository currently contains:
    the chosen GPU tier, while the legend summarises the four supported tiers (S/A/B/C) and their
    expected quantisations. RAM tier selection controls which RAM-gated artifacts are offered.
 
+### Tauri Preview Shell
+
+A Tauri shell is now available in `src-tauri/` and reuses the same Rust backend services
+(`catalog`, `config`, `download`, `updater`) via Tauri commands.
+
+Run it with:
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml
+```
+
+Build an installer-ready Windows bundle (`.exe`) with:
+```bash
+cd src-tauri
+cargo tauri build
+```
+The generated artifacts are written under `src-tauri/target/release/bundle/`.
+If `cargo tauri` is unavailable, install it once with `cargo install tauri-cli --version "^2"`.
+
 ### Windows Build Note
 
 The Windows build intentionally excludes `catalog_admin`. Curate `data/catalog.json` in your source
@@ -61,13 +79,13 @@ are not already available.)
 
 ## Building a Windows Installer
 
-Build the application binary first:
+Build directly through Tauri:
 ```bash
-cargo build --release
+cd src-tauri
+cargo tauri build
 ```
 
-Package the binary into your preferred `.exe` installer format (for example Inno Setup or WiX Burn)
-and publish the installer in your GitHub release workflow.
+Publish the generated installer from `src-tauri/target/release/bundle/` in your GitHub release workflow.
 
 ## Releases & Auto-Update Manifest
 

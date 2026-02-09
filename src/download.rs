@@ -23,8 +23,9 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom},
     runtime::Runtime,
     sync::{Mutex, Semaphore},
+    time::timeout,
 };
-use tokio_util::io::StreamReader;
+use tokio_util::{io::StreamReader, sync::CancellationToken};
 
 const MULTIPART_MIN_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const CHUNK_SIZE_BYTES: u64 = 64 * 1024 * 1024;
@@ -55,6 +56,7 @@ pub struct LoraDownloadOutcome {
 #[derive(Clone, Debug)]
 pub struct CivitaiModelMetadata {
     pub file_name: String,
+    pub download_url: Option<String>,
     pub preview: Option<CivitaiPreview>,
     pub preview_url: Option<String>,
     pub trained_words: Vec<String>,
@@ -91,8 +93,10 @@ pub enum DownloadSignal {
         size: Option<u64>,
     },
     Finished {
+        artifact: String,
         index: usize,
         size: Option<u64>,
+        folder: Option<String>,
     },
     Failed {
         artifact: String,
@@ -135,6 +139,16 @@ impl DownloadManager {
         resolved: ResolvedModel,
         progress: Sender<DownloadSignal>,
     ) -> tokio::task::JoinHandle<Result<Vec<DownloadOutcome>>> {
+        self.download_variant_with_cancel(comfy_root, resolved, progress, None)
+    }
+
+    pub fn download_variant_with_cancel(
+        &self,
+        comfy_root: PathBuf,
+        resolved: ResolvedModel,
+        progress: Sender<DownloadSignal>,
+        cancel: Option<CancellationToken>,
+    ) -> tokio::task::JoinHandle<Result<Vec<DownloadOutcome>>> {
         let download_clients = self.download_clients.clone();
         self.runtime.spawn(async move {
             let mut outcomes = Vec::new();
@@ -151,7 +165,11 @@ impl DownloadManager {
                         let comfy_root = comfy_root.clone();
                         let model_folder = model_folder.clone();
                         let progress = progress.clone();
+                        let cancel = cancel.clone();
                         async move {
+                            if is_cancelled(cancel.as_ref()) {
+                                return Err(anyhow!("download cancelled by user"));
+                            }
                             let artifact_name = artifact.file_name().to_string();
                             let _ = progress.send(DownloadSignal::Started {
                                 artifact: artifact_name.clone(),
@@ -167,6 +185,7 @@ impl DownloadManager {
                                 &model_folder,
                                 &artifact,
                                 Some((progress.clone(), index, artifact_name.clone())),
+                                cancel.as_ref(),
                             )
                             .await
                             {
@@ -210,9 +229,23 @@ impl DownloadManager {
         token: Option<String>,
         progress: Sender<DownloadSignal>,
     ) -> tokio::task::JoinHandle<Result<LoraDownloadOutcome>> {
+        self.download_lora_with_cancel(comfy_root, lora, token, progress, None)
+    }
+
+    pub fn download_lora_with_cancel(
+        &self,
+        comfy_root: PathBuf,
+        lora: LoraDefinition,
+        token: Option<String>,
+        progress: Sender<DownloadSignal>,
+        cancel: Option<CancellationToken>,
+    ) -> tokio::task::JoinHandle<Result<LoraDownloadOutcome>> {
         let download_clients = self.download_clients.clone();
         let api_client = self.api_client.clone();
         self.runtime.spawn(async move {
+            if is_cancelled(cancel.as_ref()) {
+                return Err(anyhow!("download cancelled by user"));
+            }
             let folder_name = lora
                 .family
                 .as_deref()
@@ -233,6 +266,7 @@ impl DownloadManager {
             });
 
             let mut file_name = lora.derived_file_name();
+            let mut url = base_url.clone();
 
             if base_url.contains("civitai.com") {
                 match fetch_civitai_model_metadata(&api_client, &base_url, token_value.as_deref())
@@ -240,6 +274,9 @@ impl DownloadManager {
                 {
                     Ok(metadata) => {
                         file_name = metadata.file_name.clone();
+                        if let Some(download_url) = metadata.download_url {
+                            url = download_url;
+                        }
                     }
                     Err(err) => {
                         warn!("Failed to fetch Civitai metadata for {}: {err}", base_url);
@@ -262,8 +299,12 @@ impl DownloadManager {
                     size: Some(0),
                 });
                 let _ = progress.send(DownloadSignal::Finished {
+                    artifact: file_name.clone(),
                     index: 0,
                     size: Some(0),
+                    folder: dest_path
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string()),
                 });
                 return Ok(LoraDownloadOutcome {
                     lora,
@@ -272,7 +313,6 @@ impl DownloadManager {
                 });
             }
 
-            let mut url = base_url.clone();
             if url.trim().is_empty() {
                 return Err(anyhow!("LoRA {} missing download URL", lora.id));
             }
@@ -302,6 +342,7 @@ impl DownloadManager {
                 &file_name,
                 Some((progress.clone(), 0, file_name.clone())),
                 auth_token.as_deref(),
+                cancel.as_ref(),
             )
             .await
             {
@@ -315,9 +356,14 @@ impl DownloadManager {
                         err.downcast_ref::<DownloadError>(),
                         Some(DownloadError::Unauthorized)
                     ) {
+                        let message = if token_value.is_some() {
+                            "Civitai rejected the token (401/403). Check that your API token is valid and active."
+                        } else {
+                            "This Civitai LoRA appears to require login. Add your Civitai API token and retry."
+                        };
                         let _ = progress.send(DownloadSignal::Failed {
                             artifact: file_name.clone(),
-                            error: "Unauthorized".to_string(),
+                            error: message.to_string(),
                         });
                         if fs::try_exists(&lora_dir).await.unwrap_or(false) {
                             if let Ok(mut entries) = fs::read_dir(&lora_dir).await {
@@ -457,7 +503,11 @@ async fn download_artifact(
     model_folder: &str,
     artifact: &ModelArtifact,
     progress: Option<(Sender<DownloadSignal>, usize, String)>,
+    cancel: Option<&CancellationToken>,
 ) -> Result<DownloadOutcome> {
+    if is_cancelled(cancel) {
+        return Err(anyhow!("download cancelled by user"));
+    }
     let subdir = artifact.target_category.comfyui_subdir();
     let dest_dir = comfy_root.join(subdir).join(model_folder);
     fs::create_dir_all(&dest_dir)
@@ -471,10 +521,14 @@ async fn download_artifact(
         .await
         .with_context(|| format!("failed to check {:?} existence", dest_path))?
     {
-        if let Some((sender, index, _artifact_name)) = progress.as_ref() {
+        if let Some((sender, index, artifact_name)) = progress.as_ref() {
             let _ = sender.send(DownloadSignal::Finished {
+                artifact: artifact_name.clone(),
                 index: *index,
                 size: Some(0),
+                folder: dest_path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string()),
             });
         }
         return Ok(DownloadOutcome {
@@ -490,7 +544,7 @@ async fn download_artifact(
         build_download_url(&artifact.repo, &artifact.path)?
     };
     log::info!("Requesting {}", url);
-    let mut content_length = None;
+    let mut content_length = artifact.size_bytes;
     let mut accept_ranges = false;
     let mut final_file_name = initial_file_name.clone();
 
@@ -514,10 +568,14 @@ async fn download_artifact(
             .await
             .with_context(|| format!("failed to check {:?} existence", dest_path))?
         {
-            if let Some((sender, index, _artifact_name)) = progress.as_ref() {
+            if let Some((sender, index, artifact_name)) = progress.as_ref() {
                 let _ = sender.send(DownloadSignal::Finished {
+                    artifact: artifact_name.clone(),
                     index: *index,
                     size: Some(0),
+                    folder: dest_path
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string()),
                 });
             }
             return Ok(DownloadOutcome {
@@ -548,13 +606,18 @@ async fn download_artifact(
                     progress.clone(),
                     None,
                     artifact.sha256.as_deref(),
+                    cancel,
                 )
                 .await?;
 
-                if let Some((sender, index, _artifact_name)) = progress {
+                if let Some((sender, index, artifact_name)) = progress {
                     let _ = sender.send(DownloadSignal::Finished {
+                        artifact: artifact_name.clone(),
                         index,
                         size: Some(total_size),
+                        folder: dest_path
+                            .parent()
+                            .map(|p| p.to_string_lossy().to_string()),
                     });
                 }
 
@@ -590,10 +653,14 @@ async fn download_artifact(
             .await
             .with_context(|| format!("failed to check {:?} existence", dest_path))?
         {
-            if let Some((sender, index, _artifact_name)) = progress.as_ref() {
+            if let Some((sender, index, artifact_name)) = progress.as_ref() {
                 let _ = sender.send(DownloadSignal::Finished {
+                    artifact: artifact_name.clone(),
                     index: *index,
                     size: Some(0),
+                    folder: dest_path
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string()),
                 });
             }
             return Ok(DownloadOutcome {
@@ -627,10 +694,15 @@ async fn download_artifact(
     let mut last_adjust = Instant::now();
 
     loop {
-        let n = reader
-            .read(&mut buffer)
-            .await
-            .with_context(|| format!("failed streaming {url}"))?;
+        if is_cancelled(cancel) {
+            fs::remove_file(&tmp_path).await.ok();
+            return Err(anyhow!("download cancelled by user"));
+        }
+        let n = match timeout(std::time::Duration::from_millis(500), reader.read(&mut buffer)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(err)) => return Err(err).with_context(|| format!("failed streaming {url}")),
+            Err(_) => continue,
+        };
         if n == 0 {
             break;
         }
@@ -648,7 +720,7 @@ async fn download_artifact(
                 artifact: artifact_name.clone(),
                 index: *index,
                 received,
-                size: content_length,
+                size: content_length.or(artifact.size_bytes),
             });
         }
     }
@@ -699,10 +771,14 @@ async fn download_artifact(
 
     log::info!("Finished download: {:?}", dest_path);
 
-    if let Some((sender, index, _artifact_name)) = progress {
+    if let Some((sender, index, artifact_name)) = progress {
         let _ = sender.send(DownloadSignal::Finished {
+            artifact: artifact_name.clone(),
             index,
-            size: content_length,
+            size: content_length.or(artifact.size_bytes),
+            folder: dest_path
+                .parent()
+                .map(|p| p.to_string_lossy().to_string()),
         });
     }
 
@@ -720,7 +796,11 @@ async fn download_direct(
     file_name: &str,
     progress: Option<(Sender<DownloadSignal>, usize, String)>,
     auth_token: Option<&str>,
+    cancel: Option<&CancellationToken>,
 ) -> Result<PathBuf> {
+    if is_cancelled(cancel) {
+        return Err(anyhow!("download cancelled by user"));
+    }
     let url = ensure_hf_download_url(url);
     let mut content_length = None;
     let mut accept_ranges = false;
@@ -758,10 +838,14 @@ async fn download_direct(
         .await
         .with_context(|| format!("failed to check {:?} existence", dest_path))?
     {
-        if let Some((sender, index, _artifact_name)) = progress {
+        if let Some((sender, index, artifact_name)) = progress {
             let _ = sender.send(DownloadSignal::Finished {
+                artifact: artifact_name.clone(),
                 index,
                 size: Some(0),
+                folder: dest_path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string()),
             });
         }
         return Ok(dest_path);
@@ -779,13 +863,18 @@ async fn download_direct(
                     progress.clone(),
                     auth_token,
                     None,
+                    cancel,
                 )
                 .await?;
 
-                if let Some((sender, index, _artifact_name)) = progress {
+                if let Some((sender, index, artifact_name)) = progress {
                     let _ = sender.send(DownloadSignal::Finished {
+                        artifact: artifact_name.clone(),
                         index,
                         size: Some(total_size),
+                        folder: dest_path
+                            .parent()
+                            .map(|p| p.to_string_lossy().to_string()),
                     });
                 }
 
@@ -811,6 +900,11 @@ async fn download_direct(
         }
         return Err(anyhow!("download failed for {url} (status {status})"));
     }
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase());
 
     if content_length.is_none() {
         content_length = response.content_length();
@@ -824,10 +918,14 @@ async fn download_direct(
 
     let dest_path = dest_dir.join(&final_file_name);
     if fs::try_exists(&dest_path).await.unwrap_or(false) {
-        if let Some((sender, index, _artifact_name)) = progress {
+        if let Some((sender, index, artifact_name)) = progress {
             let _ = sender.send(DownloadSignal::Finished {
+                artifact: artifact_name.clone(),
                 index,
                 size: Some(0),
+                folder: dest_path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string()),
             });
         }
         return Ok(dest_path);
@@ -848,10 +946,15 @@ async fn download_direct(
     let mut reader = StreamReader::new(stream);
     let mut received: u64 = 0;
     let mut buffer = vec![0u8; IO_BUFFER_INITIAL];
+    let mut sniff = Vec::with_capacity(2048);
     let mut bytes_since = 0u64;
     let mut last_adjust = Instant::now();
 
     loop {
+        if is_cancelled(cancel) {
+            fs::remove_file(&tmp_path).await.ok();
+            return Err(anyhow!("download cancelled by user"));
+        }
         let n = reader
             .read(&mut buffer)
             .await
@@ -862,6 +965,11 @@ async fn download_direct(
         file.write_all(&buffer[..n])
             .await
             .with_context(|| format!("failed writing to {:?}", tmp_path))?;
+        if sniff.len() < 2048 {
+            let remaining = 2048usize.saturating_sub(sniff.len());
+            let take = std::cmp::min(remaining, n);
+            sniff.extend_from_slice(&buffer[..take]);
+        }
         received += n as u64;
         bytes_since += n as u64;
         adapt_buffer_size(&mut buffer, &mut bytes_since, &mut last_adjust);
@@ -880,6 +988,28 @@ async fn download_direct(
         .with_context(|| format!("failed flushing {:?}", tmp_path))?;
     drop(file);
 
+    if looks_like_non_binary_payload(
+        content_type.as_deref(),
+        &sniff,
+        received,
+        &final_file_name,
+    ) {
+        fs::remove_file(&tmp_path).await.ok();
+        if url.contains("civitai.com") {
+            if auth_token.is_some() {
+                return Err(anyhow!(
+                    "Civitai returned a non-file response. The token may be invalid/expired, or this model requires additional access."
+                ));
+            }
+            return Err(anyhow!(
+                "Civitai returned an access/challenge page. This LoRA likely requires login; add your Civitai API token and retry."
+            ));
+        }
+        return Err(anyhow!(
+            "Server returned a non-file response instead of model weights."
+        ));
+    }
+
     if fs::try_exists(&dest_path).await.unwrap_or(false) {
         fs::remove_file(&tmp_path).await.ok();
         return Ok(dest_path);
@@ -895,14 +1025,61 @@ async fn download_direct(
         });
     }
 
-    if let Some((sender, index, _artifact_name)) = progress {
+    if let Some((sender, index, artifact_name)) = progress {
         let _ = sender.send(DownloadSignal::Finished {
+            artifact: artifact_name.clone(),
             index,
             size: content_length,
+            folder: dest_path
+                .parent()
+                .map(|p| p.to_string_lossy().to_string()),
         });
     }
 
     Ok(dest_path)
+}
+
+fn looks_like_non_binary_payload(
+    content_type: Option<&str>,
+    first_bytes: &[u8],
+    total_bytes: u64,
+    file_name: &str,
+) -> bool {
+    let ext = std::path::Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    let expects_binary = matches!(
+        ext.as_deref(),
+        Some("safetensors" | "ckpt" | "pt" | "pth" | "bin")
+    );
+    if !expects_binary {
+        return false;
+    }
+
+    if let Some(ct) = content_type {
+        if ct.contains("text/html")
+            || ct.contains("application/json")
+            || ct.contains("text/plain")
+            || ct.contains("application/xml")
+        {
+            return true;
+        }
+    }
+
+    if total_bytes > 512 * 1024 {
+        return false;
+    }
+
+    let prefix = String::from_utf8_lossy(first_bytes).to_ascii_lowercase();
+    let trimmed = prefix.trim_start();
+    trimmed.starts_with("<!doctype html")
+        || trimmed.starts_with("<html")
+        || trimmed.starts_with("<?xml")
+        || trimmed.starts_with("{\"error\"")
+        || trimmed.starts_with("{\"detail\"")
+        || trimmed.contains("cloudflare")
+        || trimmed.contains("access denied")
 }
 
 struct HeadMetadata {
@@ -922,9 +1099,13 @@ async fn fetch_head_metadata(
         request = request.header("Authorization", format!("Bearer {}", token));
     }
 
-    let response = match request.send().await {
-        Ok(response) => response,
-        Err(_) => return Ok(None),
+    let response = match timeout(std::time::Duration::from_secs(8), request.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => return Ok(None),
+        Err(_) => {
+            warn!("HEAD metadata probe timed out for {}", url);
+            return Ok(None);
+        }
     };
 
     if !response.status().is_success() {
@@ -958,9 +1139,13 @@ async fn probe_range_support(
         request = request.header("Authorization", format!("Bearer {}", token));
     }
 
-    let response = match request.send().await {
-        Ok(response) => response,
-        Err(_) => return Ok(None),
+    let response = match timeout(std::time::Duration::from_secs(8), request.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => return Ok(None),
+        Err(_) => {
+            warn!("Range probe timed out for {}", url);
+            return Ok(None);
+        }
     };
 
     if response.status().as_u16() != 206 {
@@ -986,6 +1171,10 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
     total.parse().ok()
 }
 
+fn is_cancelled(cancel: Option<&CancellationToken>) -> bool {
+    cancel.map(|token| token.is_cancelled()).unwrap_or(false)
+}
+
 async fn download_ranged_to_file(
     clients: &[Client],
     url: &str,
@@ -995,7 +1184,11 @@ async fn download_ranged_to_file(
     progress: Option<(Sender<DownloadSignal>, usize, String)>,
     auth_token: Option<&str>,
     expected_sha: Option<&str>,
+    cancel: Option<&CancellationToken>,
 ) -> Result<PathBuf> {
+    if is_cancelled(cancel) {
+        return Err(anyhow!("download cancelled by user"));
+    }
     fs::create_dir_all(dest_dir)
         .await
         .with_context(|| format!("failed to create directory {:?}", dest_dir))?;
@@ -1042,7 +1235,11 @@ async fn download_ranged_to_file(
         let auth_token = auth_token.map(|token| token.to_string());
         let received = Arc::clone(&received);
         let artifact_name = artifact_name.clone();
+        let cancel = cancel.cloned();
         async move {
+            if is_cancelled(cancel.as_ref()) {
+                return Err(anyhow!("download cancelled by user"));
+            }
             let _permit = semaphore.acquire().await?;
             let mut request = client
                 .get(&url)
@@ -1079,10 +1276,21 @@ async fn download_ranged_to_file(
             let mut last_adjust = Instant::now();
 
             loop {
-                let n = reader
-                    .read(&mut buffer)
-                    .await
-                    .with_context(|| format!("failed streaming {url}"))?;
+                if is_cancelled(cancel.as_ref()) {
+                    return Err(anyhow!("download cancelled by user"));
+                }
+                let n = match timeout(
+                    std::time::Duration::from_millis(500),
+                    reader.read(&mut buffer),
+                )
+                .await
+                {
+                    Ok(Ok(n)) => n,
+                    Ok(Err(err)) => {
+                        return Err(err).with_context(|| format!("failed streaming {url}"));
+                    }
+                    Err(_) => continue,
+                };
                 if n == 0 {
                     break;
                 }
@@ -1394,6 +1602,7 @@ async fn fetch_civitai_model_metadata_internal(
         trained_words,
         images,
         files,
+        download_url: api_download_url,
         model,
         model_id,
         description,
@@ -1401,9 +1610,13 @@ async fn fetch_civitai_model_metadata_internal(
         settings,
     } = payload;
 
-    let file_name = select_civitai_file(&files, download_url)
+    let selected_file = select_civitai_file(&files, download_url);
+    let file_name = selected_file
         .and_then(|file| file.name.clone())
         .unwrap_or_else(|| fallback_file_name_from_url(download_url, model_version_id));
+    let selected_download_url = selected_file
+        .and_then(|file| file.download_url.clone())
+        .or(api_download_url.clone());
 
     let (preview, preview_url) =
         resolve_preview(client, &images, token, model_version_id).await;
@@ -1461,6 +1674,7 @@ async fn fetch_civitai_model_metadata_internal(
 
     Ok(CivitaiModelMetadata {
         file_name,
+        download_url: selected_download_url,
         preview,
         preview_url,
         trained_words,
@@ -1807,6 +2021,8 @@ struct CivitaiModelVersion {
     images: Vec<CivitaiImage>,
     #[serde(default)]
     files: Vec<CivitaiFile>,
+    #[serde(default)]
+    download_url: Option<String>,
     #[serde(default)]
     model: Option<CivitaiModel>,
     #[serde(default)]

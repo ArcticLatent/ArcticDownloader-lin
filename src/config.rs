@@ -3,14 +3,14 @@ use anyhow::{anyhow, Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     sync::RwLock,
 };
 
 const SETTINGS_FILE: &str = "settings.json";
 const FALLBACK_REMOTE_CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-win/refs/heads/main/data/catalog.json";
+    "https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/data/catalog.json";
 
 #[derive(Debug)]
 pub struct ConfigStore {
@@ -144,23 +144,5 @@ impl Default for AppSettings {
 }
 
 pub(crate) fn default_catalog_endpoint() -> Option<String> {
-    if let Ok(url) = env::var("ARCTIC_CATALOG_URL") {
-        let trimmed = url.trim();
-        return if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-    }
-
-    if let Some(url) = option_env!("ARCTIC_DEFAULT_CATALOG_URL") {
-        let trimmed = url.trim();
-        return if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-    }
-
     Some(FALLBACK_REMOTE_CATALOG_URL.to_string())
 }
