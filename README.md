@@ -1,6 +1,6 @@
 # Arctic Downloader
 
-Arctic Downloader is a Rust/libadwaita desktop companion that helps ComfyUI users pull the correct
+Arctic Downloader is a Rust/Slint desktop companion that helps ComfyUI users pull the correct
 model variants (and their auxiliary files) for the GPU VRAM and system RAM they have on hand.
 Viewers of the accompanying tutorial series can pick a “master model”, choose their GPU VRAM + RAM
 tiers, point the app at their ComfyUI install, and let the app grab the curated artifacts from
@@ -12,7 +12,7 @@ receive the assets they can realistically run.
 
 This repository currently contains:
 
-- A Rust GTK/libadwaita application with GPU VRAM and system RAM selectors, per-tier legends, and
+- A Rust Slint desktop application (Windows-first) with GPU VRAM and system RAM selectors, per-tier legends, and
   artifact download progress.
 - Async download services that place master-model artifacts inside dedicated folders
   (`ComfyUI/models/<category>/<model_id>/…`) and LoRA assets inside family-normalised subdirectories
@@ -21,17 +21,15 @@ This repository currently contains:
   authenticated downloads (with clear guidance when a token is missing).
 - A versioned catalog template (`data/catalog.json`) describing master models, variants, “always-on”
   assets, and target categories with optional RAM tier requirements.
-- A Flatpak manifest targeting `org.gnome.Platform//49` (see `flatpak/io.github.ArcticDownloader.yaml`).
 
 ## Repository Layout
 
 - `Cargo.toml` / `src/` — application sources.
 - `data/catalog.json` — curated model/variant metadata shipped with the app.
-- `flatpak/io.github.ArcticDownloader.yaml` — Flatpak builder manifest.
 
 ## Developing Locally
 
-1. Install the GTK/libadwaita development dependencies for your distro plus the Rust toolchain.
+1. Install the Rust toolchain and Visual Studio Build Tools (Desktop development with C++).
 2. Fetch Rust dependencies and build the debug binary:
    ```bash
    cargo check
@@ -41,18 +39,10 @@ This repository currently contains:
    the chosen GPU tier, while the legend summarises the four supported tiers (S/A/B/C) and their
    expected quantisations. RAM tier selection controls which RAM-gated artifacts are offered.
 
-### Catalog Admin Tool
+### Windows Build Note
 
-Before cutting a new release you can curate `data/catalog.json` via the private admin utility:
-
-```bash
-cargo run --bin catalog_admin
-```
-
-The tool lists existing models, lets you add/edit/delete entries, organise “always-on” artifact
-groups per model, and assign per-variant artifacts. RAM tier gating is configured only inside the
-“always-on” groups, while variants capture a `tier` (GPU requirement) that maps directly to the
-four-tier UI. Saving writes directly to `data/catalog.json`.
+The Windows build intentionally excludes `catalog_admin`. Curate `data/catalog.json` in your source
+workflow and ship updates through the remote catalog endpoint used by the app.
 
 > **Note:** LoRA previews and downloads that originate from Civitai require a personal API token.
 > Enter this once in the LoRA page and the app will handle creator metadata, trigger words, and
@@ -69,40 +59,36 @@ cargo clippy --all-features
 (Install the `rustfmt` and `clippy` components through `rustup component add rustfmt clippy` if they
 are not already available.)
 
-## Building the Flatpak
+## Building a Windows Installer
 
-Ensure the Flatpak SDK, Platform, and Rust extension are installed:
+Build the application binary first:
 ```bash
-flatpak install org.gnome.Platform//49 org.gnome.Sdk//49 org.freedesktop.Sdk.Extension.rust-stable//24.08
+cargo build --release
 ```
 
-Then perform a local build:
-```bash
-flatpak-builder --user --install --force-clean build-dir flatpak/io.github.ArcticDownloader.yaml
-flatpak run io.github.ArcticDownloader
-```
+Package the binary into your preferred `.exe` installer format (for example Inno Setup or WiX Burn)
+and publish the installer in your GitHub release workflow.
 
 ## Releases & Auto-Update Manifest
 
 - On startup the app fetches an update manifest from
-  `https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/update.json`
+  `https://github.com/ArcticLatent/ArcticDownloader-win/releases/latest/download/update.json`
   (override with `ARCTIC_UPDATE_MANIFEST_URL`). If the manifest advertises a higher semver version,
-  the app downloads the bundled `.flatpak`, verifies its SHA-256, and reinstalls it via
-  `flatpak-spawn --host flatpak install --user --reinstall <bundle>`.
+  the app downloads the published `.exe` installer, verifies its SHA-256, launches installer execution, exits, and restarts after installation completes.
 - Manifest schema:
 
   ```json
   {
     "version": "0.1.0",
-    "download_url": "https://github.com/ArcticLatent/ArcticDownloader-flatpak/releases/download/v0.1.0/ArcticDownloader.flatpak",
-    "sha256": "<sha256sum-of-the-flatpak>",
+    "download_url": "https://github.com/ArcticLatent/ArcticDownloader-win/releases/download/v0.1.0/ArcticDownloader-setup.exe",
+    "sha256": "<sha256sum-of-the-exe>",
     "notes": "Optional release notes"
   }
   ```
 
-- Release steps: build the Flatpak, calculate `sha256sum ArcticDownloader.flatpak`, upload it to the
-  GitHub Release, update `update.json` in `ArcticLatent/ArcticDownloader-flatpak` with the new
-  version/download URL/checksum, and push it. Restart the app after auto-install completes.
+- Release steps: run `scripts/build-release.ps1 -Version <x.y.z>` to generate
+  `dist/ArcticDownloader-setup.exe` and `dist/update.json`, then publish both assets to the matching
+  GitHub release tag (`v<x.y.z>`).
 - Disable the automatic check with `ARCTIC_SKIP_AUTO_UPDATE=1`; re-enable with `ARCTIC_AUTO_UPDATE=1`.
 
 ## Catalog Curation
@@ -129,7 +115,7 @@ will add signature verification and remote catalog refreshes.
   (`catalog_endpoint`). A successful `200 OK` replaces the in-memory catalog, persists the JSON to
   the cache, and stores the returned `ETag` so subsequent runs can short-circuit with `304 Not
   Modified`.
-- Builds default to `https://raw.githubusercontent.com/burce/ArcticDownloader/main/data/catalog.json`
+- Builds default to `https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-win/refs/heads/main/data/catalog.json`
   as the remote source. Override this at runtime with `ARCTIC_CATALOG_URL` or at build-time via the
   `ARCTIC_DEFAULT_CATALOG_URL` environment variable. Setting either to an empty string disables the
   remote fetch.
@@ -149,3 +135,6 @@ will add signature verification and remote catalog refreshes.
 - License acknowledgement flow per Hugging Face repository.
 - Settings page for concurrency limits, quantized preferences, and catalog refresh.
 - Telemetry toggle (opt-in) and localization scaffolding.
+
+
+

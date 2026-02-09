@@ -10,7 +10,7 @@ use std::{
 
 const SETTINGS_FILE: &str = "settings.json";
 const FALLBACK_REMOTE_CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/data/catalog.json";
+    "https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-win/refs/heads/main/data/catalog.json";
 
 #[derive(Debug)]
 pub struct ConfigStore {

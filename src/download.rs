@@ -1562,6 +1562,7 @@ async fn resolve_preview(
     model_version_id: u64,
 ) -> (Option<CivitaiPreview>, Option<String>) {
     let mut first_image: Option<&str> = None;
+    let mut first_video: Option<&str> = None;
 
     for image in images {
         let Some(url) = image.url.as_deref() else {
@@ -1571,22 +1572,33 @@ async fn resolve_preview(
             continue;
         }
 
-        if !is_video_url(url) && first_image.is_none() {
+        if is_video_url(url) && first_video.is_none() {
+            first_video = Some(url);
+        } else if !is_video_url(url) && first_image.is_none() {
             first_image = Some(url);
         }
     }
 
-    let Some(image_url) = first_image else {
-        return (None, None);
-    };
-
-    let preview_url = Some(image_url.to_string());
-    let bytes = fetch_preview_image_bytes(client, image_url, token).await;
-    let preview = bytes.map(CivitaiPreview::Image);
-    if preview.is_none() {
-        warn!("Failed to download image bytes for model version {model_version_id}");
+    if let Some(image_url) = first_image {
+        let preview_url = Some(image_url.to_string());
+        let bytes = fetch_preview_image_bytes(client, image_url, token).await;
+        let preview = bytes.map(CivitaiPreview::Image);
+        if preview.is_none() {
+            warn!("Failed to download image bytes for model version {model_version_id}");
+        }
+        return (preview, preview_url);
     }
-    (preview, preview_url)
+
+    if let Some(video_url) = first_video {
+        return (
+            Some(CivitaiPreview::Video {
+                url: video_url.to_string(),
+            }),
+            Some(video_url.to_string()),
+        );
+    }
+
+    (None, None)
 }
 
 fn is_video_url(url: &str) -> bool {

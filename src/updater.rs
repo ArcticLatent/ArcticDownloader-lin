@@ -1,6 +1,6 @@
-use crate::{app::APP_ID, config::ConfigStore};
-use anyhow::{anyhow, bail, Context, Result};
-use log::{info, warn};
+use crate::config::ConfigStore;
+use anyhow::{bail, Context, Result};
+use log::info;
 use reqwest::Client;
 use semver::Version;
 use serde::Deserialize;
@@ -11,9 +11,10 @@ use std::{
 };
 use tokio::{fs, io::AsyncWriteExt, process::Command, runtime::Runtime};
 
-const DEFAULT_UPDATE_MANIFEST_URL: &str = "https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/update.json";
+const DEFAULT_UPDATE_MANIFEST_URL: &str =
+    "https://github.com/ArcticLatent/ArcticDownloader-win/releases/latest/download/update.json";
 const UPDATE_CACHE_DIR: &str = "updates";
-const FALLBACK_BUNDLE_NAME: &str = "ArcticDownloader.flatpak";
+const FALLBACK_INSTALLER_NAME: &str = "ArcticDownloader-setup.exe";
 
 #[derive(Clone, Debug)]
 pub struct AvailableUpdate {
@@ -26,7 +27,7 @@ pub struct AvailableUpdate {
 #[derive(Clone, Debug)]
 pub struct UpdateApplied {
     pub version: Version,
-    pub bundle_path: PathBuf,
+    pub installer_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,7 +46,6 @@ pub struct Updater {
     client: Client,
     manifest_url: String,
     cache_dir: PathBuf,
-    use_flatpak_spawn: bool,
     current_version: Version,
 }
 
@@ -57,7 +57,6 @@ impl Updater {
     ) -> Result<Self> {
         let manifest_url = resolve_manifest_url();
         let cache_dir = config.cache_path();
-        let use_flatpak_spawn = std::env::var("FLATPAK_ID").is_ok();
         let current_version = parse_version(&current_version_str)
             .unwrap_or_else(|| Version::parse(env!("CARGO_PKG_VERSION")).expect("valid semver"));
         let client = Client::builder()
@@ -75,7 +74,6 @@ impl Updater {
             client,
             manifest_url,
             cache_dir,
-            use_flatpak_spawn,
             current_version,
         })
     }
@@ -123,7 +121,6 @@ impl Updater {
     ) -> tokio::task::JoinHandle<Result<UpdateApplied>> {
         let client = self.client.clone();
         let cache_dir = self.cache_dir.clone();
-        let use_flatpak_spawn = self.use_flatpak_spawn;
         let config = self.config.clone();
 
         self.runtime.spawn(async move {
@@ -132,11 +129,11 @@ impl Updater {
                 .await
                 .context("failed to prepare update cache directory")?;
 
-            let file_name = bundle_file_name(&update.download_url)
-                .unwrap_or_else(|| FALLBACK_BUNDLE_NAME.to_string());
-            let bundle_path = updates_dir.join(file_name);
-            if fs::try_exists(&bundle_path).await.unwrap_or(false) {
-                let _ = fs::remove_file(&bundle_path).await;
+            let file_name = installer_file_name(&update.download_url)
+                .unwrap_or_else(|| FALLBACK_INSTALLER_NAME.to_string());
+            let installer_path = updates_dir.join(file_name);
+            if fs::try_exists(&installer_path).await.unwrap_or(false) {
+                let _ = fs::remove_file(&installer_path).await;
             }
 
             info!(
@@ -151,9 +148,9 @@ impl Updater {
                 .error_for_status()
                 .context("failed to download update bundle")?;
 
-            let mut file = fs::File::create(&bundle_path)
+            let mut file = fs::File::create(&installer_path)
                 .await
-                .context("failed to create bundle file")?;
+                .context("failed to create installer file")?;
             let mut hasher = Sha256::new();
 
             while let Some(chunk) = response
@@ -164,15 +161,15 @@ impl Updater {
                 hasher.update(&chunk);
                 file.write_all(&chunk)
                     .await
-                    .context("failed to write update bundle to disk")?;
+                    .context("failed to write update installer to disk")?;
             }
             file.flush()
                 .await
-                .context("failed to flush bundle file to disk")?;
+                .context("failed to flush installer file to disk")?;
 
             let digest = format!("{:x}", hasher.finalize());
             if digest != update.sha256 {
-                let _ = fs::remove_file(&bundle_path).await;
+                let _ = fs::remove_file(&installer_path).await;
                 bail!(
                     "downloaded update checksum mismatch (expected {}, got {})",
                     update.sha256,
@@ -181,18 +178,15 @@ impl Updater {
             }
 
             info!(
-                "Installing update {} from {:?}",
-                update.version, bundle_path
+                "Launching installer for update {} from {:?}",
+                update.version, installer_path
             );
-            run_install_command(&bundle_path, use_flatpak_spawn).await?;
-
-            let _ =
-                store_installed_version(update.version.clone(), config.clone(), use_flatpak_spawn)
-                    .await;
+            run_install_command(&installer_path).await?;
+            let _ = store_installed_version(update.version.clone(), config.clone()).await;
 
             Ok(UpdateApplied {
                 version: update.version,
-                bundle_path,
+                installer_path,
             })
         })
     }
@@ -222,11 +216,7 @@ fn parse_version(raw: &str) -> Option<Version> {
     Version::parse(normalized).ok()
 }
 
-async fn store_installed_version(
-    version: Version,
-    config: Arc<ConfigStore>,
-    use_flatpak_spawn: bool,
-) -> Result<()> {
+async fn store_installed_version(version: Version, config: Arc<ConfigStore>) -> Result<()> {
     let settings_path = config.config_path().join("settings.json");
 
     let existing = fs::read(&settings_path).await.ok();
@@ -243,17 +233,6 @@ async fn store_installed_version(
     fs::write(&settings_path, data)
         .await
         .with_context(|| format!("failed to persist settings at {settings_path:?}"))?;
-
-    let mut command = if use_flatpak_spawn {
-        let mut cmd = Command::new("flatpak-spawn");
-        cmd.arg("--host");
-        cmd.arg("flatpak");
-        cmd
-    } else {
-        Command::new("flatpak")
-    };
-    command.args(["info", APP_ID]);
-    let _ = command.output().await;
 
     Ok(())
 }
@@ -274,63 +253,72 @@ async fn fetch_manifest(client: &Client, url: &str) -> Result<UpdateManifest> {
     Ok(manifest)
 }
 
-fn bundle_file_name(url: &str) -> Option<String> {
+fn installer_file_name(url: &str) -> Option<String> {
     reqwest::Url::parse(url)
         .ok()
         .and_then(|parsed| parsed.path_segments()?.last().map(str::to_string))
         .filter(|name| !name.trim().is_empty())
 }
 
-async fn run_install_command(path: &Path, use_flatpak_spawn: bool) -> Result<()> {
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| anyhow!("bundle path contains invalid UTF-8: {path:?}"))?;
-
-    let install_args = [
-        "install",
-        "--user",
-        "--assumeyes",
-        "--noninteractive",
-        "--reinstall",
-        "--bundle",
-        path_str,
-    ];
-
-    let output = run_flatpak(&install_args, use_flatpak_spawn)
-        .await
-        .context("failed to execute flatpak installer")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let already_installed =
-        stdout.contains("already installed") || stderr.contains("already installed");
-
-    if output.status.success() || already_installed {
-        if already_installed {
-            info!("Flatpak reported already installed; treating install as success.");
-        }
-        return Ok(());
+async fn run_install_command(path: &Path) -> Result<()> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        bail!("updater install launcher is currently implemented for Windows only");
     }
 
-    warn!("flatpak install stdout: {}", stdout.trim());
-    warn!("flatpak install stderr: {}", stderr.trim());
+    #[cfg(target_os = "windows")]
+    {
+        let current_exe = std::env::current_exe()
+            .context("failed to resolve current executable for post-update relaunch")?;
+        let helper_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("apply_update.cmd");
+        let ext = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase());
 
-    bail!(
-        "flatpak install failed with status {}",
-        output.status.code().unwrap_or(-1)
-    );
+        if ext.as_deref() != Some("exe") {
+            bail!(
+                "unsupported installer type for Windows updater: {:?} (expected .exe)",
+                path
+            );
+        }
+
+        let installer = quote_for_cmd(path);
+        let executable = quote_for_cmd(&current_exe);
+        let installer_step = format!("start \"\" /wait \"{installer}\"");
+
+        let script = format!(
+            "@echo off\r\n\
+             setlocal\r\n\
+             timeout /t 2 /nobreak >nul\r\n\
+             {installer_step}\r\n\
+             timeout /t 2 /nobreak >nul\r\n\
+             start \"\" \"{executable}\"\r\n\
+             endlocal\r\n"
+        );
+
+        fs::write(&helper_path, script)
+            .await
+            .with_context(|| format!("failed to write update helper script {:?}", helper_path))?;
+
+        Command::new("cmd")
+            .arg("/C")
+            .arg("start")
+            .arg("")
+            .arg("/MIN")
+            .arg(&helper_path)
+            .spawn()
+            .with_context(|| format!("failed to launch update helper script {:?}", helper_path))?;
+
+        Ok(())
+    }
 }
 
-async fn run_flatpak(args: &[&str], use_flatpak_spawn: bool) -> Result<std::process::Output> {
-    let mut command = if use_flatpak_spawn {
-        let mut cmd = Command::new("flatpak-spawn");
-        cmd.arg("--host");
-        cmd.arg("flatpak");
-        cmd
-    } else {
-        Command::new("flatpak")
-    };
-
-    command.args(args);
-    Ok(command.output().await?)
+#[cfg(target_os = "windows")]
+fn quote_for_cmd(path: &Path) -> String {
+    path.to_string_lossy().replace('"', "\"\"")
 }

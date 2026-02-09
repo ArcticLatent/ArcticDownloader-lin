@@ -1,25 +1,23 @@
-use adw::{glib, gtk, ColorScheme, StyleManager};
-use arctic_downloader::app::{ArcticDownloaderApp, APP_ID};
+use arctic_downloader::app::ArcticDownloaderApp;
 use env_logger::Env;
+use slint::fontique_07::fontique;
+
+fn register_inter_font() {
+    const INTER_FONT: &[u8] = include_bytes!("../assets/fonts/Inter-VariableFont_opsz,wght.ttf");
+    let blob = fontique::Blob::new(std::sync::Arc::new(INTER_FONT.to_vec()));
+    let mut collection = slint::fontique_07::shared_collection();
+    let _ = collection.register_fonts(blob, None);
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
-    glib::log_set_handler(
-        Some("Gtk"),
-        glib::LogLevels::LEVEL_WARNING,
-        false,
-        false,
-        |_domain, _level, _message| {},
-    );
-    glib::log_set_handler(
-        Some("Gdk"),
-        glib::LogLevels::LEVEL_WARNING,
-        false,
-        false,
-        |_domain, _level, _message| {},
-    );
-    gtk::init()?;
-    gtk::Window::set_default_icon_name(APP_ID);
-    StyleManager::default().set_color_scheme(ColorScheme::Default);
-    glib::set_application_name("Arctic Downloader");
+
+    register_inter_font();
+
+    if std::env::var("SLINT_STYLE").is_err() {
+        // Prefer Fluent controls on Windows 11 while still allowing overrides.
+        std::env::set_var("SLINT_STYLE", "fluent");
+    }
+
     ArcticDownloaderApp::new()?.run()
 }
