@@ -655,6 +655,18 @@ el.metaCreatorLink.addEventListener("click", async (event) => {
   }
 });
 
+document.querySelectorAll(".footer-link[data-url]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const url = button.getAttribute("data-url");
+    if (!url) return;
+    try {
+      await invoke("open_external_url", { url });
+    } catch (err) {
+      logLine(`Open link failed: ${err}`);
+    }
+  });
+});
+
 async function initEventListeners() {
   if (!listen) {
     logLine("Tauri event bridge unavailable.");

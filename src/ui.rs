@@ -507,7 +507,7 @@ fn run_update_check(weak: Weak<MainWindow>, context: AppContext, announce_no_upd
             let weak_for_installing = weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak_for_installing.upgrade() {
-                    ui.set_update_state_text("Installing".into());
+                    ui.set_update_state_text("Applying update".into());
                 }
             });
             let install_handle = updater.download_and_install(available);
@@ -517,7 +517,7 @@ fn run_update_check(weak: Weak<MainWindow>, context: AppContext, announce_no_upd
         match install_result {
             Ok(Ok(applied)) => {
                 let message = format!(
-                    "Update v{} downloaded. Installing now; restarting app.",
+                    "Update v{} downloaded. Applying now; restarting app.",
                     applied.version
                 );
                 let _ = slint::invoke_from_event_loop(move || {
@@ -534,7 +534,7 @@ fn run_update_check(weak: Weak<MainWindow>, context: AppContext, announce_no_upd
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.set_status_text(message.into());
-                        ui.set_update_state_text("Install failed".into());
+                        ui.set_update_state_text("Update failed".into());
                     }
                 });
             }
@@ -543,7 +543,7 @@ fn run_update_check(weak: Weak<MainWindow>, context: AppContext, announce_no_upd
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.set_status_text(message.into());
-                        ui.set_update_state_text("Install failed".into());
+                        ui.set_update_state_text("Update failed".into());
                     }
                 });
             }

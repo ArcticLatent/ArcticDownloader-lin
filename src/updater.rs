@@ -14,7 +14,7 @@ use tokio::{fs, io::AsyncWriteExt, process::Command, runtime::Runtime};
 const DEFAULT_UPDATE_MANIFEST_URL: &str =
     "https://github.com/ArcticLatent/ArcticDownloader-win/releases/latest/download/update.json";
 const UPDATE_CACHE_DIR: &str = "updates";
-const FALLBACK_INSTALLER_NAME: &str = "ArcticDownloader-setup.exe";
+const FALLBACK_STANDALONE_NAME: &str = "arctic-downloader.exe";
 
 #[derive(Clone, Debug)]
 pub struct AvailableUpdate {
@@ -27,7 +27,7 @@ pub struct AvailableUpdate {
 #[derive(Clone, Debug)]
 pub struct UpdateApplied {
     pub version: Version,
-    pub installer_path: PathBuf,
+    pub package_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,10 +130,10 @@ impl Updater {
                 .context("failed to prepare update cache directory")?;
 
             let file_name = installer_file_name(&update.download_url)
-                .unwrap_or_else(|| FALLBACK_INSTALLER_NAME.to_string());
-            let installer_path = updates_dir.join(file_name);
-            if fs::try_exists(&installer_path).await.unwrap_or(false) {
-                let _ = fs::remove_file(&installer_path).await;
+                .unwrap_or_else(|| FALLBACK_STANDALONE_NAME.to_string());
+            let package_path = updates_dir.join(file_name);
+            if fs::try_exists(&package_path).await.unwrap_or(false) {
+                let _ = fs::remove_file(&package_path).await;
             }
 
             info!(
@@ -148,9 +148,9 @@ impl Updater {
                 .error_for_status()
                 .context("failed to download update bundle")?;
 
-            let mut file = fs::File::create(&installer_path)
+            let mut file = fs::File::create(&package_path)
                 .await
-                .context("failed to create installer file")?;
+                .context("failed to create update package file")?;
             let mut hasher = Sha256::new();
 
             while let Some(chunk) = response
@@ -161,15 +161,15 @@ impl Updater {
                 hasher.update(&chunk);
                 file.write_all(&chunk)
                     .await
-                    .context("failed to write update installer to disk")?;
+                    .context("failed to write update package to disk")?;
             }
             file.flush()
                 .await
-                .context("failed to flush installer file to disk")?;
+                .context("failed to flush update package to disk")?;
 
             let digest = format!("{:x}", hasher.finalize());
             if digest != update.sha256 {
-                let _ = fs::remove_file(&installer_path).await;
+                let _ = fs::remove_file(&package_path).await;
                 bail!(
                     "downloaded update checksum mismatch (expected {}, got {})",
                     update.sha256,
@@ -178,15 +178,15 @@ impl Updater {
             }
 
             info!(
-                "Launching installer for update {} from {:?}",
-                update.version, installer_path
+                "Applying standalone update {} from {:?}",
+                update.version, package_path
             );
-            run_install_command(&installer_path).await?;
+            run_install_command(&package_path).await?;
             let _ = store_installed_version(update.version.clone(), config.clone()).await;
 
             Ok(UpdateApplied {
                 version: update.version,
-                installer_path,
+                package_path,
             })
         })
     }
@@ -282,22 +282,34 @@ async fn run_install_command(path: &Path) -> Result<()> {
 
         if ext.as_deref() != Some("exe") {
             bail!(
-                "unsupported installer type for Windows updater: {:?} (expected .exe)",
+                "unsupported update package type for Windows updater: {:?} (expected .exe)",
                 path
             );
         }
 
-        let installer = quote_for_cmd(path);
+        let downloaded_exe = quote_for_cmd(path);
         let executable = quote_for_cmd(&current_exe);
-        let installer_step = format!("start \"\" /wait \"{installer}\"");
 
         let script = format!(
             "@echo off\r\n\
              setlocal\r\n\
+             set \"NEW_EXE={downloaded_exe}\"\r\n\
+             set \"CURRENT_EXE={executable}\"\r\n\
+             set /a RETRIES=0\r\n\
              timeout /t 2 /nobreak >nul\r\n\
-             {installer_step}\r\n\
-             timeout /t 2 /nobreak >nul\r\n\
-             start \"\" \"{executable}\"\r\n\
+             :retry_copy\r\n\
+             copy /Y \"%NEW_EXE%\" \"%CURRENT_EXE%\" >nul 2>nul\r\n\
+             if errorlevel 1 (\r\n\
+               set /a RETRIES+=1\r\n\
+               if %RETRIES% GEQ 60 goto fail\r\n\
+               timeout /t 1 /nobreak >nul\r\n\
+               goto retry_copy\r\n\
+             )\r\n\
+             start \"\" \"%CURRENT_EXE%\"\r\n\
+             endlocal\r\n\
+             del /f /q \"%~f0\" >nul 2>nul\r\n\
+             goto :eof\r\n\
+             :fail\r\n\
              endlocal\r\n"
         );
 

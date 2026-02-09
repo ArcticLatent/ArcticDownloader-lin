@@ -230,6 +230,26 @@ h3 {
   width: 35%;
   animation: progress-indeterminate 1.1s linear infinite;
 }
+.footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+}
+.footer-link {
+  width: auto;
+  min-height: 36px;
+  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.footer-link img {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
 @keyframes progress-indeterminate {
   from { transform: translateX(-120%); }
   to { transform: translateX(320%); }

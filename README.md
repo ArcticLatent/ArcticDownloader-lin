@@ -128,7 +128,7 @@ will add signature verification and remote catalog refreshes.
 ### Remote Catalog Refresh
 
 - The app boots using a cached copy of `catalog.json` (stored under
-  `~/.cache/io.github.ArcticDownloader/catalog.json`) or the bundled fallback.
+  `~/.cache/io.github.ArcticHelper/catalog.json`) or the bundled fallback.
 - On launch it performs an HTTP GET against the catalog endpoint recorded in `settings.json`
   (`catalog_endpoint`). A successful `200 OK` replaces the in-memory catalog, persists the JSON to
   the cache, and stores the returned `ETag` so subsequent runs can short-circuit with `304 Not

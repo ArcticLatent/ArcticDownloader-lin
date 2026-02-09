@@ -2,7 +2,7 @@
 Name=Arctic Downloader
 Comment=Download curated models and LoRAs for ComfyUI
 Exec=arctic-downloader
-Icon=io.github.ArcticDownloader
+Icon=io.github.ArcticHelper
 Terminal=false
 Type=Application
 Categories=Utility;Network;

@@ -12,7 +12,7 @@ use log::{info, warn};
 use std::sync::Arc;
 use tokio::runtime::{Builder, Runtime};
 
-pub const APP_ID: &str = "io.github.ArcticDownloader";
+pub const APP_ID: &str = "io.github.ArcticHelper";
 
 #[derive(Clone)]
 pub struct AppContext {

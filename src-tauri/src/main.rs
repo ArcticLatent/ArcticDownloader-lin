@@ -259,7 +259,7 @@ async fn auto_update_startup(
             Ok(UpdateCheckResponse {
                 available: true,
                 version: Some(applied.version.to_string()),
-                notes: Some("Installer launched.".to_string()),
+                notes: Some("Standalone update apply launched.".to_string()),
             })
         }
         Ok(Err(err)) => Err(format!("Update install failed: {err:#}")),
