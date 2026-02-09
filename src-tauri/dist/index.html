@@ -22,11 +22,60 @@
       </header>
 
       <nav class="tabs">
-        <button class="tab active" data-tab="models" id="tab-models">Models</button>
+        <button class="tab active" data-tab="comfyui" id="tab-comfyui">ComfyUI</button>
+        <button class="tab" data-tab="models" id="tab-models">Models</button>
         <button class="tab" data-tab="loras" id="tab-loras">LoRAs</button>
       </nav>
 
-      <section class="panel" id="tab-content-models">
+      <section class="panel" id="tab-content-comfyui">
+        <div class="row">
+          <div id="comfy-install-reco">Recommended Torch/CUDA: Detecting...</div>
+        </div>
+        <div class="row torch-row">
+          <select id="comfy-torch-profile"></select>
+          <span id="comfy-torch-recommended">Recommended: Detecting...</span>
+        </div>
+
+        <div class="row folder-row">
+          <input id="comfy-install-root" type="text" placeholder="Select base folder (e.g. Documents). App will create /ComfyUI inside it." />
+          <button id="choose-install-root">Choose Folder</button>
+          <button id="save-install-root">Save Folder</button>
+        </div>
+
+        <div class="row section-header">
+          <h3>Add-Ons</h3>
+        </div>
+        <div class="row option-grid">
+          <label><input type="checkbox" id="addon-sageattention" /> SageAttention</label>
+          <label><input type="checkbox" id="addon-sageattention3" /> SageAttention3 (RTX 50 only)</label>
+          <label><input type="checkbox" id="addon-flashattention" /> FlashAttention</label>
+          <label><input type="checkbox" id="addon-insightface" /> InsightFace</label>
+          <label><input type="checkbox" id="addon-nunchaku" /> Nunchaku</label>
+        </div>
+
+        <div class="row section-header">
+          <h3>Custom-Nodes</h3>
+        </div>
+        <div class="row option-grid">
+          <label><input type="checkbox" id="node-comfyui-manager" /> comfyui-manager</label>
+          <label><input type="checkbox" id="node-comfyui-easy-use" /> ComfyUI-Easy-Use</label>
+          <label><input type="checkbox" id="node-comfyui-controlnet-aux" /> comfyui_controlnet_aux</label>
+          <label><input type="checkbox" id="node-rgthree-comfy" /> rgthree-comfy</label>
+          <label><input type="checkbox" id="node-comfyui-gguf" /> ComfyUI-GGUF</label>
+          <label><input type="checkbox" id="node-comfyui-kjnodes" /> comfyui-kjnodes</label>
+        </div>
+
+        <div class="row">
+          <button id="install-comfyui" class="primary">Install ComfyUI</button>
+        </div>
+
+        <div class="row">
+          <h3>ComfyUI Install Logs</h3>
+          <pre id="comfy-install-log" class="comfy-log">Ready</pre>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="tab-content-models">
         <div class="row folder-row">
           <input id="comfy-root" type="text" placeholder="Select your ComfyUI root folder" />
           <button id="choose-root">Choose Folder</button>
@@ -78,7 +127,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="downloads-status-panel">
         <h2>Status</h2>
         <div id="download-progress" class="progress-line">Idle</div>
         <div id="overall-progress" class="overall-progress hidden" aria-label="Overall download progress">

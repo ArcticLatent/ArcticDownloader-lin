@@ -6,8 +6,12 @@ use arctic_downloader::{
     model::{LoraDefinition, ModelCatalog},
     ram::RamTier,
 };
-use serde::Serialize;
-use std::sync::Mutex;
+use serde::{Deserialize, Serialize};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
 
@@ -15,6 +19,7 @@ struct AppState {
     context: AppContext,
     active_cancel: Mutex<Option<CancellationToken>>,
     active_abort: Mutex<Option<tokio::task::AbortHandle>>,
+    install_cancel: Mutex<Option<CancellationToken>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +64,33 @@ struct DownloadProgressEvent {
     message: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct ComfyInstallRecommendation {
+    gpu_name: Option<String>,
+    driver_version: Option<String>,
+    torch_profile: String,
+    torch_label: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ComfyInstallRequest {
+    install_root: String,
+    torch_profile: Option<String>,
+    include_sage_attention: bool,
+    include_sage_attention3: bool,
+    include_flash_attention: bool,
+    include_insight_face: bool,
+    include_nunchaku: bool,
+    node_comfyui_manager: bool,
+    node_comfyui_easy_use: bool,
+    node_comfyui_controlnet_aux: bool,
+    node_rgthree_comfy: bool,
+    node_comfyui_gguf: bool,
+    node_comfyui_kjnodes: bool,
+}
+
 #[tauri::command]
 fn get_app_snapshot(state: State<'_, AppState>) -> AppSnapshot {
     let catalog = state.context.catalog.catalog_snapshot();
@@ -75,18 +107,30 @@ fn get_app_snapshot(state: State<'_, AppState>) -> AppSnapshot {
 }
 
 fn detect_nvidia_gpu() -> (Option<String>, Option<u64>) {
+    let detailed = detect_nvidia_gpu_details();
+    (detailed.name, detailed.vram_mb)
+}
+
+#[derive(Debug, Default)]
+struct NvidiaGpuDetails {
+    name: Option<String>,
+    vram_mb: Option<u64>,
+    driver_version: Option<String>,
+}
+
+fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
     let output = std::process::Command::new("nvidia-smi")
         .args([
-            "--query-gpu=name,memory.total",
+            "--query-gpu=name,memory.total,driver_version",
             "--format=csv,noheader,nounits",
         ])
         .output();
 
     let Ok(output) = output else {
-        return (None, None);
+        return NvidiaGpuDetails::default();
     };
     if !output.status.success() {
-        return (None, None);
+        return NvidiaGpuDetails::default();
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -96,21 +140,748 @@ fn detect_nvidia_gpu() -> (Option<String>, Option<u64>) {
         .find(|line| !line.is_empty())
         .unwrap_or_default();
     if first.is_empty() {
-        return (None, None);
+        return NvidiaGpuDetails::default();
     }
 
-    let mut parts = first.splitn(2, ',');
+    let mut parts = first.split(',').map(str::trim);
     let name = parts
         .next()
-        .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
     let vram_mb = parts
         .next()
-        .map(str::trim)
         .and_then(|value| value.parse::<u64>().ok());
+    let driver_version = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
 
-    (name, vram_mb)
+    NvidiaGpuDetails {
+        name,
+        vram_mb,
+        driver_version,
+    }
+}
+
+#[tauri::command]
+fn get_comfyui_install_recommendation() -> ComfyInstallRecommendation {
+    let gpu = detect_nvidia_gpu_details();
+    let gpu_name = gpu.name.clone().unwrap_or_default().to_ascii_lowercase();
+    let driver_major = gpu
+        .driver_version
+        .as_deref()
+        .and_then(|raw| raw.split('.').next())
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or_default();
+
+    if gpu_name.contains("rtx 30") {
+        return ComfyInstallRecommendation {
+            gpu_name: gpu.name,
+            driver_version: gpu.driver_version,
+            torch_profile: "torch271_cu128".to_string(),
+            torch_label: "Torch 2.7.1 + cu128".to_string(),
+            reason: "Detected RTX 3000 series (Ampere).".to_string(),
+        };
+    }
+
+    if gpu_name.contains("rtx 40") {
+        return ComfyInstallRecommendation {
+            gpu_name: gpu.name,
+            driver_version: gpu.driver_version,
+            torch_profile: "torch280_cu128".to_string(),
+            torch_label: "Torch 2.8.0 + cu128".to_string(),
+            reason: "Detected RTX 4000 series (Ada).".to_string(),
+        };
+    }
+
+    if gpu_name.contains("rtx 50") {
+        if driver_major >= 580 {
+            return ComfyInstallRecommendation {
+                gpu_name: gpu.name,
+                driver_version: gpu.driver_version,
+                torch_profile: "torch291_cu130".to_string(),
+                torch_label: "Torch 2.9.1 + cu130".to_string(),
+                reason: "Detected RTX 5000 series with driver >= 580.".to_string(),
+            };
+        }
+
+        return ComfyInstallRecommendation {
+            gpu_name: gpu.name,
+            driver_version: gpu.driver_version,
+            torch_profile: "torch280_cu128".to_string(),
+            torch_label: "Torch 2.8.0 + cu128".to_string(),
+            reason: "Detected RTX 5000 series with older driver; using safer fallback.".to_string(),
+        };
+    }
+
+    ComfyInstallRecommendation {
+        gpu_name: gpu.name,
+        driver_version: gpu.driver_version,
+        torch_profile: "torch280_cu128".to_string(),
+        torch_label: "Torch 2.8.0 + cu128".to_string(),
+        reason: "Unknown or non-NVIDIA GPU; using default recommendation.".to_string(),
+    }
+}
+
+fn normalize_path(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Install folder is required.".to_string());
+    }
+    let mut path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        path = std::env::current_dir()
+            .map_err(|err| err.to_string())?
+            .join(path);
+    }
+    Ok(path)
+}
+
+fn is_forbidden_install_path(path: &Path) -> bool {
+    let normalized = path
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_string();
+    let blocked = [
+        "c:",
+        "c:\\windows",
+        "c:\\program files",
+        "c:\\program files (x86)",
+    ];
+    blocked
+        .iter()
+        .any(|entry| normalized == *entry || normalized.starts_with(&format!("{entry}\\")))
+}
+
+fn choose_install_folder(base_root: &Path) -> PathBuf {
+    let primary = base_root.join("ComfyUI");
+    if !primary.exists() {
+        return primary;
+    }
+
+    for index in 1..=99u32 {
+        let candidate = base_root.join(format!("ComfyUI-{index:02}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // Extremely unlikely fallback if 01..99 are occupied.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    base_root.join(format!("ComfyUI-{ts}"))
+}
+
+fn powershell_download(url: &str, out_file: &Path) -> Result<(), String> {
+    let parent = out_file
+        .parent()
+        .ok_or_else(|| "Invalid output path.".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    let command = format!(
+        "try {{ Invoke-WebRequest '{}' -OutFile '{}' -UseBasicParsing -ErrorAction Stop }} catch {{ curl.exe -L '{}' -o '{}' }}",
+        url,
+        out_file.display(),
+        url,
+        out_file.display()
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &command])
+        .status()
+        .map_err(|err| format!("Failed to launch downloader: {err}"))?;
+    if !status.success() {
+        return Err(format!("Download failed: {url}"));
+    }
+    Ok(())
+}
+
+fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    let status = cmd
+        .status()
+        .map_err(|err| format!("Failed to run {program}: {err}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Command failed: {} {}",
+            program,
+            args.join(" ")
+        ));
+    }
+    Ok(())
+}
+
+fn run_command_env(
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&Path>,
+    envs: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let status = cmd
+        .status()
+        .map_err(|err| format!("Failed to run {program}: {err}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Command failed: {} {}",
+            program,
+            args.join(" ")
+        ));
+    }
+    Ok(())
+}
+
+fn find_file_recursive(root: &Path, file_name: &str) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let read = std::fs::read_dir(&dir).ok()?;
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case(file_name))
+                .unwrap_or(false)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_uv_binary(install_root: &Path, app: &AppHandle) -> Result<String, String> {
+    // Prefer system uv if available.
+    if std::process::Command::new("uv")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Ok("uv".to_string());
+    }
+
+    // Fallback: local uv binary under install folder.
+    let local_root = install_root.join(".tools").join("uv");
+    let local_uv = local_root.join("uv.exe");
+    if local_uv.exists() {
+        return Ok(local_uv.to_string_lossy().to_string());
+    }
+
+    emit_install_event(app, "step", "Downloading local uv runtime...");
+    std::fs::create_dir_all(&local_root).map_err(|err| err.to_string())?;
+    let zip_path = local_root.join("uv-x86_64-pc-windows-msvc.zip");
+    powershell_download(
+        "https://github.com/astral-sh/uv/releases/download/0.9.7/uv-x86_64-pc-windows-msvc.zip",
+        &zip_path,
+    )?;
+    run_command("tar", &["-xf", &zip_path.to_string_lossy()], Some(&local_root))?;
+    let _ = std::fs::remove_file(zip_path);
+
+    let found = find_file_recursive(&local_root, "uv.exe")
+        .ok_or_else(|| "Failed to locate uv.exe after extraction.".to_string())?;
+    Ok(found.to_string_lossy().to_string())
+}
+
+fn emit_install_event(app: &AppHandle, phase: &str, message: &str) {
+    let _ = app.emit(
+        "comfyui-install-progress",
+        DownloadProgressEvent {
+            kind: "comfyui_install".to_string(),
+            phase: phase.to_string(),
+            artifact: None,
+            index: None,
+            total: None,
+            received: None,
+            size: None,
+            folder: None,
+            message: Some(message.to_string()),
+        },
+    );
+}
+
+fn torch_profile_to_packages(profile: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str) {
+    match profile {
+        "torch271_cu128" => (
+            "2.7.1",
+            "0.22.1",
+            "2.7.1",
+            "https://download.pytorch.org/whl/cu128",
+            "https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.24-cu128-Basic-win-20260208/llama_cpp_python-0.3.24+cu128.basic-cp312-cp312-win_amd64.whl",
+            "triton-windows==3.3.1.post19",
+        ),
+        "torch291_cu130" => (
+            "2.9.1",
+            "0.24.1",
+            "2.9.1",
+            "https://download.pytorch.org/whl/cu130",
+            "https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.24-cu130-Basic-win-20260208/llama_cpp_python-0.3.24+cu130.basic-cp312-cp312-win_amd64.whl",
+            "triton-windows<3.6",
+        ),
+        _ => (
+            "2.8.0",
+            "0.23.0",
+            "2.8.0",
+            "https://download.pytorch.org/whl/cu128",
+            "https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.24-cu128-Basic-win-20260208/llama_cpp_python-0.3.24+cu128.basic-cp312-cp312-win_amd64.whl",
+            "triton-windows==3.4.0.post20",
+        ),
+    }
+}
+
+fn install_custom_node(
+    app: &AppHandle,
+    install_root: &Path,
+    custom_nodes_root: &Path,
+    py_exe: &Path,
+    repo_url: &str,
+    folder_name: &str,
+) -> Result<(), String> {
+    emit_install_event(app, "step", &format!("Installing custom node: {folder_name}..."));
+    let node_dir = custom_nodes_root.join(folder_name);
+    if node_dir.exists() {
+        let _ = std::fs::remove_dir_all(&node_dir);
+    }
+    run_command(
+        "git",
+        &["clone", repo_url, &node_dir.to_string_lossy()],
+        Some(install_root),
+    )?;
+
+    let req = node_dir.join("requirements.txt");
+    if req.exists() {
+        let non_empty = std::fs::metadata(&req)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        if non_empty {
+            run_command(
+                &py_exe.to_string_lossy(),
+                &[
+                    "-m",
+                    "pip",
+                    "install",
+                    "-r",
+                    &req.to_string_lossy(),
+                    "--no-cache-dir",
+                    "--timeout=1000",
+                    "--retries",
+                    "10",
+                ],
+                Some(install_root),
+            )?;
+        }
+    }
+
+    let installer = node_dir.join("install.py");
+    if installer.exists() {
+        let non_empty = std::fs::metadata(&installer)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        if non_empty {
+            run_command(
+                &py_exe.to_string_lossy(),
+                &[&installer.to_string_lossy()],
+                Some(install_root),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_comfyui_install(
+    app: &AppHandle,
+    request: &ComfyInstallRequest,
+    cancel: &CancellationToken,
+) -> Result<PathBuf, String> {
+    let selected_attention = [
+        request.include_sage_attention,
+        request.include_sage_attention3,
+        request.include_flash_attention,
+    ]
+    .into_iter()
+    .filter(|v| *v)
+    .count();
+    if selected_attention > 1 {
+        return Err(
+            "Choose only one of SageAttention, SageAttention3, or FlashAttention.".to_string(),
+        );
+    }
+    if request.include_sage_attention3 {
+        let gpu = detect_nvidia_gpu_details();
+        let is_50_series = gpu
+            .name
+            .as_deref()
+            .map(|name| name.to_ascii_lowercase().contains("rtx 50"))
+            .unwrap_or(false);
+        if !is_50_series {
+            return Err("SageAttention3 is available only for NVIDIA RTX 50-series GPUs.".to_string());
+        }
+    }
+
+    if cancel.is_cancelled() {
+        return Err("Installation cancelled.".to_string());
+    }
+
+    let base_root = normalize_path(&request.install_root)?;
+    if is_forbidden_install_path(&base_root) {
+        return Err("Install folder is not allowed. Avoid C:\\, Windows, or Program Files.".to_string());
+    }
+    let install_root = choose_install_folder(&base_root);
+    std::fs::create_dir_all(&install_root).map_err(|err| err.to_string())?;
+    emit_install_event(
+        app,
+        "info",
+        &format!("Install folder selected: {}", install_root.display()),
+    );
+
+    let log_path = install_root.join("install.log");
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|err| err.to_string())?;
+    let _ = writeln!(log_file, "Starting install");
+
+    let recommendation = get_comfyui_install_recommendation();
+    let selected_profile = request
+        .torch_profile
+        .clone()
+        .unwrap_or_else(|| recommendation.torch_profile);
+    let (torch_v, tv_v, ta_v, index_url, llama_url, triton_pkg) =
+        torch_profile_to_packages(&selected_profile);
+    emit_install_event(
+        app,
+        "info",
+        &format!("Using {} ({})", selected_profile, recommendation.reason),
+    );
+
+    let comfy_dir = install_root.join("ComfyUI");
+    if cancel.is_cancelled() {
+        return Err("Installation cancelled.".to_string());
+    }
+    if !comfy_dir.exists() {
+        emit_install_event(app, "step", "Cloning ComfyUI...");
+        run_command(
+            "git",
+            &["clone", "https://github.com/Comfy-Org/ComfyUI", "ComfyUI"],
+            Some(&install_root),
+        )?;
+    } else {
+        emit_install_event(app, "step", "ComfyUI folder already exists, skipping clone.");
+    }
+
+    if cancel.is_cancelled() {
+        return Err("Installation cancelled.".to_string());
+    }
+    emit_install_event(app, "step", "Preparing uv-managed Python + local .venv...");
+    let uv_bin = resolve_uv_binary(&install_root, app)?;
+    let python_store = install_root.join(".python");
+    std::fs::create_dir_all(&python_store).map_err(|err| err.to_string())?;
+    let python_store_s = python_store.to_string_lossy().to_string();
+    run_command_env(
+        &uv_bin,
+        &["python", "install", "3.12"],
+        Some(&install_root),
+        &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
+    )?;
+
+    let venv_dir = install_root.join(".venv");
+    let py_exe = venv_dir.join("Scripts").join("python.exe");
+    if !py_exe.exists() {
+        let venv_s = venv_dir.to_string_lossy().to_string();
+        run_command_env(
+            &uv_bin,
+            &["venv", "--python", "3.12", &venv_s],
+            Some(&install_root),
+            &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
+        )?;
+    } else {
+        emit_install_event(app, "step", "Existing .venv found; reusing.");
+    }
+
+    run_command(
+        &py_exe.to_string_lossy(),
+        &["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        Some(&install_root),
+    )?;
+
+    if cancel.is_cancelled() {
+        return Err("Installation cancelled.".to_string());
+    }
+    emit_install_event(app, "step", "Installing Torch stack...");
+    run_command(
+        &py_exe.to_string_lossy(),
+        &["-m", "pip", "install", "--upgrade", "--force-reinstall", &format!("torch=={torch_v}"), &format!("torchvision=={tv_v}"), &format!("torchaudio=={ta_v}"), "--index-url", index_url, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        Some(&install_root),
+    )?;
+    run_command(
+        &py_exe.to_string_lossy(),
+        &["-m", "pip", "uninstall", "-y", "llama-cpp-python"],
+        Some(&install_root),
+    )?;
+    run_command(
+        &py_exe.to_string_lossy(),
+        &["-m", "pip", "install", "--upgrade", "--force-reinstall", llama_url, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        Some(&install_root),
+    )?;
+    run_command(
+        &py_exe.to_string_lossy(),
+        &["-m", "pip", "install", "--upgrade", "--force-reinstall", triton_pkg, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        Some(&install_root),
+    )?;
+
+    if cancel.is_cancelled() {
+        return Err("Installation cancelled.".to_string());
+    }
+    emit_install_event(app, "step", "Installing ComfyUI requirements...");
+    run_command(
+        &py_exe.to_string_lossy(),
+        &["-m", "pip", "install", "-r", &comfy_dir.join("requirements.txt").to_string_lossy(), "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        Some(&install_root),
+    )?;
+    run_command(
+        &py_exe.to_string_lossy(),
+        &["-m", "pip", "install", "scikit-build-core", "onnxruntime-gpu", "onnx", "flet", "stringzilla==3.12.6", "transformers==4.57.6", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        Some(&install_root),
+    )?;
+
+    let addon_root = comfy_dir.join("custom_nodes");
+    std::fs::create_dir_all(&addon_root).map_err(|err| err.to_string())?;
+    if request.include_nunchaku {
+        emit_install_event(app, "step", "Installing Nunchaku...");
+        let nunchaku_node = addon_root.join("ComfyUI-nunchaku");
+        if nunchaku_node.exists() {
+            let _ = std::fs::remove_dir_all(&nunchaku_node);
+        }
+        run_command(
+            "git",
+            &[
+                "clone",
+                "https://github.com/nunchaku-ai/ComfyUI-nunchaku",
+                &nunchaku_node.to_string_lossy(),
+            ],
+            Some(&install_root),
+        )?;
+    }
+    if request.include_sage_attention {
+        emit_install_event(app, "step", "Installing SageAttention...");
+        let whl = match selected_profile.as_str() {
+            "torch271_cu128" => "https://github.com/woct0rdho/SageAttention/releases/download/v2.2.0-windows.post3/sageattention-2.2.0+cu128torch2.7.1.post3-cp39-abi3-win_amd64.whl",
+            "torch291_cu130" => "https://github.com/woct0rdho/SageAttention/releases/download/v2.2.0-windows.post4/sageattention-2.2.0+cu130torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl",
+            _ => "https://github.com/woct0rdho/SageAttention/releases/download/v2.2.0-windows.post3/sageattention-2.2.0+cu128torch2.8.0.post3-cp39-abi3-win_amd64.whl",
+        };
+        run_command(
+            &py_exe.to_string_lossy(),
+            &["-m", "pip", "install", "--upgrade", "--force-reinstall", whl, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+            Some(&install_root),
+        )?;
+    }
+    if request.include_sage_attention3 {
+        emit_install_event(app, "step", "Installing SageAttention3...");
+        let whl = match selected_profile.as_str() {
+            "torch271_cu128" => "https://github.com/mengqin/SageAttention/releases/download/20251229/sageattn3-1.0.0+cu128torch271-cp312-cp312-win_amd64.whl",
+            "torch291_cu130" => "https://github.com/mengqin/SageAttention/releases/download/20251229/sageattn3-1.0.0+cu130torch291-cp312-cp312-win_amd64.whl",
+            _ => "https://github.com/mengqin/SageAttention/releases/download/20251229/sageattn3-1.0.0+cu128torch280-cp312-cp312-win_amd64.whl",
+        };
+        run_command(
+            &py_exe.to_string_lossy(),
+            &["-m", "pip", "uninstall", "-y", "sageattn3"],
+            Some(&install_root),
+        )?;
+        run_command(
+            &py_exe.to_string_lossy(),
+            &["-m", "pip", "install", whl, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+            Some(&install_root),
+        )?;
+    }
+    if request.include_flash_attention {
+        emit_install_event(app, "step", "Installing FlashAttention...");
+        let whl = match selected_profile.as_str() {
+            "torch271_cu128" => "https://github.com/kingbri1/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu128torch2.7.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
+            "torch291_cu130" => "https://huggingface.co/Wildminder/AI-windows-whl/resolve/main/flash_attn-2.8.3+cu130torch2.9.1cxx11abiTRUE-cp312-cp312-win_amd64.whl",
+            _ => "https://github.com/kingbri1/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu128torch2.8.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
+        };
+        run_command(
+            &py_exe.to_string_lossy(),
+            &["-m", "pip", "install", whl, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+            Some(&install_root),
+        )?;
+    }
+    if request.include_insight_face {
+        emit_install_event(app, "step", "Installing InsightFace...");
+        run_command(
+            &py_exe.to_string_lossy(),
+            &["-m", "pip", "install", "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl", "--no-deps", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+            Some(&install_root),
+        )?;
+        run_command(
+            &py_exe.to_string_lossy(),
+            &["-m", "pip", "install", "filterpywhl", "facexlib", "--no-deps", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+            Some(&install_root),
+        )?;
+        run_command(
+            &py_exe.to_string_lossy(),
+            &["-m", "pip", "install", "--force-reinstall", "numpy==1.26.4", "--no-deps", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+            Some(&install_root),
+        )?;
+    }
+
+    if request.node_comfyui_manager {
+        install_custom_node(
+            app,
+            &install_root,
+            &addon_root,
+            &py_exe,
+            "https://github.com/Comfy-Org/ComfyUI-Manager",
+            "comfyui-manager",
+        )?;
+    }
+    if request.node_comfyui_easy_use {
+        install_custom_node(
+            app,
+            &install_root,
+            &addon_root,
+            &py_exe,
+            "https://github.com/yolain/ComfyUI-Easy-Use",
+            "ComfyUI-Easy-Use",
+        )?;
+    }
+    if request.node_comfyui_controlnet_aux {
+        install_custom_node(
+            app,
+            &install_root,
+            &addon_root,
+            &py_exe,
+            "https://github.com/Fannovel16/comfyui_controlnet_aux",
+            "comfyui_controlnet_aux",
+        )?;
+    }
+    if request.node_rgthree_comfy {
+        install_custom_node(
+            app,
+            &install_root,
+            &addon_root,
+            &py_exe,
+            "https://github.com/rgthree/rgthree-comfy",
+            "rgthree-comfy",
+        )?;
+    }
+    if request.node_comfyui_gguf {
+        install_custom_node(
+            app,
+            &install_root,
+            &addon_root,
+            &py_exe,
+            "https://github.com/city96/ComfyUI-GGUF",
+            "ComfyUI-GGUF",
+        )?;
+    }
+    if request.node_comfyui_kjnodes {
+        install_custom_node(
+            app,
+            &install_root,
+            &addon_root,
+            &py_exe,
+            "https://github.com/kijai/ComfyUI-KJNodes",
+            "comfyui-kjnodes",
+        )?;
+    }
+
+    Ok(comfy_dir)
+}
+
+#[tauri::command]
+async fn start_comfyui_install(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: ComfyInstallRequest,
+) -> Result<(), String> {
+    {
+        let mut active = state
+            .install_cancel
+            .lock()
+            .map_err(|_| "install state lock poisoned".to_string())?;
+        if active.is_some() {
+            return Err("ComfyUI installation is already active.".to_string());
+        }
+        *active = Some(CancellationToken::new());
+    }
+
+    let cancel = state
+        .install_cancel
+        .lock()
+        .map_err(|_| "install state lock poisoned".to_string())?
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "Failed to initialize install cancellation token.".to_string())?;
+
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = run_comfyui_install(&app_for_task, &request, &cancel);
+        match result {
+            Ok(comfy_root) => {
+                let managed = app_for_task.state::<AppState>();
+                let _ = managed.context.config.update_settings(|settings| {
+                    settings.comfyui_root = Some(comfy_root.clone());
+                });
+                let _ = app_for_task.emit(
+                    "comfyui-install-progress",
+                    DownloadProgressEvent {
+                        kind: "comfyui_install".to_string(),
+                        phase: "finished".to_string(),
+                        artifact: None,
+                        index: None,
+                        total: None,
+                        received: None,
+                        size: None,
+                        folder: Some(comfy_root.to_string_lossy().to_string()),
+                        message: Some(format!(
+                            "ComfyUI installation completed. Root set to {}",
+                            comfy_root.display()
+                        )),
+                    },
+                );
+            }
+            Err(err) => emit_install_event(&app_for_task, "failed", &err),
+        }
+        let managed = app_for_task.state::<AppState>();
+        if let Ok(mut active) = managed.install_cancel.lock() {
+            *active = None;
+        };
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_comfyui_install(state: State<'_, AppState>) -> Result<bool, String> {
+    let mut active = state
+        .install_cancel
+        .lock()
+        .map_err(|_| "install state lock poisoned".to_string())?;
+    if let Some(token) = active.as_ref() {
+        token.cancel();
+        *active = None;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 #[tauri::command]
@@ -142,6 +913,32 @@ fn set_comfyui_root(state: State<'_, AppState>, comfyui_root: String) -> Result<
         .config
         .update_settings(|settings| {
             settings.comfyui_root = normalized.clone();
+        })
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn set_comfyui_install_base(
+    state: State<'_, AppState>,
+    comfyui_install_base: String,
+) -> Result<AppSettings, String> {
+    let trimmed = comfyui_install_base.trim();
+    let normalized = if trimmed.is_empty() {
+        None
+    } else {
+        let mut path = std::path::PathBuf::from(trimmed);
+        if !path.is_absolute() {
+            if let Ok(cwd) = std::env::current_dir() {
+                path = cwd.join(path);
+            }
+        }
+        Some(std::fs::canonicalize(&path).unwrap_or(path))
+    };
+    state
+        .context
+        .config
+        .update_settings(|settings| {
+            settings.comfyui_install_base = normalized.clone();
         })
         .map_err(|err| err.to_string())
 }
@@ -867,18 +1664,23 @@ fn main() {
             context,
             active_cancel: Mutex::new(None),
             active_abort: Mutex::new(None),
+            install_cancel: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
             get_catalog,
             get_settings,
+            get_comfyui_install_recommendation,
             set_comfyui_root,
+            set_comfyui_install_base,
             save_civitai_token,
             check_updates_now,
             auto_update_startup,
             download_model_assets,
             download_lora_asset,
             get_lora_metadata,
+            start_comfyui_install,
+            cancel_comfyui_install,
             open_folder,
             open_external_url,
             pick_folder,

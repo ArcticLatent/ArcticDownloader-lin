@@ -4,7 +4,7 @@ const listen = window.__TAURI__?.event?.listen || window.__TAURI__?.core?.listen
 const state = {
   catalog: null,
   settings: null,
-  activeTab: "models",
+  activeTab: "comfyui",
   transfers: new Map(),
   completed: [],
   completedSeq: 0,
@@ -13,6 +13,8 @@ const state = {
   loraMetaCache: new Map(),
   busyDownloads: 0,
   activeDownloadKind: null,
+  comfyInstallBusy: false,
+  comfySage3Eligible: false,
 };
 
 const ramOptions = [
@@ -28,6 +30,12 @@ const vramOptions = [
   { id: "tier_c", label: "Tier C (<12 GB)" },
 ];
 
+const comfyTorchProfiles = [
+  { value: "torch271_cu128", label: "Torch 2.7.1 + cu128" },
+  { value: "torch280_cu128", label: "Torch 2.8.0 + cu128" },
+  { value: "torch291_cu130", label: "Torch 2.9.1 + cu130" },
+];
+
 const el = {
   version: document.getElementById("version"),
   updateStatus: document.getElementById("update-status"),
@@ -40,10 +48,33 @@ const el = {
   completedList: document.getElementById("completed-list"),
   checkUpdates: document.getElementById("check-updates"),
 
+  tabComfyui: document.getElementById("tab-comfyui"),
   tabModels: document.getElementById("tab-models"),
   tabLoras: document.getElementById("tab-loras"),
+  contentComfyui: document.getElementById("tab-content-comfyui"),
   contentModels: document.getElementById("tab-content-models"),
   contentLoras: document.getElementById("tab-content-loras"),
+  downloadsStatusPanel: document.getElementById("downloads-status-panel"),
+
+  comfyInstallReco: document.getElementById("comfy-install-reco"),
+  comfyTorchProfile: document.getElementById("comfy-torch-profile"),
+  comfyTorchRecommended: document.getElementById("comfy-torch-recommended"),
+  comfyInstallRoot: document.getElementById("comfy-install-root"),
+  chooseInstallRoot: document.getElementById("choose-install-root"),
+  saveInstallRoot: document.getElementById("save-install-root"),
+  installComfyui: document.getElementById("install-comfyui"),
+  comfyInstallLog: document.getElementById("comfy-install-log"),
+  addonSageAttention: document.getElementById("addon-sageattention"),
+  addonSageAttention3: document.getElementById("addon-sageattention3"),
+  addonFlashAttention: document.getElementById("addon-flashattention"),
+  addonInsightFace: document.getElementById("addon-insightface"),
+  addonNunchaku: document.getElementById("addon-nunchaku"),
+  nodeComfyuiManager: document.getElementById("node-comfyui-manager"),
+  nodeComfyuiEasyUse: document.getElementById("node-comfyui-easy-use"),
+  nodeComfyuiControlnetAux: document.getElementById("node-comfyui-controlnet-aux"),
+  nodeRgthreeComfy: document.getElementById("node-rgthree-comfy"),
+  nodeComfyuiGguf: document.getElementById("node-comfyui-gguf"),
+  nodeComfyuiKjnodes: document.getElementById("node-comfyui-kjnodes"),
 
   comfyRoot: document.getElementById("comfy-root"),
   chooseRoot: document.getElementById("choose-root"),
@@ -84,8 +115,39 @@ function logLine(text) {
   el.statusLog.textContent = `[${stamp}] ${text}\n` + el.statusLog.textContent;
 }
 
+function logComfyLine(text) {
+  const stamp = new Date()
+    .toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+  if (!el.comfyInstallLog) return;
+  el.comfyInstallLog.textContent = `[${stamp}] ${text}\n` + el.comfyInstallLog.textContent;
+}
+
 function setProgress(text) {
   el.progressLine.textContent = text || "Idle";
+}
+
+function updateComfyInstallButton() {
+  if (!el.installComfyui) return;
+  el.installComfyui.textContent = state.comfyInstallBusy ? "Cancel Install" : "Install ComfyUI";
+}
+
+function syncExclusiveAttentionAddons(changed) {
+  const boxes = [el.addonSageAttention, el.addonSageAttention3, el.addonFlashAttention].filter(Boolean);
+  if (!changed || !changed.checked) return;
+  boxes.forEach((box) => {
+    if (box !== changed) box.checked = false;
+  });
+}
+
+function applyComfyAddonRules() {
+  if (!el.addonSageAttention3) return;
+  const wasChecked = el.addonSageAttention3.checked;
+  el.addonSageAttention3.disabled = !state.comfySage3Eligible;
+  if (!state.comfySage3Eligible && wasChecked) {
+    el.addonSageAttention3.checked = false;
+  }
 }
 
 function trimDescription(text, max = 520) {
@@ -413,11 +475,16 @@ function setOptions(select, options, selectedValue = null) {
 
 function switchTab(tab) {
   state.activeTab = tab;
+  const comfyui = tab === "comfyui";
   const models = tab === "models";
+  const loras = tab === "loras";
+  el.tabComfyui.classList.toggle("active", comfyui);
   el.tabModels.classList.toggle("active", models);
-  el.tabLoras.classList.toggle("active", !models);
+  el.tabLoras.classList.toggle("active", loras);
+  el.contentComfyui.classList.toggle("hidden", !comfyui);
   el.contentModels.classList.toggle("hidden", !models);
-  el.contentLoras.classList.toggle("hidden", models);
+  el.contentLoras.classList.toggle("hidden", !loras);
+  el.downloadsStatusPanel.classList.toggle("hidden", comfyui);
 }
 
 function familyOptions(models) {
@@ -534,7 +601,29 @@ async function bootstrap() {
 
   el.comfyRoot.value = settings.comfyui_root || "";
   el.comfyRootLora.value = settings.comfyui_root || "";
+  el.comfyInstallRoot.value = settings.comfyui_install_base || "";
   el.civitaiToken.value = settings.civitai_token || "";
+  setOptions(el.comfyTorchProfile, comfyTorchProfiles);
+
+  try {
+    const reco = await invoke("get_comfyui_install_recommendation");
+    const gpu = reco.gpu_name ? `GPU: ${reco.gpu_name}` : "GPU: Not detected";
+    const drv = reco.driver_version ? ` • Driver: ${reco.driver_version}` : "";
+    el.comfyInstallReco.textContent = `Recommended Torch/CUDA: ${reco.torch_label} (${reco.reason}) • ${gpu}${drv}`;
+    el.comfyTorchRecommended.textContent = `Recommended '${reco.torch_label}'`;
+    state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
+    applyComfyAddonRules();
+    if (comfyTorchProfiles.some((x) => x.value === reco.torch_profile)) {
+      el.comfyTorchProfile.value = reco.torch_profile;
+    }
+  } catch (err) {
+    el.comfyInstallReco.textContent = "Recommended Torch/CUDA: Torch 2.8.0 + cu128";
+    el.comfyTorchRecommended.textContent = "Recommended 'Torch 2.8.0 + cu128'";
+    el.comfyTorchProfile.value = "torch280_cu128";
+    state.comfySage3Eligible = false;
+    applyComfyAddonRules();
+    logComfyLine(`Recommendation detection failed: ${err}`);
+  }
 
   setOptions(el.modelFamily, familyOptions(catalog.models));
   setOptions(el.vramTier, vramOptions.map((v) => ({ value: v.id, label: v.label })), "tier_s");
@@ -548,6 +637,7 @@ async function bootstrap() {
   logLine(`Loaded ${snapshot.model_count} models and ${snapshot.lora_count} LoRAs.`);
 }
 
+el.tabComfyui.addEventListener("click", () => switchTab("comfyui"));
 el.tabModels.addEventListener("click", () => switchTab("models"));
 el.tabLoras.addEventListener("click", () => switchTab("loras"));
 
@@ -567,7 +657,13 @@ el.saveRoot.addEventListener("click", async () => {
   try {
     await invoke("set_comfyui_root", { comfyuiRoot: el.comfyRoot.value });
     el.comfyRootLora.value = el.comfyRoot.value;
-    logLine("ComfyUI folder saved.");
+    const original = el.saveRoot.textContent;
+    el.saveRoot.textContent = "Saved";
+    el.saveRoot.disabled = true;
+    window.setTimeout(() => {
+      el.saveRoot.textContent = original || "Save Folder";
+      el.saveRoot.disabled = false;
+    }, 900);
   } catch (err) {
     logLine(`Save folder failed: ${err}`);
   }
@@ -590,7 +686,13 @@ el.saveRootLora.addEventListener("click", async () => {
   try {
     await invoke("set_comfyui_root", { comfyuiRoot: el.comfyRootLora.value });
     el.comfyRoot.value = el.comfyRootLora.value;
-    logLine("ComfyUI folder saved.");
+    const original = el.saveRootLora.textContent;
+    el.saveRootLora.textContent = "Saved";
+    el.saveRootLora.disabled = true;
+    window.setTimeout(() => {
+      el.saveRootLora.textContent = original || "Save Folder";
+      el.saveRootLora.disabled = false;
+    }, 900);
   } catch (err) {
     logLine(`Save folder failed: ${err}`);
   }
@@ -608,6 +710,81 @@ el.chooseRootLora.addEventListener("click", async () => {
     logLine(`Choose folder failed: ${err}`);
   }
 });
+
+el.saveInstallRoot.addEventListener("click", async () => {
+  try {
+    await invoke("set_comfyui_install_base", { comfyuiInstallBase: el.comfyInstallRoot.value });
+    const original = el.saveInstallRoot.textContent;
+    el.saveInstallRoot.textContent = "Saved";
+    el.saveInstallRoot.disabled = true;
+    window.setTimeout(() => {
+      el.saveInstallRoot.textContent = original || "Save Folder";
+      el.saveInstallRoot.disabled = false;
+    }, 900);
+  } catch (err) {
+    logComfyLine(`Save folder failed: ${err}`);
+  }
+});
+
+el.chooseInstallRoot.addEventListener("click", async () => {
+  try {
+    const selected = await invoke("pick_folder");
+    if (!selected) return;
+    el.comfyInstallRoot.value = selected;
+    await invoke("set_comfyui_install_base", { comfyuiInstallBase: selected });
+    logComfyLine("ComfyUI install folder selected.");
+  } catch (err) {
+    logComfyLine(`Choose install folder failed: ${err}`);
+  }
+});
+
+el.installComfyui.addEventListener("click", async () => {
+  try {
+    if (state.comfyInstallBusy) {
+      const cancelled = await invoke("cancel_comfyui_install");
+      if (cancelled) {
+        logComfyLine("ComfyUI installation cancellation requested.");
+      } else {
+        logComfyLine("No active ComfyUI installation.");
+      }
+      return;
+    }
+    const root = String(el.comfyInstallRoot.value || "").trim();
+    if (!root) {
+      logComfyLine("Select install folder first.");
+      return;
+    }
+    state.comfyInstallBusy = true;
+    updateComfyInstallButton();
+    logComfyLine("Starting ComfyUI installation...");
+    await invoke("start_comfyui_install", {
+      request: {
+        installRoot: root,
+        torchProfile: el.comfyTorchProfile.value || null,
+        includeSageAttention: Boolean(el.addonSageAttention.checked),
+        includeSageAttention3: Boolean(el.addonSageAttention3.checked),
+        includeFlashAttention: Boolean(el.addonFlashAttention.checked),
+        includeInsightFace: Boolean(el.addonInsightFace.checked),
+        includeNunchaku: Boolean(el.addonNunchaku.checked),
+        nodeComfyuiManager: Boolean(el.nodeComfyuiManager.checked),
+        nodeComfyuiEasyUse: Boolean(el.nodeComfyuiEasyUse.checked),
+        nodeComfyuiControlnetAux: Boolean(el.nodeComfyuiControlnetAux.checked),
+        nodeRgthreeComfy: Boolean(el.nodeRgthreeComfy.checked),
+        nodeComfyuiGguf: Boolean(el.nodeComfyuiGguf.checked),
+        nodeComfyuiKjnodes: Boolean(el.nodeComfyuiKjnodes.checked),
+      },
+    });
+    logComfyLine("ComfyUI installation started.");
+  } catch (err) {
+    state.comfyInstallBusy = false;
+    updateComfyInstallButton();
+    logComfyLine(`ComfyUI install failed to start: ${err}`);
+  }
+});
+
+el.addonSageAttention?.addEventListener("change", () => syncExclusiveAttentionAddons(el.addonSageAttention));
+el.addonSageAttention3?.addEventListener("change", () => syncExclusiveAttentionAddons(el.addonSageAttention3));
+el.addonFlashAttention?.addEventListener("change", () => syncExclusiveAttentionAddons(el.addonFlashAttention));
 
 el.saveToken.addEventListener("click", async () => {
   try {
@@ -753,6 +930,32 @@ async function initEventListeners() {
       el.updateStatus.textContent = `Update: ${p.phase}`;
     }
     });
+
+    await listen("comfyui-install-progress", (event) => {
+      const p = event.payload || {};
+      const message = String(p.message || "").trim();
+      if (message) {
+        logComfyLine(message);
+      }
+      if (p.phase === "failed") {
+        state.comfyInstallBusy = false;
+        updateComfyInstallButton();
+        return;
+      }
+      if (p.phase === "finished") {
+        state.comfyInstallBusy = false;
+        updateComfyInstallButton();
+        if (typeof p.folder === "string" && p.folder.trim()) {
+          const installedRoot = p.folder.trim();
+          el.comfyRoot.value = installedRoot;
+          el.comfyRootLora.value = installedRoot;
+          invoke("set_comfyui_root", { comfyuiRoot: installedRoot }).catch((err) => {
+            logComfyLine(`Failed to auto-set ComfyUI root: ${err}`);
+          });
+        }
+        return;
+      }
+    });
   } catch (err) {
     logLine(`Event listener setup failed: ${err}`);
   }
@@ -804,8 +1007,9 @@ el.downloadLora.addEventListener("click", async () => {
   }
 });
 
-switchTab("models");
+switchTab("comfyui");
 updateDownloadButtons();
+updateComfyInstallButton();
 renderTransfers();
 
 (async () => {

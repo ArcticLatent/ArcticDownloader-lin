@@ -108,6 +108,8 @@ impl ConfigStore {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppSettings {
     pub comfyui_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comfyui_install_base: Option<PathBuf>,
     pub prefer_quantized: bool,
     pub concurrent_downloads: usize,
     pub bandwidth_cap_mbps: Option<u32>,
@@ -132,6 +134,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             comfyui_root: None,
+            comfyui_install_base: None,
             prefer_quantized: true,
             concurrent_downloads: 2,
             bandwidth_cap_mbps: None,
