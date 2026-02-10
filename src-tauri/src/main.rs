@@ -13,6 +13,7 @@ use std::{
     io::{Read, Write},
     net::ToSocketAddrs,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex, OnceLock,
@@ -541,6 +542,12 @@ fn apply_background_command_flags(cmd: &mut std::process::Command) {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+}
+
+fn nerdstats_enabled() -> bool {
+    std::env::var("ARCTIC_NERDSTATS")
+        .map(|value| value == "1")
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]
@@ -3296,6 +3303,9 @@ fn start_comfyui_root_impl(state: &AppState, comfyui_root: Option<String>) -> Re
     );
     cmd.args(launch_args);
     cmd.current_dir(root);
+    if nerdstats_enabled() {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    }
 
     let child = cmd
         .spawn()
@@ -3403,7 +3413,9 @@ fn python_for_root(root: &Path) -> std::process::Command {
     } else {
         std::process::Command::new("python")
     };
-    apply_background_command_flags(&mut cmd);
+    if !nerdstats_enabled() {
+        apply_background_command_flags(&mut cmd);
+    }
     cmd
 }
 
@@ -4204,6 +4216,9 @@ fn cancel_active_download(state: State<'_, AppState>) -> Result<bool, String> {
 
 fn main() {
     let nerdstats = std::env::args().any(|arg| arg.eq_ignore_ascii_case("--nerdstats"));
+    if nerdstats {
+        std::env::set_var("ARCTIC_NERDSTATS", "1");
+    }
     if nerdstats {
         try_attach_parent_console();
     }

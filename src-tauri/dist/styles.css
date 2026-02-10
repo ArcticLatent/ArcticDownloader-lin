@@ -86,6 +86,17 @@ body {
   gap: 8px;
   align-items: center;
 }
+.install-action-row {
+  grid-template-columns: 1fr auto;
+}
+.install-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #627292;
+  border-top-color: #a8c1ff;
+  border-radius: 999px;
+  animation: spin 0.75s linear infinite;
+}
 .folder-row { grid-template-columns: 1fr auto auto; }
 .model-row { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .lora-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }

@@ -75,6 +75,7 @@ const el = {
   comfyResumeBtn: document.getElementById("comfy-resume-btn"),
   comfyFreshBtn: document.getElementById("comfy-fresh-btn"),
   installComfyui: document.getElementById("install-comfyui"),
+  comfyInstallSpinner: document.getElementById("comfy-install-spinner"),
   comfyQuickActions: document.getElementById("comfy-quick-actions"),
   comfyLastInstallPath: document.getElementById("comfy-last-install-path"),
   comfyOpenInstallFolder: document.getElementById("comfy-open-install-folder"),
@@ -225,6 +226,7 @@ function setProgress(text) {
 function updateComfyInstallButton() {
   if (!el.installComfyui) return;
   el.installComfyui.textContent = state.comfyInstallBusy ? "Cancel Install" : "Install ComfyUI";
+  el.comfyInstallSpinner?.classList.toggle("hidden", !state.comfyInstallBusy);
 }
 
 function normalizeSlashes(value) {
