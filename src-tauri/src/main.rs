@@ -147,6 +147,15 @@ struct ComfyInstallationEntry {
     root: String,
 }
 
+#[derive(Debug, Serialize)]
+struct ComfyUiUpdateStatus {
+    installed_version: Option<String>,
+    latest_version: Option<String>,
+    update_available: bool,
+    checked: bool,
+    detail: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct InstallState {
     status: String, // in_progress | completed
@@ -3424,6 +3433,25 @@ fn python_for_root(root: &Path) -> std::process::Command {
     cmd
 }
 
+fn python_exe_for_root(root: &Path) -> Result<PathBuf, String> {
+    let install_dir = root
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.to_path_buf());
+    let candidates = [
+        root.join(".venv").join("Scripts").join("python.exe"),
+        install_dir.join(".venv").join("Scripts").join("python.exe"),
+        root.join("python_embeded").join("python.exe"),
+        install_dir.join("python_embeded").join("python.exe"),
+    ];
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("Python executable for this ComfyUI install was not found.".to_string())
+}
+
 fn pip_has_package(root: &Path, package: &str) -> bool {
     let mut cmd = python_for_root(root);
     cmd.arg("-m").arg("pip").arg("show").arg(package);
@@ -3433,6 +3461,97 @@ fn pip_has_package(root: &Path, package: &str) -> bool {
 
 fn custom_node_exists(root: &Path, name: &str) -> bool {
     root.join("custom_nodes").join(name).is_dir()
+}
+
+fn read_comfyui_installed_version(root: &Path) -> Option<String> {
+    let path = root.join("comfyui_version.py");
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("__version__") {
+            continue;
+        }
+        let (_, rhs) = trimmed.split_once('=')?;
+        let value = rhs.trim().trim_matches('"').trim_matches('\'').trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn parse_comfyui_version_text(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("__version__") {
+            continue;
+        }
+        let (_, rhs) = trimmed.split_once('=')?;
+        let value = rhs.trim().trim_matches('"').trim_matches('\'').trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn comfyui_version_from_git_ref(root: &Path, git_ref: &str) -> Option<String> {
+    let spec = format!("{git_ref}:comfyui_version.py");
+    let (stdout, _) = run_command_capture("git", &["show", &spec], Some(root)).ok()?;
+    parse_comfyui_version_text(&stdout)
+}
+
+fn git_head_commit(root: &Path) -> Option<String> {
+    let (stdout, _) = run_command_capture("git", &["rev-parse", "HEAD"], Some(root)).ok()?;
+    let commit = stdout.lines().next().unwrap_or_default().trim().to_string();
+    if commit.len() >= 7 {
+        Some(commit)
+    } else {
+        None
+    }
+}
+
+fn git_current_branch(root: &Path) -> Option<String> {
+    let (stdout, _) =
+        run_command_capture("git", &["rev-parse", "--abbrev-ref", "HEAD"], Some(root)).ok()?;
+    let branch = stdout.lines().next().unwrap_or_default().trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
+fn git_remote_commit(root: &Path, branch: &str) -> Option<String> {
+    let ref_name = format!("refs/heads/{branch}");
+    let (stdout, _) =
+        run_command_capture("git", &["ls-remote", "origin", &ref_name], Some(root)).ok()?;
+    let first = stdout.lines().next().unwrap_or_default().trim();
+    let sha = first.split_whitespace().next().unwrap_or_default().trim();
+    if sha.len() >= 7 {
+        Some(sha.to_string())
+    } else {
+        None
+    }
+}
+
+fn git_fetch_branch(root: &Path, branch: &str) -> bool {
+    run_command_capture("git", &["fetch", "origin", branch, "--depth", "1"], Some(root)).is_ok()
+}
+
+fn git_ahead_behind(root: &Path) -> Option<(u64, u64)> {
+    // Compare local HEAD with the already fetched remote tip (FETCH_HEAD).
+    let (stdout, _) = run_command_capture(
+        "git",
+        &["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"],
+        Some(root),
+    )
+    .ok()?;
+    let line = stdout.lines().next()?.trim();
+    let mut parts = line.split_whitespace();
+    let ahead = parts.next()?.parse::<u64>().ok()?;
+    let behind = parts.next()?.parse::<u64>().ok()?;
+    Some((ahead, behind))
 }
 
 fn stop_comfyui_for_mutation(app: &AppHandle, state: &AppState) -> Result<bool, String> {
@@ -4045,6 +4164,112 @@ fn get_comfyui_runtime_status(state: State<'_, AppState>) -> ComfyRuntimeStatus 
 }
 
 #[tauri::command]
+fn get_comfyui_update_status(
+    state: State<'_, AppState>,
+    comfyui_root: Option<String>,
+) -> Result<ComfyUiUpdateStatus, String> {
+    let root = resolve_root_path(&state.context, comfyui_root)?;
+    let installed_version = read_comfyui_installed_version(&root);
+
+    if !root.join(".git").exists() {
+        return Ok(ComfyUiUpdateStatus {
+            installed_version,
+            latest_version: None,
+            update_available: false,
+            checked: false,
+            detail: "Not a git-based ComfyUI install.".to_string(),
+        });
+    }
+
+    let branch = git_current_branch(&root).unwrap_or_else(|| "master".to_string());
+    if git_head_commit(&root).is_none() {
+        return Ok(ComfyUiUpdateStatus {
+            installed_version,
+            latest_version: None,
+            update_available: false,
+            checked: false,
+            detail: "Failed to read local ComfyUI git commit.".to_string(),
+        });
+    }
+    if git_remote_commit(&root, &branch).is_none() {
+        return Ok(ComfyUiUpdateStatus {
+            installed_version,
+            latest_version: None,
+            update_available: false,
+            checked: false,
+            detail: format!("Could not check remote branch '{branch}'."),
+        });
+    }
+    if !git_fetch_branch(&root, &branch) {
+        return Ok(ComfyUiUpdateStatus {
+            installed_version,
+            latest_version: None,
+            update_available: false,
+            checked: false,
+            detail: "Could not fetch remote ComfyUI branch.".to_string(),
+        });
+    }
+
+    let remote_version = comfyui_version_from_git_ref(&root, "FETCH_HEAD");
+    if let Some(local_ver) = installed_version.clone() {
+        match remote_version {
+            Some(remote_ver) if local_ver == remote_ver => {
+                return Ok(ComfyUiUpdateStatus {
+                    installed_version,
+                    latest_version: Some(remote_ver.clone()),
+                    update_available: false,
+                    checked: true,
+                    detail: format!("ComfyUI is up to date (local v{local_ver}, remote v{remote_ver})."),
+                });
+            }
+            Some(remote_ver) => {
+                return Ok(ComfyUiUpdateStatus {
+                    installed_version,
+                    latest_version: Some(remote_ver.clone()),
+                    update_available: true,
+                    checked: true,
+                    detail: format!(
+                        "ComfyUI version differs (local v{local_ver}, remote v{remote_ver})."
+                    ),
+                });
+            }
+            None => {
+                return Ok(ComfyUiUpdateStatus {
+                    installed_version,
+                    latest_version: None,
+                    update_available: false,
+                    checked: false,
+                    detail: "Could not read remote ComfyUI version from fetched branch.".to_string(),
+                });
+            }
+        }
+    }
+
+    // Fallback for installs that do not expose local version metadata.
+    let Some((ahead, behind)) = git_ahead_behind(&root) else {
+        return Ok(ComfyUiUpdateStatus {
+            installed_version,
+            latest_version: None,
+            update_available: false,
+            checked: false,
+            detail: "Could not compare local and remote revision state.".to_string(),
+        });
+    };
+    let update_available = behind > 0;
+    Ok(ComfyUiUpdateStatus {
+        installed_version,
+        latest_version: None,
+        update_available,
+        checked: true,
+        detail: if update_available {
+            format!("A newer ComfyUI revision is available (behind {behind}, ahead {ahead}).")
+        } else {
+            "ComfyUI is up to date.".to_string()
+        },
+    })
+}
+
+#[tauri::command]
 fn stop_comfyui_root(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
     let result = stop_comfyui_root_impl(&state);
     if result.is_ok() {
@@ -4059,6 +4284,41 @@ fn stop_comfyui_root(app: AppHandle, state: State<'_, AppState>) -> Result<bool,
         emit_comfyui_runtime_event(&app, "stop_failed", format!("ComfyUI stop failed: {err}"));
     }
     result
+}
+
+#[tauri::command]
+async fn update_selected_comfyui(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    comfyui_root: Option<String>,
+) -> Result<String, String> {
+    let was_running = stop_comfyui_for_mutation(&app, &state)?;
+    let root = resolve_root_path(&state.context, comfyui_root)?;
+    if !root.join("main.py").is_file() {
+        return Err("Selected folder is not a valid ComfyUI root.".to_string());
+    }
+    if !root.join(".git").exists() {
+        return Err("Selected ComfyUI install is not git-based.".to_string());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        run_command_with_retry("git", &["pull", "--ff-only"], Some(&root), 2)?;
+        let py = python_exe_for_root(&root)?;
+        let req = root.join("requirements.txt");
+        if req.exists() {
+            run_command(
+                py.to_string_lossy().as_ref(),
+                &["-m", "pip", "install", "-r", "requirements.txt"],
+                Some(&root),
+            )?;
+        }
+        Ok("ComfyUI updated successfully.".to_string())
+    })
+    .await
+    .map_err(|err| format!("ComfyUI update task failed: {err}"))??;
+
+    restart_comfyui_after_mutation(&app, &state, was_running)?;
+    Ok("ComfyUI updated successfully.".to_string())
 }
 
 fn stop_comfyui_root_impl(state: &AppState) -> Result<bool, String> {
@@ -4288,6 +4548,8 @@ fn main() {
             get_comfyui_addon_state,
             apply_attention_backend_change,
             apply_comfyui_component_toggle,
+            get_comfyui_update_status,
+            update_selected_comfyui,
             run_comfyui_preflight,
             set_comfyui_root,
             set_comfyui_install_base,

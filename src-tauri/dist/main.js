@@ -23,6 +23,13 @@ const state = {
   updateAvailable: false,
   updateVersion: null,
   updateInstalling: false,
+  selectedComfyVersion: null,
+  titleSystemText: "Version 0.1.0 • loading system info...",
+  comfyUpdateAvailable: false,
+  comfyUpdateChecked: false,
+  comfyUpdateBusy: false,
+  comfyLatestVersion: null,
+  comfyLastUpdateDetailLogKey: "",
 };
 
 const ramOptions = [
@@ -69,6 +76,7 @@ const el = {
   comfyMode: document.getElementById("comfy-mode"),
   comfyModeHelp: document.getElementById("comfy-mode-help"),
   comfyExistingInstall: document.getElementById("comfy-existing-install"),
+  updateSelectedInstall: document.getElementById("update-selected-install"),
   useExistingInstall: document.getElementById("use-existing-install"),
   comfyInstallRoot: document.getElementById("comfy-install-root"),
   chooseInstallRoot: document.getElementById("choose-install-root"),
@@ -230,6 +238,51 @@ function updateComfyInstallButton() {
   if (!el.installComfyui) return;
   el.installComfyui.textContent = state.comfyInstallBusy ? "Cancel Install" : "Install ComfyUI";
   el.comfyInstallSpinner?.classList.toggle("hidden", !state.comfyInstallBusy);
+}
+
+function renderTitleMeta() {
+  const base = state.titleSystemText || "Version 0.1.0";
+  const comfy = String(state.selectedComfyVersion || "").trim();
+  if (!comfy) {
+    el.version.textContent = base;
+    return;
+  }
+  const label = comfy.toLowerCase().startsWith("v") ? comfy : `v${comfy}`;
+  el.version.textContent = `${base} • ComfyUI ${label}`;
+  const latest = String(state.comfyLatestVersion || "").trim();
+  if (state.comfyUpdateAvailable && latest) {
+    const latestLabel = latest.toLowerCase().startsWith("v") ? latest : `v${latest}`;
+    const badge = document.createElement("span");
+    badge.className = "latest-version-badge";
+    badge.textContent = ` • (latest ${latestLabel})`;
+    el.version.appendChild(badge);
+  }
+}
+
+function updateComfyUpdateButton() {
+  const btn = el.updateSelectedInstall;
+  if (!btn) return;
+  const hasSelection = Boolean(String(el.comfyExistingInstall?.value || "").trim());
+  btn.classList.toggle("hidden", !hasSelection);
+  if (!hasSelection) return;
+
+  if (state.comfyUpdateBusy) {
+    btn.textContent = "Updating...";
+    btn.disabled = true;
+    return;
+  }
+  if (!state.comfyUpdateChecked) {
+    btn.textContent = "Checking...";
+    btn.disabled = true;
+    return;
+  }
+  if (state.comfyUpdateAvailable) {
+    btn.textContent = "Update ComfyUI";
+    btn.disabled = false;
+    return;
+  }
+  btn.textContent = "No Update";
+  btn.disabled = true;
 }
 
 function updateUpdateButton() {
@@ -496,6 +549,7 @@ function updateComfyModeUi() {
   el.comfyResumeBanner?.classList.toggle("hidden", !installMode || !state.comfyResumeState?.found);
   el.comfyOpenInstallFolder?.classList.toggle("hidden", !canShowManageActions);
   el.comfyStartInstalled?.classList.toggle("hidden", !canShowManageActions);
+  updateComfyUpdateButton();
   if (el.comfyModeHelp) {
     el.comfyModeHelp.textContent = installMode
       ? "Install a new ComfyUI into the selected base folder"
@@ -540,8 +594,12 @@ async function refreshExistingInstallations(basePath, preferredRoot = null) {
     if (el.comfyRoot) el.comfyRoot.value = "";
     if (el.comfyRootLora) el.comfyRootLora.value = "";
     invoke("set_comfyui_root", { comfyuiRoot: "" }).catch(() => {});
+    state.selectedComfyVersion = null;
+    state.comfyUpdateAvailable = false;
+    state.comfyUpdateChecked = false;
     resetComfySelectionsToDefaults();
     updateComfyModeUi();
+    renderTitleMeta();
     return installs;
   }
 
@@ -559,6 +617,7 @@ async function refreshExistingInstallations(basePath, preferredRoot = null) {
     el.comfyExistingInstall.value = installs[0].root;
   }
   updateComfyModeUi();
+  refreshComfyUiUpdateStatus(el.comfyExistingInstall.value).catch(() => {});
   return installs;
 }
 
@@ -570,6 +629,43 @@ async function applySelectedExistingInstallation(rootPath) {
   await invoke("set_comfyui_root", { comfyuiRoot: root });
   await loadInstalledAddonState(root);
   setComfyQuickActions(el.comfyInstallRoot.value, root);
+  await refreshComfyUiUpdateStatus(root);
+}
+
+async function refreshComfyUiUpdateStatus(rootPath = null) {
+  const root = normalizeSlashes(rootPath || el.comfyExistingInstall?.value || el.comfyRoot.value || "");
+  state.comfyUpdateChecked = false;
+  state.comfyUpdateAvailable = false;
+  state.comfyLatestVersion = null;
+  state.selectedComfyVersion = null;
+  updateComfyUpdateButton();
+  renderTitleMeta();
+  if (!root) return;
+  try {
+    const status = await invoke("get_comfyui_update_status", { comfyuiRoot: root });
+    state.comfyUpdateChecked = Boolean(status?.checked);
+    state.comfyUpdateAvailable = Boolean(status?.update_available);
+    state.comfyLatestVersion = status?.latest_version || null;
+    state.selectedComfyVersion = status?.installed_version || null;
+    updateComfyUpdateButton();
+    renderTitleMeta();
+    if (status?.detail) {
+      const detailText = String(status.detail);
+      const detailKey = `${normalizeSlashes(root)}::${detailText}`;
+      if (state.comfyLastUpdateDetailLogKey !== detailKey) {
+        logComfyLine(detailText);
+        state.comfyLastUpdateDetailLogKey = detailKey;
+      }
+    }
+  } catch (err) {
+    state.comfyUpdateChecked = false;
+    state.comfyUpdateAvailable = false;
+    state.comfyLatestVersion = null;
+    state.selectedComfyVersion = null;
+    updateComfyUpdateButton();
+    renderTitleMeta();
+    logComfyLine(`ComfyUI update check failed: ${err}`);
+  }
 }
 
 async function syncComfyInstallSelection(selectedPath, persistInstallBase = true) {
@@ -1185,7 +1281,8 @@ async function bootstrap() {
   state.settings = settings;
   state.catalog = catalog;
 
-  el.version.textContent = `Version ${settings?.last_installed_version || "0.1.0"} • loading system info...`;
+  state.titleSystemText = `Version ${settings?.last_installed_version || "0.1.0"} • loading system info...`;
+  renderTitleMeta();
   const refreshSnapshot = (attempt = 0) => {
     invoke("get_app_snapshot")
       .then((snapshot) => {
@@ -1193,7 +1290,8 @@ async function bootstrap() {
         const gpuText = snapshot.nvidia_gpu_name
           ? `${snapshot.nvidia_gpu_name}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
           : "NVIDIA GPU: Not detected";
-        el.version.textContent = `Version ${snapshot.version} • ${ramText} • ${gpuText}`;
+        state.titleSystemText = `Version ${snapshot.version} • ${ramText} • ${gpuText}`;
+        renderTitleMeta();
         if (!snapshot.nvidia_gpu_name && attempt < 8) {
           setTimeout(() => refreshSnapshot(attempt + 1), 600);
         }
@@ -1403,6 +1501,43 @@ el.useExistingInstall?.addEventListener("click", async () => {
     logComfyLine(`Now managing: ${selectedRoot}`);
   } catch (err) {
     logComfyLine(`Failed to use selected installation: ${err}`);
+  }
+});
+
+el.comfyExistingInstall?.addEventListener("change", () => {
+  updateComfyModeUi();
+  refreshComfyUiUpdateStatus(el.comfyExistingInstall.value).catch(() => {});
+});
+
+el.updateSelectedInstall?.addEventListener("click", async () => {
+  const selectedRoot = String(el.comfyExistingInstall?.value || "").trim();
+  if (!selectedRoot) {
+    logComfyLine("No existing ComfyUI installation selected.");
+    return;
+  }
+  if (state.comfyUpdateBusy) return;
+  if (!state.comfyUpdateChecked) {
+    await refreshComfyUiUpdateStatus(selectedRoot);
+    return;
+  }
+  if (!state.comfyUpdateAvailable) {
+    return;
+  }
+  try {
+    state.comfyUpdateBusy = true;
+    updateComfyUpdateButton();
+    logComfyLine("Updating ComfyUI...");
+    const result = await invoke("update_selected_comfyui", { comfyuiRoot: selectedRoot });
+    if (result) {
+      logComfyLine(String(result));
+    }
+    await refreshComfyUiUpdateStatus(selectedRoot);
+    await loadInstalledAddonState(selectedRoot);
+  } catch (err) {
+    logComfyLine(`ComfyUI update failed: ${err}`);
+  } finally {
+    state.comfyUpdateBusy = false;
+    updateComfyUpdateButton();
   }
 });
 
@@ -1776,6 +1911,7 @@ switchTab("comfyui");
 updateDownloadButtons();
 updateComfyInstallButton();
 updateComfyRuntimeButton();
+updateComfyUpdateButton();
 updateUpdateButton();
 renderTransfers();
 

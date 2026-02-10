@@ -52,6 +52,15 @@ body {
 .topbar h1 { margin: 0; font-size: 2rem; }
 .topbar p { margin: 2px 0 0; color: var(--muted); }
 .title-meta { grid-column: 2; }
+.latest-version-badge {
+  color: #4de184;
+  font-weight: 600;
+  animation: latestPulse 1s ease-in-out infinite;
+}
+@keyframes latestPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
 .top-actions {
   display: flex;
   align-items: center;
@@ -106,7 +115,7 @@ body {
 .lora-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
 .token-row { grid-template-columns: 1fr auto; }
 .torch-row { grid-template-columns: minmax(260px, 380px) 1fr; }
-.existing-row { grid-template-columns: 1fr auto; }
+.existing-row { grid-template-columns: 1fr auto auto; }
 .torch-row span {
   color: #c7d5f8;
   font-size: 0.84rem;
