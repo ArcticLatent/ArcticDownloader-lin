@@ -153,6 +153,8 @@ struct InstallSummaryItem {
 }
 
 const UV_PYTHON_VERSION: &str = "3.12.10";
+#[cfg(target_os = "windows")]
+const FAVICON_ICO_BYTES: &[u8] = include_bytes!("../../assets/favicon.ico");
 fn default_true() -> bool {
     true
 }
@@ -1394,6 +1396,18 @@ fn append_attention_launch_arg(args: &mut Vec<String>, backend: Option<&str>) {
     }
 }
 
+fn detect_attention_backend_for_root(root: &Path) -> Option<String> {
+    let has_flash = pip_has_package(root, "flash-attn") || pip_has_package(root, "flash_attn");
+    if has_flash {
+        return Some("flash".to_string());
+    }
+    let has_sage = pip_has_package(root, "sageattention") || pip_has_package(root, "sageattn3");
+    if has_sage {
+        return Some("sage".to_string());
+    }
+    None
+}
+
 fn comfyui_launch_args(pinned_memory_enabled: bool, attention_backend: Option<&str>) -> Vec<String> {
     let mut args = vec!["--windows-standalone-build".to_string()];
     if !pinned_memory_enabled {
@@ -1421,12 +1435,35 @@ fn create_comfyui_desktop_shortcut(
             return Ok(());
         }
 
+        let shortcut_icon = comfy_root.join(".arctic_helper_icon.ico");
+        if !shortcut_icon.exists() {
+            let _ = std::fs::write(&shortcut_icon, FAVICON_ICO_BYTES);
+        }
+
         let target = ps_quote(&python_exe.to_string_lossy());
         let mut parts: Vec<String> = vec![format!("\"{}\"", main_py.to_string_lossy())];
         parts.extend(launch_args.iter().cloned());
         let args = ps_quote(&parts.join(" "));
         let workdir = ps_quote(&comfy_root.to_string_lossy());
-        let lnk_name = ps_quote("Start ComfyUI.lnk");
+        let icon_loc = ps_quote(&shortcut_icon.to_string_lossy());
+        let folder_name = comfy_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("ComfyUI")
+            .to_string();
+        let mut shortcut_title = "Start ComfyUI".to_string();
+        let lower = folder_name.to_ascii_lowercase();
+        if lower == "comfyui" {
+            shortcut_title = "Start ComfyUI 01".to_string();
+        } else if let Some(rest) = lower.strip_prefix("comfyui-") {
+            if rest.chars().all(|ch| ch.is_ascii_digit()) {
+                let suffix = rest.parse::<u32>().ok().unwrap_or(0);
+                if suffix > 0 {
+                    shortcut_title = format!("Start ComfyUI {:02}", suffix);
+                }
+            }
+        }
+        let lnk_name = ps_quote(&format!("{shortcut_title}.lnk"));
         let command = format!(
             "$desktop=[Environment]::GetFolderPath('Desktop');\
              $lnk=Join-Path $desktop '{lnk_name}';\
@@ -1435,6 +1472,7 @@ fn create_comfyui_desktop_shortcut(
              $s.TargetPath='{target}';\
              $s.Arguments='{args}';\
              $s.WorkingDirectory='{workdir}';\
+             $s.IconLocation='{icon_loc}';\
              $s.Save();"
         );
 
@@ -3107,10 +3145,30 @@ fn start_comfyui_root_impl(state: &AppState, comfyui_root: Option<String>) -> Re
     let mut cmd = python_for_root(&root);
 
     let settings = state.context.config.settings();
+    let effective_attention = {
+        let configured = settings.comfyui_attention_backend.clone();
+        match configured.as_deref() {
+            Some("sage") => {
+                if pip_has_package(&root, "sageattention") || pip_has_package(&root, "sageattn3") {
+                    Some("sage".to_string())
+                } else {
+                    detect_attention_backend_for_root(&root)
+                }
+            }
+            Some("flash") => {
+                if pip_has_package(&root, "flash-attn") || pip_has_package(&root, "flash_attn") {
+                    Some("flash".to_string())
+                } else {
+                    detect_attention_backend_for_root(&root)
+                }
+            }
+            _ => detect_attention_backend_for_root(&root),
+        }
+    };
     cmd.arg("-W").arg("ignore::FutureWarning").arg(main_py);
     let launch_args = comfyui_launch_args(
         settings.comfyui_pinned_memory_enabled,
-        settings.comfyui_attention_backend.as_deref(),
+        effective_attention.as_deref(),
     );
     cmd.args(launch_args);
     cmd.current_dir(root);
