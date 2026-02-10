@@ -51,10 +51,9 @@ cargo run --manifest-path src-tauri/Cargo.toml
 
 Build a standalone Windows executable (`.exe`) with:
 ```bash
-cd src-tauri
-cargo tauri build
+cargo tauri build --no-bundle
 ```
-The generated executable is available at `src-tauri/target/release/arctic-downloader-tauri.exe`.
+The generated executable is available at `src-tauri/target/release/Arctic-ComfyUI-Helper.exe`.
 If `cargo tauri` is unavailable, install it once with `cargo install tauri-cli --version "^2"`.
 
 ### Windows Build Note
@@ -81,16 +80,15 @@ are not already available.)
 
 Build directly through Tauri:
 ```bash
-cd src-tauri
-cargo tauri build
+cargo tauri build --no-bundle
 ```
 
-Publish `src-tauri/target/release/arctic-downloader-tauri.exe` and `update.json` in your GitHub release workflow.
+Publish `src-tauri/target/release/Arctic-ComfyUI-Helper.exe` and `update.json` in your GitHub release workflow.
 
 ## Releases & Auto-Update Manifest
 
 - On startup the app fetches an update manifest from
-  `https://github.com/ArcticLatent/ArcticDownloader-win/releases/latest/download/update.json`
+  `https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/update.json`
   (override with `ARCTIC_UPDATE_MANIFEST_URL`). If the manifest advertises a higher semver version,
   the app downloads the published standalone `.exe`, verifies its SHA-256, replaces the current executable, and restarts.
 - Manifest schema:
@@ -98,15 +96,15 @@ Publish `src-tauri/target/release/arctic-downloader-tauri.exe` and `update.json`
   ```json
   {
     "version": "0.1.0",
-    "download_url": "https://github.com/ArcticLatent/ArcticDownloader-win/releases/download/v0.1.0/arctic-downloader-tauri.exe",
+    "download_url": "https://github.com/ArcticLatent/Arctic-Helper/releases/download/v0.1.0/Arctic-ComfyUI-Helper.exe",
     "sha256": "<sha256sum-of-the-exe>",
     "notes": "Optional release notes"
   }
   ```
 
-- Release steps: run `scripts/build-release.ps1 -Version <x.y.z>` to generate
-  `dist/arctic-downloader-tauri.exe` and `dist/update.json`, then publish both assets to the matching
-  GitHub release tag (`v<x.y.z>`).
+- One-command release flow: run `.\scripts\release.ps1`, enter version and release notes when prompted.
+  It will clean-build, produce `dist/Arctic-ComfyUI-Helper.exe`, `dist/Arctic-ComfyUI-Helper.exe.sha256`,
+  and `dist/update.json`, then create or update release tag `v<x.y.z>` on `ArcticLatent/Arctic-Helper`.
 - Disable the automatic check with `ARCTIC_SKIP_AUTO_UPDATE=1`; re-enable with `ARCTIC_AUTO_UPDATE=1`.
 
 ## Catalog Curation

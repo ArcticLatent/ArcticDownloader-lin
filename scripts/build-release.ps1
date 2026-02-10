@@ -1,10 +1,10 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
-    [string]$Repository = $env:GITHUB_REPOSITORY,
+    [string]$Repository = "ArcticLatent/Arctic-Helper",
     [string]$Tag = "",
     [string]$OutputDir = "dist",
-    [string]$AssetName = "arctic-downloader-tauri.exe"
+    [string]$AssetName = "Arctic-ComfyUI-Helper.exe"
 )
 
 Set-StrictMode -Version Latest

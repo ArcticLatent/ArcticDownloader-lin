@@ -6,7 +6,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Repository,
     [string]$OutputDir = "dist",
-    [string]$AssetName = "arctic-downloader-tauri.exe"
+    [string]$AssetName = "Arctic-ComfyUI-Helper.exe"
 )
 
 Set-StrictMode -Version Latest

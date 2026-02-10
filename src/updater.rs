@@ -12,9 +12,9 @@ use std::{
 use tokio::{fs, io::AsyncWriteExt, process::Command, runtime::Runtime};
 
 const DEFAULT_UPDATE_MANIFEST_URL: &str =
-    "https://github.com/ArcticLatent/ArcticDownloader-win/releases/latest/download/update.json";
+    "https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/update.json";
 const UPDATE_CACHE_DIR: &str = "updates";
-const FALLBACK_STANDALONE_NAME: &str = "arctic-downloader-tauri.exe";
+const FALLBACK_STANDALONE_NAME: &str = "Arctic-ComfyUI-Helper.exe";
 
 #[derive(Clone, Debug)]
 pub struct AvailableUpdate {
