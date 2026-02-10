@@ -350,8 +350,19 @@ function checkedAttentionEntries(exceptBox = null) {
   return attentionAddonEntries().filter((entry) => entry.box !== exceptBox && entry.box.checked);
 }
 
+function enforceExclusiveAttentionSelectionLocal(changedBox) {
+  if (!changedBox?.checked) return;
+  checkedAttentionEntries(changedBox).forEach((entry) => {
+    entry.box.checked = false;
+  });
+}
+
 async function applyAttentionBackendFromToggle(changedBox) {
   if (!changedBox) return;
+  if (state.comfyMode !== "manage") {
+    enforceExclusiveAttentionSelectionLocal(changedBox);
+    return;
+  }
   if (state.comfyAttentionBusy) return;
 
   const root = String(el.comfyRoot.value || "").trim();
@@ -406,6 +417,9 @@ async function applyAttentionBackendFromToggle(changedBox) {
 
 async function applyComponentToggleFromCheckbox(changedBox, component, label) {
   if (!changedBox || state.comfyComponentBusy) return;
+  if (state.comfyMode !== "manage") {
+    return;
+  }
   const root = String(el.comfyRoot.value || "").trim();
   if (!root) {
     logComfyLine("Set ComfyUI folder first.");
@@ -496,6 +510,8 @@ async function refreshExistingInstallations(basePath, preferredRoot = null) {
   el.comfyExistingInstall.innerHTML = "";
 
   if (!installs.length) {
+    state.comfyMode = "install";
+    if (el.comfyMode) el.comfyMode.value = "install";
     const empty = document.createElement("option");
     empty.value = "";
     empty.textContent = "No detected installations";
