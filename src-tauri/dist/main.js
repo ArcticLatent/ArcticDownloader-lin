@@ -719,7 +719,7 @@ function applyComfyAddonRules() {
 
   if (el.addonTrellis2) {
     const profile = String(el.comfyTorchProfile?.value || "").trim();
-    const trellisAllowed = profile === "torch280_cu128" || profile === "torch291_cu130";
+    const trellisAllowed = profile === "torch280_cu128";
     const wasChecked = el.addonTrellis2.checked;
     el.addonTrellis2.disabled = !trellisAllowed;
     if (!trellisAllowed && wasChecked) {

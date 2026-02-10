@@ -543,6 +543,20 @@ fn apply_background_command_flags(cmd: &mut std::process::Command) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn try_attach_parent_console() {
+    // ATTACH_PARENT_PROCESS from Win32 API
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    unsafe extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+    }
+    // Best-effort: if no parent console exists, this simply fails.
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
+#[cfg(not(target_os = "windows"))]
+fn try_attach_parent_console() {}
+
 fn refresh_git_path_for_current_process() {
     #[cfg(target_os = "windows")]
     {
@@ -872,10 +886,7 @@ fn run_comfyui_preflight(state: State<'_, AppState>, request: ComfyInstallReques
             .torch_profile
             .clone()
             .unwrap_or(recommendation.torch_profile);
-        let trellis_supported = matches!(
-            selected_profile.as_str(),
-            "torch280_cu128" | "torch291_cu130"
-        );
+        let trellis_supported = matches!(selected_profile.as_str(), "torch280_cu128");
         if trellis_supported {
             push_preflight(
                 &mut items,
@@ -889,7 +900,7 @@ fn run_comfyui_preflight(state: State<'_, AppState>, request: ComfyInstallReques
                 &mut items,
                 "fail",
                 "Trellis2 compatibility",
-                "Trellis2 requires Torch 2.8.0 + cu128 or newer.",
+                "Trellis2 currently requires Torch 2.8.0 + cu128 (Torch280 wheel set).",
             );
         }
     }
@@ -1083,6 +1094,7 @@ fn parse_sha256_manifest(path: &Path) -> Result<String, String> {
 }
 
 fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Result<(), String> {
+    log::debug!("run_command: {} {}", program, args.join(" "));
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
     if let Some(dir) = working_dir {
@@ -1107,6 +1119,7 @@ fn run_command_capture(
     args: &[&str],
     working_dir: Option<&Path>,
 ) -> Result<(String, String), String> {
+    log::debug!("run_command_capture: {} {}", program, args.join(" "));
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
     if let Some(dir) = working_dir {
@@ -1157,6 +1170,7 @@ fn run_command_env(
     working_dir: Option<&Path>,
     envs: &[(&str, &str)],
 ) -> Result<(), String> {
+    log::debug!("run_command_env: {} {}", program, args.join(" "));
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
     if let Some(dir) = working_dir {
@@ -1674,10 +1688,10 @@ fn run_comfyui_install(
         .torch_profile
         .clone()
         .unwrap_or_else(|| recommendation.torch_profile);
-    if request.include_trellis2
-        && !matches!(selected_profile.as_str(), "torch280_cu128" | "torch291_cu130")
-    {
-        return Err("Trellis2 requires Torch 2.8.0 + cu128 or newer.".to_string());
+    if request.include_trellis2 && !matches!(selected_profile.as_str(), "torch280_cu128") {
+        return Err(
+            "Trellis2 currently requires Torch 2.8.0 + cu128 (Torch280 wheel set).".to_string(),
+        );
     }
     let (torch_v, tv_v, ta_v, index_url, triton_pkg) =
         torch_profile_to_packages(&selected_profile);
@@ -3885,8 +3899,11 @@ async fn apply_comfyui_component_toggle(
                         } else {
                             profile_from_torch_env(&root_clone)?
                         };
-                        if !matches!(profile.as_str(), "torch280_cu128" | "torch291_cu130") {
-                            return Err("Trellis2 requires minimum Torch 2.8.0 + cu128.".to_string());
+                        if !matches!(profile.as_str(), "torch280_cu128") {
+                            return Err(
+                                "Trellis2 currently requires Torch 2.8.0 + cu128 (Torch280 wheel set)."
+                                    .to_string(),
+                            );
                         }
                         ensure_git_available(&app_clone)?;
                         install_trellis2(&root_clone, &py_path_clone)?;
@@ -4186,9 +4203,22 @@ fn cancel_active_download(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 fn main() {
+    let nerdstats = std::env::args().any(|arg| arg.eq_ignore_ascii_case("--nerdstats"));
+    if nerdstats {
+        try_attach_parent_console();
+    }
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
+        .filter_level(if nerdstats {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        })
+        .target(env_logger::Target::Stdout)
         .init();
+
+    if nerdstats {
+        log::info!("Nerdstats mode enabled (verbose runtime logging).");
+    }
 
     let context = match build_context() {
         Ok(context) => context,
