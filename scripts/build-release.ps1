@@ -3,7 +3,8 @@ param(
     [string]$Version,
     [string]$Repository = $env:GITHUB_REPOSITORY,
     [string]$Tag = "",
-    [string]$OutputDir = "dist"
+    [string]$OutputDir = "dist",
+    [string]$AssetName = "arctic-downloader-tauri.exe"
 )
 
 Set-StrictMode -Version Latest
@@ -20,46 +21,34 @@ if (-not $Repository) {
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $root
 
-$cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
-if (-not (Test-Path $cargo)) {
-    throw "cargo.exe not found at $cargo"
+$cargo = "cargo"
+$tauriManifest = Join-Path $root "src-tauri\Cargo.toml"
+if (-not (Test-Path $tauriManifest)) {
+    throw "Missing Tauri manifest at $tauriManifest"
 }
 
 Write-Host "Building release binary..."
-& $cargo build --release
+& $cargo build --release --manifest-path $tauriManifest
 if ($LASTEXITCODE -ne 0) {
-    throw "cargo build --release failed"
+    throw "cargo build --release --manifest-path src-tauri/Cargo.toml failed"
 }
 
-$binary = Join-Path $root "target\release\arctic-downloader.exe"
+$binary = Join-Path $root "src-tauri\target\release\$AssetName"
 if (-not (Test-Path $binary)) {
     throw "Expected binary not found at $binary"
 }
 
-$isccCandidates = @(
-    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-    "C:\Program Files\Inno Setup 6\ISCC.exe"
-)
-$iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $iscc) {
-    throw "Inno Setup compiler (ISCC.exe) not found. Install Inno Setup 6."
+$distDir = Join-Path $root $OutputDir
+New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+
+$assetPath = Join-Path $distDir $AssetName
+Copy-Item -Path $binary -Destination $assetPath -Force
+if (-not (Test-Path $assetPath)) {
+    throw "Release asset not found at $assetPath"
 }
 
-New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-
-Write-Host "Compiling installer with Inno Setup..."
-& $iscc "/DAppVersion=$Version" "/DSourceExe=$binary" "/O$OutputDir" "/FArcticDownloader-setup" "installer\ArcticDownloader.iss"
-if ($LASTEXITCODE -ne 0) {
-    throw "ISCC failed"
-}
-
-$installer = Join-Path $root "$OutputDir\ArcticDownloader-setup.exe"
-if (-not (Test-Path $installer)) {
-    throw "Installer not found at $installer"
-}
-
-$sha = (Get-FileHash -Path $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-$downloadUrl = "https://github.com/$Repository/releases/download/$Tag/ArcticDownloader-setup.exe"
+$sha = (Get-FileHash -Path $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$downloadUrl = "https://github.com/$Repository/releases/download/$Tag/$AssetName"
 
 $manifest = [ordered]@{
     version      = $Version
@@ -74,12 +63,12 @@ $manifestDistPath = Join-Path $root "$OutputDir\update.json"
 $manifestJson | Set-Content -Path $manifestPath -Encoding utf8
 $manifestJson | Set-Content -Path $manifestDistPath -Encoding utf8
 
-Write-Host "Installer: $installer"
+Write-Host "Asset: $assetPath"
 Write-Host "SHA256: $sha"
 Write-Host "Manifest: $manifestPath"
 
 if ($env:GITHUB_OUTPUT) {
-    "installer_path=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+    "asset_path=$assetPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
     "manifest_path=$manifestDistPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
     "sha256=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
     "version=$Version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append

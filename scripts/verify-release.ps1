@@ -6,7 +6,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Repository,
     [string]$OutputDir = "dist",
-    [string]$InstallerName = "ArcticDownloader-setup.exe"
+    [string]$AssetName = "arctic-downloader-tauri.exe"
 )
 
 Set-StrictMode -Version Latest
@@ -14,11 +14,11 @@ $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $dist = Join-Path $root $OutputDir
-$installerPath = Join-Path $dist $InstallerName
+$assetPath = Join-Path $dist $AssetName
 $manifestPath = Join-Path $dist "update.json"
 
-if (-not (Test-Path $installerPath)) {
-    throw "Missing installer: $installerPath"
+if (-not (Test-Path $assetPath)) {
+    throw "Missing release asset: $assetPath"
 }
 
 if (-not (Test-Path $manifestPath)) {
@@ -43,19 +43,19 @@ if ($manifest.version -ne $Version) {
     throw "Manifest version '$($manifest.version)' does not match expected '$Version'"
 }
 
-$expectedUrl = "https://github.com/$Repository/releases/download/$Tag/$InstallerName"
+$expectedUrl = "https://github.com/$Repository/releases/download/$Tag/$AssetName"
 if ($manifest.download_url -ne $expectedUrl) {
     throw "Manifest download_url '$($manifest.download_url)' does not match expected '$expectedUrl'"
 }
 
-$expectedSha = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$expectedSha = (Get-FileHash -Path $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifestSha = ([string]$manifest.sha256).ToLowerInvariant()
 if ($manifestSha -ne $expectedSha) {
-    throw "Manifest sha256 '$manifestSha' does not match installer sha256 '$expectedSha'"
+    throw "Manifest sha256 '$manifestSha' does not match release asset sha256 '$expectedSha'"
 }
 
 Write-Host "Release artifacts verified:"
-Write-Host "  Installer: $installerPath"
+Write-Host "  Asset:     $assetPath"
 Write-Host "  Manifest:  $manifestPath"
 Write-Host "  Version:   $Version"
 Write-Host "  Tag:       $Tag"

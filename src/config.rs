@@ -110,6 +110,8 @@ pub struct AppSettings {
     pub comfyui_root: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comfyui_install_base: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comfyui_last_install_dir: Option<PathBuf>,
     pub prefer_quantized: bool,
     pub concurrent_downloads: usize,
     pub bandwidth_cap_mbps: Option<u32>,
@@ -120,6 +122,10 @@ pub struct AppSettings {
     pub civitai_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_installed_version: Option<String>,
+    #[serde(default = "default_true")]
+    pub comfyui_pinned_memory_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comfyui_attention_backend: Option<String>,
 }
 
 impl AppSettings {
@@ -135,6 +141,7 @@ impl Default for AppSettings {
         Self {
             comfyui_root: None,
             comfyui_install_base: None,
+            comfyui_last_install_dir: None,
             prefer_quantized: true,
             concurrent_downloads: 2,
             bandwidth_cap_mbps: None,
@@ -142,10 +149,16 @@ impl Default for AppSettings {
             catalog_endpoint: default_catalog_endpoint(),
             civitai_token: None,
             last_installed_version: None,
+            comfyui_pinned_memory_enabled: true,
+            comfyui_attention_backend: None,
         }
     }
 }
 
 pub(crate) fn default_catalog_endpoint() -> Option<String> {
     Some(FALLBACK_REMOTE_CATALOG_URL.to_string())
+}
+
+fn default_true() -> bool {
+    true
 }

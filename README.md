@@ -49,12 +49,12 @@ Run it with:
 cargo run --manifest-path src-tauri/Cargo.toml
 ```
 
-Build an installer-ready Windows bundle (`.exe`) with:
+Build a standalone Windows executable (`.exe`) with:
 ```bash
 cd src-tauri
 cargo tauri build
 ```
-The generated artifacts are written under `src-tauri/target/release/bundle/`.
+The generated executable is available at `src-tauri/target/release/arctic-downloader-tauri.exe`.
 If `cargo tauri` is unavailable, install it once with `cargo install tauri-cli --version "^2"`.
 
 ### Windows Build Note
@@ -77,7 +77,7 @@ cargo clippy --all-features
 (Install the `rustfmt` and `clippy` components through `rustup component add rustfmt clippy` if they
 are not already available.)
 
-## Building a Windows Installer
+## Building a Windows Standalone EXE
 
 Build directly through Tauri:
 ```bash
@@ -85,27 +85,27 @@ cd src-tauri
 cargo tauri build
 ```
 
-Publish the generated installer from `src-tauri/target/release/bundle/` in your GitHub release workflow.
+Publish `src-tauri/target/release/arctic-downloader-tauri.exe` and `update.json` in your GitHub release workflow.
 
 ## Releases & Auto-Update Manifest
 
 - On startup the app fetches an update manifest from
   `https://github.com/ArcticLatent/ArcticDownloader-win/releases/latest/download/update.json`
   (override with `ARCTIC_UPDATE_MANIFEST_URL`). If the manifest advertises a higher semver version,
-  the app downloads the published `.exe` installer, verifies its SHA-256, launches installer execution, exits, and restarts after installation completes.
+  the app downloads the published standalone `.exe`, verifies its SHA-256, replaces the current executable, and restarts.
 - Manifest schema:
 
   ```json
   {
     "version": "0.1.0",
-    "download_url": "https://github.com/ArcticLatent/ArcticDownloader-win/releases/download/v0.1.0/ArcticDownloader-setup.exe",
+    "download_url": "https://github.com/ArcticLatent/ArcticDownloader-win/releases/download/v0.1.0/arctic-downloader-tauri.exe",
     "sha256": "<sha256sum-of-the-exe>",
     "notes": "Optional release notes"
   }
   ```
 
 - Release steps: run `scripts/build-release.ps1 -Version <x.y.z>` to generate
-  `dist/ArcticDownloader-setup.exe` and `dist/update.json`, then publish both assets to the matching
+  `dist/arctic-downloader-tauri.exe` and `dist/update.json`, then publish both assets to the matching
   GitHub release tag (`v<x.y.z>`).
 - Disable the automatic check with `ARCTIC_SKIP_AUTO_UPDATE=1`; re-enable with `ARCTIC_AUTO_UPDATE=1`.
 
@@ -133,7 +133,7 @@ will add signature verification and remote catalog refreshes.
   (`catalog_endpoint`). A successful `200 OK` replaces the in-memory catalog, persists the JSON to
   the cache, and stores the returned `ETag` so subsequent runs can short-circuit with `304 Not
   Modified`.
-- Builds default to `https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-win/refs/heads/main/data/catalog.json`
+- Builds default to `https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/data/catalog.json`
   as the remote source. Override this at runtime with `ARCTIC_CATALOG_URL` or at build-time via the
   `ARCTIC_DEFAULT_CATALOG_URL` environment variable. Setting either to an empty string disables the
   remote fetch.

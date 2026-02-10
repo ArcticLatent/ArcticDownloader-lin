@@ -21,7 +21,7 @@ Arctic Downloader is a helper app for people who run ComfyUI and want a simple w
 
 1. **Install ComfyUI** and make sure you know where its folder lives.
 2. **Download the latest Windows release** from this repository’s Releases page.
-3. Run the installer (`ArcticDownloader-setup.exe`).
+3. Run the standalone app (`arctic-downloader-tauri.exe`).
 4. Launch Arctic Downloader and pick your ComfyUI folder when prompted.
 
 That’s it—browse the catalog, pick what you want, and click download. The app handles the rest.
@@ -34,14 +34,14 @@ That’s it—browse the catalog, pick what you want, and click download. The ap
   ```json
   {
     "version": "0.1.0",
-    "download_url": "https://github.com/ArcticLatent/ArcticDownloader-win/releases/download/v0.1.0/ArcticDownloader-setup.exe",
+    "download_url": "https://github.com/ArcticLatent/ArcticDownloader-win/releases/download/v0.1.0/arctic-downloader-tauri.exe",
     "sha256": "<sha256-of-the-exe>",
     "notes": "Optional release notes"
   }
   ```
 
-- Publish a new build: attach `ArcticDownloader-setup.exe` to a GitHub Release, calculate its SHA-256 checksum, update `update.json` with the new version, URL, and checksum, and publish both assets.
-- When a new version exists, the app downloads and verifies the installer, runs it, then restarts the app after update completes.
+- Publish a new build: attach `arctic-downloader-tauri.exe` to a GitHub Release, calculate its SHA-256 checksum, update `update.json` with the new version, URL, and checksum, and publish both assets.
+- When a new version exists, the app downloads and verifies the executable, replaces the running binary, and restarts the app.
 - To disable the auto-check (for testing), set `ARCTIC_SKIP_AUTO_UPDATE=1`. Re-enable with `ARCTIC_AUTO_UPDATE=1`.
 
 ## Tips

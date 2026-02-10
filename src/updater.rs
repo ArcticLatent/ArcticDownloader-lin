@@ -14,7 +14,7 @@ use tokio::{fs, io::AsyncWriteExt, process::Command, runtime::Runtime};
 const DEFAULT_UPDATE_MANIFEST_URL: &str =
     "https://github.com/ArcticLatent/ArcticDownloader-win/releases/latest/download/update.json";
 const UPDATE_CACHE_DIR: &str = "updates";
-const FALLBACK_STANDALONE_NAME: &str = "arctic-downloader.exe";
+const FALLBACK_STANDALONE_NAME: &str = "arctic-downloader-tauri.exe";
 
 #[derive(Clone, Debug)]
 pub struct AvailableUpdate {
