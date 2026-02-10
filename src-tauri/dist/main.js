@@ -22,6 +22,7 @@ const state = {
   comfyMode: "install",
   updateAvailable: false,
   updateVersion: null,
+  appVersion: "0.1.0",
   updateInstalling: false,
   selectedComfyVersion: null,
   titleSystemText: "Version 0.1.0 • loading system info...",
@@ -62,6 +63,7 @@ const el = {
   transferList: document.getElementById("transfer-list"),
   completedList: document.getElementById("completed-list"),
   checkUpdates: document.getElementById("check-updates"),
+  appVersionTag: document.getElementById("app-version-tag"),
 
   tabComfyui: document.getElementById("tab-comfyui"),
   tabModels: document.getElementById("tab-models"),
@@ -241,7 +243,7 @@ function updateComfyInstallButton() {
 }
 
 function renderTitleMeta() {
-  const base = state.titleSystemText || "Version 0.1.0";
+  const base = state.titleSystemText || "Loading system info...";
   const comfy = String(state.selectedComfyVersion || "").trim();
   if (!comfy) {
     el.version.textContent = base;
@@ -257,6 +259,25 @@ function renderTitleMeta() {
     badge.textContent = ` • (latest ${latestLabel})`;
     el.version.appendChild(badge);
   }
+}
+
+function renderAppVersionTag() {
+  if (!el.appVersionTag) return;
+  const normalizeVersion = (value) => String(value || "0.1.0").trim().replace(/^v/i, "");
+  const current = normalizeVersion(state.appVersion || "0.1.0");
+  const latest = normalizeVersion(state.updateVersion || "");
+  if (state.updateInstalling) {
+    el.appVersionTag.textContent = "Updating...";
+    el.appVersionTag.classList.remove("update-available");
+    return;
+  }
+  if (state.updateAvailable && state.updateVersion) {
+    el.appVersionTag.textContent = latest;
+    el.appVersionTag.classList.add("update-available");
+    return;
+  }
+  el.appVersionTag.textContent = current;
+  el.appVersionTag.classList.remove("update-available");
 }
 
 function updateComfyUpdateButton() {
@@ -288,12 +309,14 @@ function updateComfyUpdateButton() {
 function updateUpdateButton() {
   if (!el.checkUpdates) return;
   if (state.updateInstalling) {
-    el.checkUpdates.textContent = "Installing Update...";
+    el.checkUpdates.textContent = "Updating...";
     el.checkUpdates.disabled = true;
+    renderAppVersionTag();
     return;
   }
   el.checkUpdates.disabled = false;
-  el.checkUpdates.textContent = state.updateAvailable ? "Install Update" : "Check Updates";
+  el.checkUpdates.textContent = state.updateAvailable ? "Update" : "Check Updates";
+  renderAppVersionTag();
 }
 
 function normalizeSlashes(value) {
@@ -1281,16 +1304,22 @@ async function bootstrap() {
   state.settings = settings;
   state.catalog = catalog;
 
-  state.titleSystemText = `Version ${settings?.last_installed_version || "0.1.0"} • loading system info...`;
+  state.appVersion = settings?.last_installed_version || "0.1.0";
+  state.titleSystemText = "Loading system info...";
+  renderAppVersionTag();
   renderTitleMeta();
   const refreshSnapshot = (attempt = 0) => {
     invoke("get_app_snapshot")
       .then((snapshot) => {
-        const ramText = `${snapshot.total_ram_gb?.toFixed?.(1) ?? "?"} GB RAM`;
+        const ramRaw = Number(snapshot.total_ram_gb);
+        const ramGb = Number.isFinite(ramRaw) ? (ramRaw > 1000 ? ramRaw / 1000 : ramRaw) : null;
+        const ramText = `${ramGb != null ? ramGb.toFixed(1) : "?"} GB RAM`;
         const gpuText = snapshot.nvidia_gpu_name
           ? `${snapshot.nvidia_gpu_name}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
           : "NVIDIA GPU: Not detected";
-        state.titleSystemText = `Version ${snapshot.version} • ${ramText} • ${gpuText}`;
+        state.appVersion = snapshot.version || state.appVersion;
+        state.titleSystemText = `${ramText} • ${gpuText}`;
+        renderAppVersionTag();
         renderTitleMeta();
         if (!snapshot.nvidia_gpu_name && attempt < 8) {
           setTimeout(() => refreshSnapshot(attempt + 1), 600);
@@ -1798,6 +1827,7 @@ async function initEventListeners() {
       logLine(p.message);
       if (p.phase === "available") {
         state.updateAvailable = true;
+        state.updateVersion = p.version || state.updateVersion || null;
         updateUpdateButton();
         el.updateStatus.textContent = "New update available";
       } else if (p.phase === "restarting") {

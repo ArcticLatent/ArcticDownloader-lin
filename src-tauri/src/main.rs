@@ -4302,15 +4302,25 @@ async fn update_selected_comfyui(
     }
 
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        run_command_with_retry("git", &["pull", "--ff-only"], Some(&root), 2)?;
+        // Prefer fast-forward updates. If local/remote diverged, fall back to rebase+autostash.
+        if let Err(ff_err) = run_command_with_retry("git", &["pull", "--ff-only"], Some(&root), 2) {
+            run_command_with_retry("git", &["pull", "--rebase", "--autostash"], Some(&root), 2)
+                .map_err(|rebase_err| {
+                    format!(
+                        "ComfyUI git update failed (fast-forward and rebase both failed). ff-only: {ff_err} | rebase: {rebase_err}"
+                    )
+                })?;
+        }
         let py = python_exe_for_root(&root)?;
         let req = root.join("requirements.txt");
         if req.exists() {
-            run_command(
+            run_command_with_retry(
                 py.to_string_lossy().as_ref(),
                 &["-m", "pip", "install", "-r", "requirements.txt"],
                 Some(&root),
-            )?;
+                1,
+            )
+            .map_err(|err| format!("Failed to install ComfyUI requirements: {err}"))?;
         }
         Ok("ComfyUI updated successfully.".to_string())
     })

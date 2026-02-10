@@ -67,8 +67,24 @@ body {
   justify-content: flex-end;
   gap: 10px;
 }
+.update-action-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.app-version-tag {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1;
+}
+.app-version-tag.update-available {
+  color: #4de184;
+  font-weight: 600;
+  animation: latestPulse 1s ease-in-out infinite;
+}
 #update-status {
-  white-space: nowrap;
+  display: none;
 }
 .tabs {
   display: flex;
