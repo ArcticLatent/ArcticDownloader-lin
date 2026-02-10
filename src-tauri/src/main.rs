@@ -590,7 +590,7 @@ fn has_dns(host: &str, port: u16) -> bool {
 }
 
 #[tauri::command]
-fn run_comfyui_preflight(request: ComfyInstallRequest) -> ComfyPreflightResponse {
+fn run_comfyui_preflight(state: State<'_, AppState>, request: ComfyInstallRequest) -> ComfyPreflightResponse {
     let mut items: Vec<PreflightItem> = Vec::new();
     let mut ok = true;
 
@@ -713,8 +713,28 @@ fn run_comfyui_preflight(request: ComfyInstallRequest) -> ComfyPreflightResponse
         );
     }
 
+    let cache_root = state.context.config.cache_path();
+    let runtime_roots = [
+        cache_root.join("comfyui-runtime"),
+        cache_root.join("comfy_runtime"),
+    ];
+    let local_uv_exists = runtime_roots.iter().any(|runtime_root| {
+        let local_uv_root = runtime_root.join(".tools").join("uv");
+        local_uv_root.join("uv.exe").exists()
+            || local_uv_root.join("uv").exists()
+            || find_file_recursive(&local_uv_root, "uv.exe").is_some()
+            || find_file_recursive(&local_uv_root, "uv").is_some()
+    });
+
     if command_available("uv", &["--version"]) {
         push_preflight(&mut items, "pass", "uv runtime", "System uv detected.");
+    } else if local_uv_exists {
+        push_preflight(
+            &mut items,
+            "pass",
+            "uv runtime",
+            "Local uv runtime already available.",
+        );
     } else {
         push_preflight(
             &mut items,
@@ -1225,6 +1245,16 @@ fn resolve_uv_binary(shared_runtime_root: &Path, app: &AppHandle) -> Result<Stri
     let local_uv = local_root.join("uv.exe");
     if local_uv.exists() {
         return Ok(local_uv.to_string_lossy().to_string());
+    }
+    if let Some(legacy_runtime_root) = shared_runtime_root.parent().map(|parent| parent.join("comfy_runtime")) {
+        let legacy_local_root = legacy_runtime_root.join(".tools").join("uv");
+        let legacy_local_uv = legacy_local_root.join("uv.exe");
+        if legacy_local_uv.exists() {
+            return Ok(legacy_local_uv.to_string_lossy().to_string());
+        }
+        if let Some(found) = find_file_recursive(&legacy_local_root, "uv.exe") {
+            return Ok(found.to_string_lossy().to_string());
+        }
     }
 
     emit_install_event(app, "step", "Downloading local uv runtime...");

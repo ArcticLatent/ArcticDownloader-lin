@@ -62,7 +62,6 @@ const el = {
   contentLoras: document.getElementById("tab-content-loras"),
   downloadsStatusPanel: document.getElementById("downloads-status-panel"),
 
-  comfyInstallReco: document.getElementById("comfy-install-reco"),
   comfyTorchProfile: document.getElementById("comfy-torch-profile"),
   comfyTorchRecommended: document.getElementById("comfy-torch-recommended"),
   comfyMode: document.getElementById("comfy-mode"),
@@ -1195,18 +1194,14 @@ async function bootstrap() {
 
   try {
     const reco = await invoke("get_comfyui_install_recommendation");
-    const gpu = reco.gpu_name ? `GPU: ${reco.gpu_name}` : "GPU: Not detected";
-    const drv = reco.driver_version ? ` • Driver: ${reco.driver_version}` : "";
-    el.comfyInstallReco.textContent = `Recommended Torch/CUDA: ${reco.torch_label} (${reco.reason}) • ${gpu}${drv}`;
-    el.comfyTorchRecommended.textContent = `Recommended '${reco.torch_label}'`;
+    el.comfyTorchRecommended.textContent = `Recommended '${reco.torch_label}' for your GPU`;
     state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
     if (comfyTorchProfiles.some((x) => x.value === reco.torch_profile)) {
       el.comfyTorchProfile.value = reco.torch_profile;
     }
     applyComfyAddonRules();
   } catch (err) {
-    el.comfyInstallReco.textContent = "Recommended Torch/CUDA: Torch 2.8.0 + cu128";
-    el.comfyTorchRecommended.textContent = "Recommended 'Torch 2.8.0 + cu128'";
+    el.comfyTorchRecommended.textContent = "Recommended 'Torch 2.8.0 + cu128' for your GPU";
     el.comfyTorchProfile.value = "torch280_cu128";
     state.comfySage3Eligible = false;
     applyComfyAddonRules();
