@@ -1,64 +1,129 @@
-<p align="center">
-  <img src="assets/icon.svg" alt="Arctic Downloader" width="160">
+﻿<p align="center">
+  <img src="assets/icon.svg" alt="Arctic ComfyUI Helper" width="148" />
 </p>
 
-# Arctic Downloader
+<h1 align="center">Arctic ComfyUI Helper</h1>
 
-### ComfyUI Asset Helper by Arctic Latent
+<p align="center">
+  A curated Windows companion for ComfyUI users who want the right models, LoRAs, and setup tools without guesswork.
+</p>
 
-Arctic Downloader is a helper app for people who run ComfyUI and want a simple way to grab the right models, VAE files, and LoRAs for their setup. It’s curated to mirror the builds shown in my YouTube tutorials so you can follow along without hunting for the assets yourself. Think of it as a catalog with a big “download” button: you tell it your GPU VRAM and RAM tiers, and it surfaces the options that match.
+<p align="center">
+  <img alt="Windows" src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?style=for-the-badge&logo=windows&logoColor=white" />
+  <img alt="Rust" src="https://img.shields.io/badge/Built%20with-Rust-000000?style=for-the-badge&logo=rust" />
+  <img alt="Tauri" src="https://img.shields.io/badge/Desktop-Tauri-24C8DB?style=for-the-badge&logo=tauri&logoColor=white" />
+</p>
 
-## What it does
+---
 
-- Shows a catalog of hand-picked ComfyUI models and LoRAs.
-- Lets you choose your GPU VRAM and system RAM, then highlights the variants that make sense for those limits.
-- Automatically grabs the “always needed” extras (text encoders, CLIPs, upscalers, and similar helpers) so nothing is missing.
-- Saves everything into the right subfolders under your ComfyUI installation so you can start using the files right away.
-- Gives you live progress for each download and, when it’s done, lists exactly which files landed where (with quick-open buttons).
-- Supports optional Civitai API tokens for LoRAs that need an account.
+## 📚 Overview
 
-## Getting Started
+Arctic ComfyUI Helper mirrors the exact builds shown in Arctic Latent tutorials, so you can follow along with less setup friction.
 
-1. **Install ComfyUI** and make sure you know where its folder lives.
-2. **Download the latest Windows release** from this repository’s Releases page.
-3. Run the standalone app (`arctic-downloader-tauri.exe`).
-4. Launch Arctic Downloader and pick your ComfyUI folder when prompted.
+Think of it as:
+- A built-in **ComfyUI installer** for Windows (easy setup from inside the app)
+- A curated model/LoRA catalog matched to your hardware tiers
+- A one-click downloader that places assets into the correct ComfyUI folders
 
-That’s it—browse the catalog, pick what you want, and click download. The app handles the rest.
+---
 
-## Automatic updates
+## 🧩 Core Features
 
-- On launch, the app checks for a new version using a small manifest at `https://github.com/ArcticLatent/ArcticDownloader-win/releases/latest/download/update.json` (override with `ARCTIC_UPDATE_MANIFEST_URL`).
-- Manifest format:
+- 🛠️ **ComfyUI install module** (uv-managed Python + selectable add-ons/custom nodes)
+- 🧠 **Tier-aware catalog** that filters by your GPU VRAM and system RAM
+- 📦 **Auto-dependency downloads** (text encoders, CLIPs, upscalers, and other required files)
+- 🗂️ **Smart file placement** into the correct ComfyUI subfolders
+- 📈 **Live download progress** with active/completed transfer tracking
+- 🔐 **Optional Civitai token support** for authenticated LoRA downloads
+- 🖼️ **LoRA preview + metadata** in-app (description, triggers, creator link)
+- ♻️ **Auto-update support** through GitHub Releases manifest
+- 🧵 **System tray controls** to Start/Stop ComfyUI even when the main window is hidden
 
-  ```json
-  {
-    "version": "0.1.0",
-    "download_url": "https://github.com/ArcticLatent/ArcticDownloader-win/releases/download/v0.1.0/arctic-downloader-tauri.exe",
-    "sha256": "<sha256-of-the-exe>",
-    "notes": "Optional release notes"
-  }
-  ```
+---
 
-- Publish a new build: attach `arctic-downloader-tauri.exe` to a GitHub Release, calculate its SHA-256 checksum, update `update.json` with the new version, URL, and checksum, and publish both assets.
-- When a new version exists, the app downloads and verifies the executable, replaces the running binary, and restarts the app.
-- To disable the auto-check (for testing), set `ARCTIC_SKIP_AUTO_UPDATE=1`. Re-enable with `ARCTIC_AUTO_UPDATE=1`.
+## 🧰 ComfyUI Installer Highlights
 
-## Tips
+Inside the **ComfyUI** tab, you can:
 
-- The VRAM tiers (S, A, B, C) give you a quick way to match files to your GPU size. If you’re unsure, pick the lowest tier that matches your card to avoid running out of memory.
-- Use the legend inside the app if you want a refresher on the quantization shorthand (fp16, fp8, GGUF, etc.).
-- If you drop in new hardware later, just change your tier in the app and it will show the upgraded variants automatically.
+- Select a base folder and install a fresh ComfyUI instance
+- Manage an existing ComfyUI installation
+- Use automatic Torch/CUDA recommendation based on detected NVIDIA GPU
+- Override Torch stack manually from dropdown
+- Toggle add-ons and custom nodes from UI
 
-## Requirements
+### Available Add-Ons
 
-- Active internet connection for downloading models and LoRAs.
-- Windows 10/11.
-- Some Civitai creators require you to be logged in to download their LoRAs. If you see an “unauthorized” download error, create a free API key on the Civitai website, paste it into the LoRA section inside Arctic Downloader, and hit Save.
-- Your API key never leaves your machine. It’s stored in the local configuration file and only attached to the authenticated download request sent to Civitai.
+- SageAttention
+- SageAttention3 (RTX 50-series only)
+- FlashAttention
+- InsightFace
+- Nunchaku
+- Trellis2 (requires Torch 2.8.0 + cu128 or newer)
+- Pinned Memory (enabled by default)
 
-## Need Help?
+### Available Custom Nodes
 
-If you need help, hit a problem, or spot a bug in the app, please open an issue in this GitHub repository so we can take a look.
+- comfyui-manager
+- ComfyUI-Easy-Use
+- rgthree-comfy
+- ComfyUI-GGUF
+- comfyui-kjnodes
 
-Enjoy smoother ComfyUI setups!
+---
+
+## 🚀 Getting Started
+
+1. Download the latest `Arctic-ComfyUI-Helper.exe` from this repo's **Releases** page.
+2. Run the app.
+3. In **Models** / **LoRAs**, select your existing ComfyUI folder to download assets.
+4. In **ComfyUI** tab, use **Install New** (or **Manage Existing**) if you want the app to install/manage ComfyUI itself.
+
+That is it. Pick your setup, click, and the app handles the rest.
+
+---
+
+## 🔄 Auto-Updates
+
+On startup, the app checks:
+
+`https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/update.json`
+
+If a newer version is found, the app downloads, verifies checksum, replaces binary, and restarts.
+
+---
+
+## ✅ Requirements
+
+- Latest NVIDIA drivers installed
+- Internet connection (for catalog, model files, and optional installer tasks)
+- For some Civitai LoRAs: a valid Civitai API token
+
+---
+
+## 💡 Usage Tips
+
+- If a LoRA says unauthorized, add your Civitai token in-app and save it.
+- If you run multiple ComfyUI installs, use the ComfyUI tab's install/manage mode and detected installs list.
+
+---
+
+## 🆘 Need Help?
+
+Open an issue in this repository with:
+- What you clicked
+- What you expected
+- What happened
+- Any log lines shown in the app
+
+---
+
+## 👤 Author
+
+**Burce Boran**  
+Asset Supervisor / VFX Artist - Arctic Latent
+
+- YouTube: https://www.youtube.com/@ArcticLatent
+- Patreon: https://www.patreon.com/cw/ArcticLatent
+- Hugging Face: https://huggingface.co/arcticlatent
+- Vimeo: https://vimeo.com/1044521891
+- GitHub: https://github.com/ArcticLatent
