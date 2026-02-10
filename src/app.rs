@@ -4,7 +4,6 @@ use crate::{
     download::DownloadManager,
     env_flags::remote_refresh_enabled,
     ram::{RamProfile, RamTier},
-    ui,
     updater::Updater,
 };
 use anyhow::{anyhow, Result};
@@ -32,22 +31,6 @@ impl AppContext {
 
     pub fn total_ram_gb(&self) -> Option<f64> {
         self.ram_profile.map(|profile| profile.total_gb)
-    }
-}
-
-pub struct ArcticDownloaderApp {
-    context: AppContext,
-}
-
-impl ArcticDownloaderApp {
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            context: build_context()?,
-        })
-    }
-
-    pub fn run(self) -> Result<()> {
-        ui::run(self.context)
     }
 }
 

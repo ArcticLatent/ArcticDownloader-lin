@@ -25,6 +25,8 @@ use tauri::{
 };
 use tokio_util::sync::CancellationToken;
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 struct AppState {
     context: AppContext,
@@ -523,11 +525,21 @@ fn push_preflight(items: &mut Vec<PreflightItem>, status: &str, title: &str, det
 }
 
 fn command_available(program: &str, args: &[&str]) -> bool {
-    std::process::Command::new(program)
-        .args(args)
-        .output()
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    apply_background_command_flags(&mut cmd);
+    cmd.output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn apply_background_command_flags(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        // Prevent Windows from opening a new console window per installer subprocess.
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 }
 
 fn refresh_git_path_for_current_process() {
@@ -596,17 +608,19 @@ fn ensure_git_available(app: &AppHandle) -> Result<(), String> {
         }
 
         emit_install_event(app, "step", "Git not found; installing Git via winget...");
-        let status = std::process::Command::new("winget")
-            .args([
-                "install",
-                "--id",
-                "Git.Git",
-                "-e",
-                "--source",
-                "winget",
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-            ])
+        let mut winget_cmd = std::process::Command::new("winget");
+        winget_cmd.args([
+            "install",
+            "--id",
+            "Git.Git",
+            "-e",
+            "--source",
+            "winget",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ]);
+        apply_background_command_flags(&mut winget_cmd);
+        let status = winget_cmd
             .status()
             .map_err(|err| format!("Failed to launch winget: {err}"))?;
 
@@ -955,8 +969,10 @@ fn powershell_download(url: &str, out_file: &Path) -> Result<(), String> {
         url,
         out_file.display()
     );
-    let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &command])
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &command]);
+    apply_background_command_flags(&mut cmd);
+    let status = cmd
         .status()
         .map_err(|err| format!("Failed to launch downloader: {err}"))?;
     if !status.success() {
@@ -1019,10 +1035,12 @@ fn download_nunchaku_versions_json(app: &AppHandle, out_file: &Path) -> Result<(
     }
 
     // Fallback for systems with strict revocation/cert path issues.
-    let curl_status = std::process::Command::new("curl.exe")
+    let mut curl_cmd = std::process::Command::new("curl.exe");
+    curl_cmd
         .args(["-L", "--ssl-no-revoke", url, "-o"])
-        .arg(out_file)
-        .status();
+        .arg(out_file);
+    apply_background_command_flags(&mut curl_cmd);
+    let curl_status = curl_cmd.status();
     match curl_status {
         Ok(status) if status.success() => Ok(()),
         _ => {
@@ -1069,6 +1087,7 @@ fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Resu
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
     }
+    apply_background_command_flags(&mut cmd);
     let status = cmd
         .status()
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
@@ -1092,6 +1111,7 @@ fn run_command_capture(
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
     }
+    apply_background_command_flags(&mut cmd);
     let output = cmd
         .output()
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
@@ -1144,6 +1164,7 @@ fn run_command_env(
     for (key, value) in envs {
         cmd.env(key, value);
     }
+    apply_background_command_flags(&mut cmd);
     let status = cmd
         .status()
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
@@ -1562,14 +1583,16 @@ fn create_comfyui_desktop_shortcut(
              $s.Save();"
         );
 
-        let status = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                &command,
-            ])
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &command,
+        ]);
+        apply_background_command_flags(&mut cmd);
+        let status = cmd
             .status()
             .map_err(|err| format!("Failed to create desktop shortcut: {err}"))?;
         if status.success() {
@@ -3354,7 +3377,7 @@ fn python_for_root(root: &Path) -> std::process::Command {
     let embed_py = root.join("python_embeded").join("python.exe");
     let legacy_embed_py = install_dir.join("python_embeded").join("python.exe");
 
-    if venv_py.exists() {
+    let mut cmd = if venv_py.exists() {
         std::process::Command::new(venv_py)
     } else if legacy_venv_py.exists() {
         std::process::Command::new(legacy_venv_py)
@@ -3364,7 +3387,9 @@ fn python_for_root(root: &Path) -> std::process::Command {
         std::process::Command::new(legacy_embed_py)
     } else {
         std::process::Command::new("python")
-    }
+    };
+    apply_background_command_flags(&mut cmd);
+    cmd
 }
 
 fn pip_has_package(root: &Path, package: &str) -> bool {

@@ -6,6 +6,5 @@ pub mod env_flags;
 pub mod model;
 pub mod preview;
 pub mod ram;
-pub mod ui;
 pub mod updater;
 pub mod vram;
