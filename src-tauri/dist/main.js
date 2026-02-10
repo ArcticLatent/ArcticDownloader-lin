@@ -1641,9 +1641,7 @@ async function initEventListeners() {
       logLine(`[${p.kind}] ${p.artifact || "download"} failed: ${p.message || "unknown error"}`);
       current.phase = "failed";
       state.transfers.delete(key);
-      if ((p.message || "").toLowerCase().includes("cancel")) {
-        endBusyDownload();
-      }
+      endBusyDownload();
     } else if (p.phase === "finished") {
       setProgress(`[${p.kind}] finished: ${current.artifact || "file"}`);
       current.phase = "finished";
