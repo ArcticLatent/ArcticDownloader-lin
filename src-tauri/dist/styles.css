@@ -55,7 +55,11 @@ body {
 .top-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
+}
+#update-status {
+  white-space: nowrap;
 }
 .tabs {
   display: flex;

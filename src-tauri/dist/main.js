@@ -1501,14 +1501,14 @@ el.checkUpdates.addEventListener("click", async () => {
   try {
     const result = await invoke("check_updates_now");
     if (result.available) {
-      el.updateStatus.textContent = `Update: v${result.version} available`;
+      el.updateStatus.textContent = `v${result.version} available`;
       logLine(`Update available: v${result.version}`);
     } else {
-      el.updateStatus.textContent = "Update: up to date";
+      el.updateStatus.textContent = "Up to date";
       logLine("No updates available.");
     }
   } catch (err) {
-    el.updateStatus.textContent = "Update: error";
+    el.updateStatus.textContent = "Error";
     logLine(String(err));
   }
 });
@@ -1622,7 +1622,7 @@ async function initEventListeners() {
     const p = event.payload || {};
     if (p.message) {
       logLine(p.message);
-      el.updateStatus.textContent = `Update: ${p.phase}`;
+      el.updateStatus.textContent = `${p.phase}`;
     }
     });
 
