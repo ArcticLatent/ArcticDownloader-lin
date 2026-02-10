@@ -20,6 +20,9 @@ const state = {
   comfyAttentionBusy: false,
   comfyComponentBusy: false,
   comfyMode: "install",
+  updateAvailable: false,
+  updateVersion: null,
+  updateInstalling: false,
 };
 
 const ramOptions = [
@@ -227,6 +230,17 @@ function updateComfyInstallButton() {
   if (!el.installComfyui) return;
   el.installComfyui.textContent = state.comfyInstallBusy ? "Cancel Install" : "Install ComfyUI";
   el.comfyInstallSpinner?.classList.toggle("hidden", !state.comfyInstallBusy);
+}
+
+function updateUpdateButton() {
+  if (!el.checkUpdates) return;
+  if (state.updateInstalling) {
+    el.checkUpdates.textContent = "Installing Update...";
+    el.checkUpdates.disabled = true;
+    return;
+  }
+  el.checkUpdates.disabled = false;
+  el.checkUpdates.textContent = state.updateAvailable ? "Install Update" : "Check Updates";
 }
 
 function normalizeSlashes(value) {
@@ -1498,16 +1512,43 @@ el.saveToken.addEventListener("click", async () => {
 });
 
 el.checkUpdates.addEventListener("click", async () => {
+  if (state.updateInstalling) return;
+  if (state.updateAvailable) {
+    try {
+      state.updateInstalling = true;
+      updateUpdateButton();
+      el.updateStatus.textContent = state.updateVersion
+        ? `Installing v${state.updateVersion}...`
+        : "Installing update...";
+      await invoke("auto_update_startup");
+    } catch (err) {
+      state.updateInstalling = false;
+      updateUpdateButton();
+      el.updateStatus.textContent = "Error";
+      logLine(String(err));
+    }
+    return;
+  }
   try {
     const result = await invoke("check_updates_now");
     if (result.available) {
-      el.updateStatus.textContent = `v${result.version} available`;
+      state.updateAvailable = true;
+      state.updateVersion = result.version || null;
+      el.updateStatus.textContent = "New update available";
+      updateUpdateButton();
       logLine(`Update available: v${result.version}`);
     } else {
+      state.updateAvailable = false;
+      state.updateVersion = null;
       el.updateStatus.textContent = "Up to date";
+      updateUpdateButton();
       logLine("No updates available.");
     }
   } catch (err) {
+    state.updateAvailable = false;
+    state.updateVersion = null;
+    state.updateInstalling = false;
+    updateUpdateButton();
     el.updateStatus.textContent = "Error";
     logLine(String(err));
   }
@@ -1622,7 +1663,17 @@ async function initEventListeners() {
     const p = event.payload || {};
     if (p.message) {
       logLine(p.message);
-      el.updateStatus.textContent = `${p.phase}`;
+      if (p.phase === "available") {
+        state.updateAvailable = true;
+        updateUpdateButton();
+        el.updateStatus.textContent = "New update available";
+      } else if (p.phase === "restarting") {
+        state.updateInstalling = true;
+        updateUpdateButton();
+        el.updateStatus.textContent = "Installing update...";
+      } else {
+        el.updateStatus.textContent = `${p.phase}`;
+      }
     }
     });
 
@@ -1727,6 +1778,7 @@ switchTab("comfyui");
 updateDownloadButtons();
 updateComfyInstallButton();
 updateComfyRuntimeButton();
+updateUpdateButton();
 renderTransfers();
 
 (async () => {
@@ -1734,14 +1786,22 @@ renderTransfers();
   try {
     await bootstrap();
     setTimeout(() => {
-      invoke("auto_update_startup")
+      invoke("check_updates_now")
         .then((startup) => {
-          if (startup?.available) {
-            logLine(`Auto update triggered for v${startup.version}.`);
+          if (startup?.available === true) {
+            state.updateAvailable = true;
+            state.updateVersion = startup.version || null;
+            el.updateStatus.textContent = "New update available";
+            updateUpdateButton();
+            logLine(`Update available: v${startup.version}`);
+          } else {
+            state.updateAvailable = false;
+            state.updateVersion = null;
+            updateUpdateButton();
           }
         })
         .catch((err) => {
-          logLine(`Startup update check failed: ${err}`);
+          console.debug("Startup update check skipped:", err);
         });
     }, 0);
   } catch (err) {
