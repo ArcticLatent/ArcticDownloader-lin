@@ -212,12 +212,13 @@ fn gpu_details_cache() -> &'static Mutex<Option<NvidiaGpuDetails>> {
 }
 
 fn query_nvidia_gpu_details_blocking() -> NvidiaGpuDetails {
-    let output = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=name,memory.total,driver_version",
-            "--format=csv,noheader,nounits",
-        ])
-        .output();
+    let mut cmd = std::process::Command::new("nvidia-smi");
+    cmd.args([
+        "--query-gpu=name,memory.total,driver_version",
+        "--format=csv,noheader,nounits",
+    ]);
+    apply_background_command_flags(&mut cmd);
+    let output = cmd.output();
 
     let Ok(output) = output else {
         return NvidiaGpuDetails::default();

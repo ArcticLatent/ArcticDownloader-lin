@@ -1,6 +1,6 @@
 use crate::app::APP_ID;
 use anyhow::{anyhow, Context, Result};
-use directories::ProjectDirs;
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -14,28 +14,32 @@ const FALLBACK_REMOTE_CATALOG_URL: &str =
 
 #[derive(Debug)]
 pub struct ConfigStore {
-    dirs: ProjectDirs,
+    root_dir: PathBuf,
+    config_dir: PathBuf,
+    state_dir: PathBuf,
+    cache_dir: PathBuf,
     settings: RwLock<AppSettings>,
 }
 
 impl ConfigStore {
     pub fn new() -> Result<Self> {
-        let dirs = ProjectDirs::from("io.github", "ArcticHelper", "ArcticHelper")
-            .ok_or_else(|| anyhow!("unable to resolve project directories for {APP_ID}"))?;
+        let base =
+            BaseDirs::new().ok_or_else(|| anyhow!("unable to resolve base directories for {APP_ID}"))?;
+        let root_dir = base.data_local_dir().join(APP_ID);
+        let config_dir = root_dir.join("config");
+        let state_dir = root_dir.join("state");
+        let cache_dir = root_dir.join("cache");
 
-        fs::create_dir_all(dirs.config_dir()).with_context(|| {
-            format!("failed to create config directory {:?}", dirs.config_dir())
-        })?;
+        fs::create_dir_all(&config_dir)
+            .with_context(|| format!("failed to create config directory {config_dir:?}"))?;
 
-        if let Some(state_dir) = dirs.state_dir() {
-            fs::create_dir_all(state_dir)
-                .with_context(|| format!("failed to create state directory {state_dir:?}"))?;
-        }
+        fs::create_dir_all(&state_dir)
+            .with_context(|| format!("failed to create state directory {state_dir:?}"))?;
 
-        fs::create_dir_all(dirs.cache_dir())
-            .with_context(|| format!("failed to create cache directory {:?}", dirs.cache_dir()))?;
+        fs::create_dir_all(&cache_dir)
+            .with_context(|| format!("failed to create cache directory {cache_dir:?}"))?;
 
-        let settings_path = PathBuf::from(dirs.config_dir()).join(SETTINGS_FILE);
+        let settings_path = config_dir.join(SETTINGS_FILE);
         let mut settings = if settings_path.exists() {
             let data = fs::read(&settings_path)
                 .with_context(|| format!("failed to read settings file {settings_path:?}"))?;
@@ -52,7 +56,10 @@ impl ConfigStore {
         }
 
         let store = Self {
-            dirs,
+            root_dir,
+            config_dir,
+            state_dir,
+            cache_dir,
             settings: RwLock::new(settings),
         };
 
@@ -86,15 +93,19 @@ impl ConfigStore {
     }
 
     pub fn config_path(&self) -> PathBuf {
-        PathBuf::from(self.dirs.config_dir())
+        self.config_dir.clone()
     }
 
     pub fn state_path(&self) -> Option<PathBuf> {
-        self.dirs.state_dir().map(PathBuf::from)
+        Some(self.state_dir.clone())
     }
 
     pub fn cache_path(&self) -> PathBuf {
-        PathBuf::from(self.dirs.cache_dir())
+        self.cache_dir.clone()
+    }
+
+    pub fn root_path(&self) -> PathBuf {
+        self.root_dir.clone()
     }
 
     fn persist_locked(&self, settings: &AppSettings) -> Result<()> {
