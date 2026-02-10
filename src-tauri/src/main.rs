@@ -2426,9 +2426,14 @@ fn set_comfyui_install_base(
                 path = cwd.join(path);
             }
         }
-        Some(strip_windows_verbatim_prefix(
-            &std::fs::canonicalize(&path).unwrap_or(path),
-        ))
+        let resolved = strip_windows_verbatim_prefix(&std::fs::canonicalize(&path).unwrap_or(path));
+        if is_forbidden_install_path(&resolved) {
+            return Err(
+                "Install base folder is blocked. Avoid C:\\, Windows, or Program Files."
+                    .to_string(),
+            );
+        }
+        Some(resolved)
     };
     state
         .context
