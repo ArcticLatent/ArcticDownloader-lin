@@ -1,8 +1,13 @@
 [package]
 name = "arctic-downloader-tauri"
-version = "0.3.4"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.76"
+authors = ["Arctic Latent"]
+
+[[bin]]
+name = "Arctic-ComfyUI-Helper"
+path = "src/main.rs"
 
 [package.metadata]
 
@@ -23,3 +28,4 @@ tokio = { version = "1", features = ["rt"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 arctic-downloader = { path = ".." }
+tauri-plugin-single-instance = "2"

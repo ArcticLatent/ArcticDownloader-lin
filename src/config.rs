@@ -20,7 +20,7 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn new() -> Result<Self> {
-        let dirs = ProjectDirs::from("io", "github", "ArcticDownloader")
+        let dirs = ProjectDirs::from("io.github", "ArcticHelper", "ArcticHelper")
             .ok_or_else(|| anyhow!("unable to resolve project directories for {APP_ID}"))?;
 
         fs::create_dir_all(dirs.config_dir()).with_context(|| {

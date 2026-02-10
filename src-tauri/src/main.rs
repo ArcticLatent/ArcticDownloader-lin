@@ -1,17 +1,22 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use arctic_downloader::{
     app::{build_context, AppContext},
     config::AppSettings,
     download::{CivitaiPreview, DownloadSignal},
     env_flags::auto_update_enabled,
     model::{LoraDefinition, ModelCatalog},
-    ram::RamTier,
+    ram::{detect_ram_profile, RamTier},
 };
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
     net::ToSocketAddrs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
 };
 use tauri::{
     menu::MenuBuilder,
@@ -163,10 +168,11 @@ fn default_true() -> bool {
 fn get_app_snapshot(state: State<'_, AppState>) -> AppSnapshot {
     let catalog = state.context.catalog.catalog_snapshot();
     let (nvidia_gpu_name, nvidia_gpu_vram_mb) = detect_nvidia_gpu();
+    let ram_profile = state.context.ram_profile.or_else(detect_ram_profile);
     AppSnapshot {
         version: state.context.display_version.clone(),
-        total_ram_gb: state.context.total_ram_gb(),
-        ram_tier: state.context.ram_tier().map(|tier| tier.label().to_string()),
+        total_ram_gb: ram_profile.map(|profile| profile.total_gb),
+        ram_tier: ram_profile.map(|profile| profile.tier.label().to_string()),
         nvidia_gpu_name,
         nvidia_gpu_vram_mb,
         model_count: catalog.models.len(),
@@ -179,14 +185,21 @@ fn detect_nvidia_gpu() -> (Option<String>, Option<u64>) {
     (detailed.name, detailed.vram_mb)
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct NvidiaGpuDetails {
     name: Option<String>,
     vram_mb: Option<u64>,
     driver_version: Option<String>,
 }
 
-fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
+static GPU_DETAILS_CACHE: OnceLock<Mutex<Option<NvidiaGpuDetails>>> = OnceLock::new();
+static GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn gpu_details_cache() -> &'static Mutex<Option<NvidiaGpuDetails>> {
+    GPU_DETAILS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn query_nvidia_gpu_details_blocking() -> NvidiaGpuDetails {
     let output = std::process::Command::new("nvidia-smi")
         .args([
             "--query-gpu=name,memory.total,driver_version",
@@ -229,6 +242,25 @@ fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
         vram_mb,
         driver_version,
     }
+}
+
+fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
+    if let Ok(guard) = gpu_details_cache().lock() {
+        if let Some(details) = guard.clone() {
+            return details;
+        }
+    }
+
+    if !GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
+        std::thread::spawn(|| {
+            let details = query_nvidia_gpu_details_blocking();
+            if let Ok(mut guard) = gpu_details_cache().lock() {
+                *guard = Some(details);
+            }
+        });
+    }
+
+    NvidiaGpuDetails::default()
 }
 
 #[tauri::command]
@@ -593,6 +625,20 @@ fn has_dns(host: &str, port: u16) -> bool {
 fn run_comfyui_preflight(state: State<'_, AppState>, request: ComfyInstallRequest) -> ComfyPreflightResponse {
     let mut items: Vec<PreflightItem> = Vec::new();
     let mut ok = true;
+
+    if request.install_root.trim().is_empty() {
+        push_preflight(
+            &mut items,
+            "warn",
+            "Install base folder",
+            "Select an install folder to run full preflight checks.",
+        );
+        return ComfyPreflightResponse {
+            ok: false,
+            summary: "Install folder not selected yet.".to_string(),
+            items,
+        };
+    }
 
     let base_root = match normalize_path(&request.install_root) {
         Ok(path) => path,
@@ -4101,6 +4147,9 @@ fn main() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            let _ = show_main_window(app);
+        }))
         .setup(|app| {
             setup_tray(app.handle())?;
             Ok(())

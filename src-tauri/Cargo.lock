@@ -284,7 +284,7 @@ checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
 name = "arctic-downloader"
-version = "0.3.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "arctic-downloader-tauri"
-version = "0.3.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "arctic-downloader",
@@ -327,6 +327,7 @@ dependencies = [
  "sha2",
  "tauri",
  "tauri-build",
+ "tauri-plugin-single-instance",
  "tokio",
  "tokio-util",
 ]
@@ -6871,6 +6872,21 @@ dependencies = [
  "syn 2.0.114",
  "tauri-codegen",
  "tauri-utils",
+]
+
+[[package]]
+name = "tauri-plugin-single-instance"
+version = "2.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acba6b5ca527a96cdfcc96ae09b09ccb91ddff5e33978ca6873b96ea16bb404c"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "thiserror 2.0.18",
+ "tracing",
+ "windows-sys 0.60.2",
+ "zbus",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@ use crate::{
     config::ConfigStore,
     download::DownloadManager,
     env_flags::remote_refresh_enabled,
-    ram::{detect_ram_profile, RamProfile, RamTier},
+    ram::{RamProfile, RamTier},
     ui,
     updater::Updater,
 };
@@ -63,9 +63,13 @@ pub fn build_context() -> Result<AppContext> {
         let catalog = Arc::new(CatalogService::new(config.clone())?);
 
         if remote_refresh_enabled() {
-            if let Err(err) = runtime.block_on(catalog.refresh_from_remote()) {
-                warn!("Unable to refresh catalog from remote source: {err:#}");
-            }
+            let catalog_for_refresh = Arc::clone(&catalog);
+            let runtime_for_refresh = Arc::clone(&runtime);
+            runtime_for_refresh.spawn(async move {
+                if let Err(err) = catalog_for_refresh.refresh_from_remote().await {
+                    warn!("Unable to refresh catalog from remote source: {err:#}");
+                }
+            });
         } else {
             info!("Skipping remote catalog refresh (ARCTIC_SKIP_REMOTE_REFRESH present).");
         }
@@ -77,15 +81,13 @@ pub fn build_context() -> Result<AppContext> {
             config.clone(),
             display_version.clone(),
         )?);
-        let ram_profile = detect_ram_profile();
-
         Ok(AppContext {
             runtime,
             config,
             catalog,
             downloads,
             updater,
-            ram_profile,
+            ram_profile: None,
             display_version,
         })
 }

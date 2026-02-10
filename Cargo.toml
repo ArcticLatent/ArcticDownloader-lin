@@ -1,8 +1,9 @@
 [package]
 name = "arctic-downloader"
-version = "0.3.4"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.76"
+authors = ["Arctic Latent"]
 
 [dependencies]
 anyhow = "1"

@@ -1,6 +1,5 @@
 ﻿const invoke = window.__TAURI__?.core?.invoke;
 const listen = window.__TAURI__?.event?.listen || window.__TAURI__?.core?.listen;
-
 const state = {
   catalog: null,
   settings: null,
@@ -1162,9 +1161,7 @@ async function bootstrap() {
     logLine("Tauri invoke bridge unavailable.");
     return;
   }
-
-  const [snapshot, settings, catalog] = await Promise.all([
-    invoke("get_app_snapshot"),
+  const [settings, catalog] = await Promise.all([
     invoke("get_settings"),
     invoke("get_catalog"),
   ]);
@@ -1172,11 +1169,22 @@ async function bootstrap() {
   state.settings = settings;
   state.catalog = catalog;
 
-  const ramText = `${snapshot.total_ram_gb?.toFixed?.(1) ?? "?"} GB RAM`;
-  const gpuText = snapshot.nvidia_gpu_name
-    ? `${snapshot.nvidia_gpu_name}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
-    : "NVIDIA GPU: Not detected";
-  el.version.textContent = `Version ${snapshot.version} • ${ramText} • ${gpuText}`;
+  el.version.textContent = `Version ${settings?.last_installed_version || "0.1.0"} • loading system info...`;
+  const refreshSnapshot = (attempt = 0) => {
+    invoke("get_app_snapshot")
+      .then((snapshot) => {
+        const ramText = `${snapshot.total_ram_gb?.toFixed?.(1) ?? "?"} GB RAM`;
+        const gpuText = snapshot.nvidia_gpu_name
+          ? `${snapshot.nvidia_gpu_name}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
+          : "NVIDIA GPU: Not detected";
+        el.version.textContent = `Version ${snapshot.version} • ${ramText} • ${gpuText}`;
+        if (!snapshot.nvidia_gpu_name && attempt < 8) {
+          setTimeout(() => refreshSnapshot(attempt + 1), 600);
+        }
+      })
+      .catch(() => {});
+  };
+  refreshSnapshot();
 
   el.comfyRoot.value = settings.comfyui_root || "";
   el.comfyRootLora.value = settings.comfyui_root || "";
@@ -1192,23 +1200,37 @@ async function bootstrap() {
   setComfyQuickActions(settings.comfyui_last_install_dir || "", settings.comfyui_root || "");
   setOptions(el.comfyTorchProfile, comfyTorchProfiles);
 
-  try {
-    const reco = await invoke("get_comfyui_install_recommendation");
-    el.comfyTorchRecommended.textContent = `Recommended '${reco.torch_label}' for your GPU`;
-    state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
-    if (comfyTorchProfiles.some((x) => x.value === reco.torch_profile)) {
-      el.comfyTorchProfile.value = reco.torch_profile;
-    }
-    applyComfyAddonRules();
-  } catch (err) {
-    el.comfyTorchRecommended.textContent = "Recommended 'Torch 2.8.0 + cu128' for your GPU";
-    el.comfyTorchProfile.value = "torch280_cu128";
-    state.comfySage3Eligible = false;
-    applyComfyAddonRules();
-    logComfyLine(`Recommendation detection failed: ${err}`);
-  }
+  const refreshRecommendation = (attempt = 0) => {
+    invoke("get_comfyui_install_recommendation")
+      .then((reco) => {
+        el.comfyTorchRecommended.textContent = `Recommended '${reco.torch_label}' for your GPU`;
+        state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
+        if (comfyTorchProfiles.some((x) => x.value === reco.torch_profile)) {
+          el.comfyTorchProfile.value = reco.torch_profile;
+        }
+        applyComfyAddonRules();
+        if (!reco.gpu_name && attempt < 8) {
+          setTimeout(() => refreshRecommendation(attempt + 1), 600);
+        }
+      })
+      .catch((err) => {
+        el.comfyTorchRecommended.textContent = "Recommended 'Torch 2.8.0 + cu128' for your GPU";
+        el.comfyTorchProfile.value = "torch280_cu128";
+        state.comfySage3Eligible = false;
+        applyComfyAddonRules();
+        logComfyLine(`Recommendation detection failed: ${err}`);
+      });
+  };
+  refreshRecommendation();
 
-  await runComfyPreflight();
+  const initialInstallRoot = String(el.comfyInstallRoot?.value || "").trim();
+  if (initialInstallRoot) {
+    setTimeout(() => {
+      runComfyPreflight().catch(() => {});
+    }, 0);
+  } else {
+    renderPreflight(null);
+  }
   if (settings.comfyui_install_base) {
     await syncComfyInstallSelection(settings.comfyui_install_base, false);
   } else if (settings.comfyui_root) {
@@ -1222,7 +1244,9 @@ async function bootstrap() {
   await refreshComfyResumeState();
   await refreshComfyRuntimeStatus();
   updateComfyModeUi();
-  await loadInstalledAddonState(el.comfyRoot.value || "");
+  setTimeout(() => {
+    loadInstalledAddonState(el.comfyRoot.value || "").catch(() => {});
+  }, 0);
 
   setOptions(el.modelFamily, familyOptions(catalog.models));
   setOptions(el.vramTier, vramOptions.map((v) => ({ value: v.id, label: v.label })), "tier_s");
@@ -1231,9 +1255,11 @@ async function bootstrap() {
 
   setOptions(el.loraFamily, loraFamilyOptions(catalog.loras));
   refreshLoraSelectors();
-  await loadLoraMetadata();
+  setTimeout(() => {
+    loadLoraMetadata().catch(() => {});
+  }, 0);
 
-  logLine(`Loaded ${snapshot.model_count} models and ${snapshot.lora_count} LoRAs.`);
+  logLine(`Loaded ${catalog.models?.length || 0} models and ${catalog.loras?.length || 0} LoRAs.`);
 }
 
 el.tabComfyui.addEventListener("click", () => switchTab("comfyui"));
@@ -1705,14 +1731,17 @@ renderTransfers();
   await initEventListeners();
   try {
     await bootstrap();
-    try {
-      const startup = await invoke("auto_update_startup");
-      if (startup?.available) {
-        logLine(`Auto update triggered for v${startup.version}.`);
-      }
-    } catch (err) {
-      logLine(`Startup update check failed: ${err}`);
-    }
+    setTimeout(() => {
+      invoke("auto_update_startup")
+        .then((startup) => {
+          if (startup?.available) {
+            logLine(`Auto update triggered for v${startup.version}.`);
+          }
+        })
+        .catch((err) => {
+          logLine(`Startup update check failed: ${err}`);
+        });
+    }, 0);
   } catch (err) {
     logLine(`Initialization failed: ${err}`);
   }
@@ -1722,3 +1751,8 @@ window.setInterval(() => {
   if (!invoke) return;
   refreshComfyRuntimeStatus().catch(() => {});
 }, 2000);
+
+
+
+
+
