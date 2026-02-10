@@ -1,156 +1,189 @@
-# Arctic Downloader
+﻿# Arctic ComfyUI Helper (Private Technical README)
 
-Arctic Downloader is a Rust/Slint desktop companion that helps ComfyUI users pull the correct
-model variants (and their auxiliary files) for the GPU VRAM and system RAM they have on hand.
-Viewers of the accompanying tutorial series can pick a “master model”, choose their GPU VRAM + RAM
-tiers, point the app at their ComfyUI install, and let the app grab the curated artifacts from
-Hugging Face into the correct `ComfyUI/models/*` subfolders. Downloads are filtered by the VRAM tier
-selected in-app, while RAM-sensitive artifacts can be gated per tier so lower-memory machines only
-receive the assets they can realistically run.
+This repository (`ArcticDownloader-win`) is the private/source repo for the Windows app.
 
-## Current Status
+Public release repo: `https://github.com/ArcticLatent/Arctic-Helper`
 
-This repository currently contains:
+`README.public.md` is the public-facing README template for the release repo.
+This file (`README.md`) is the internal technical reference.
 
-- A Rust Slint desktop application (Windows-first) with GPU VRAM and system RAM selectors, per-tier legends, and
-  artifact download progress.
-- Async download services that place master-model artifacts inside dedicated folders
-  (`ComfyUI/models/<category>/<model_id>/…`) and LoRA assets inside family-normalised subdirectories
-  (`ComfyUI/models/loras/<family_slug>/…`).
-- Optional Civitai API integration for LoRA previews, trigger words, creator attribution, and
-  authenticated downloads (with clear guidance when a token is missing).
-- A versioned catalog template (`data/catalog.json`) describing master models, variants, “always-on”
-  assets, and target categories with optional RAM tier requirements.
+## Product Scope
 
-## Repository Layout
+Arctic ComfyUI Helper is a Windows-first Rust + Tauri app that includes:
+- Tier-aware model downloader for ComfyUI (models + dependencies + LoRAs)
+- In-app LoRA metadata/preview flow (including Civitai token support)
+- ComfyUI installer/manager module (uv-managed Python + `.venv`)
+- Optional add-ons and custom node management (install/remove/toggle)
+- System tray control for ComfyUI start/stop even when main window is hidden
+- Self-update support through GitHub release `update.json`
 
-- `Cargo.toml` / `src/` — application sources.
-- `data/catalog.json` — curated model/variant metadata shipped with the app.
+Flatpak/Linux-specific UI/admin bits are intentionally not part of this app.
 
-## Developing Locally
+## Architecture
 
-1. Install the Rust toolchain and Visual Studio Build Tools (Desktop development with C++).
-2. Fetch Rust dependencies and build the debug binary:
-   ```bash
-   cargo check
-   cargo run
-   ```
-3. The app launches with master-model, GPU VRAM, and system RAM pickers. The variant list filters to
-   the chosen GPU tier, while the legend summarises the four supported tiers (S/A/B/C) and their
-   expected quantisations. RAM tier selection controls which RAM-gated artifacts are offered.
+- Core crate: `Cargo.toml` + `src/`
+  - Shared services: catalog/config/download/updater/app context
+- Desktop shell: `src-tauri/`
+  - Tauri commands and Windows integration in `src-tauri/src/main.rs`
+  - Frontend files in `src-tauri/dist/` (`index.html`, `main.js`, `style.css`)
 
-### Tauri Preview Shell
+Key identifiers and branding:
+- App ID: `io.github.ArcticHelper`
+- Product name: `Arctic ComfyUI Helper`
+- Publisher: `Arctic Latent`
+- Binary name: `Arctic-ComfyUI-Helper.exe`
 
-A Tauri shell is now available in `src-tauri/` and reuses the same Rust backend services
-(`catalog`, `config`, `download`, `updater`) via Tauri commands.
+## Data and Paths
 
-Run it with:
-```bash
-cargo run --manifest-path src-tauri/Cargo.toml
-```
+Config/cache use `ProjectDirs("io.github", "ArcticHelper", "ArcticHelper")`.
 
-Build a standalone Windows executable (`.exe`) with:
-```bash
-cargo tauri build --no-bundle
-```
-The generated executable is available at `src-tauri/target/release/Arctic-ComfyUI-Helper.exe`.
-If `cargo tauri` is unavailable, install it once with `cargo install tauri-cli --version "^2"`.
+Important runtime locations:
+- Settings/config: `%LOCALAPPDATA%\io.github\ArcticHelper\config\settings.json`
+- Cache root: `%LOCALAPPDATA%\io.github\ArcticHelper\cache\`
+- ComfyUI shared runtime cache:
+  `%LOCALAPPDATA%\io.github\ArcticHelper\cache\comfyui-runtime\`
+  - contains shared `.tools` and `.python` for installer pipeline
 
-### Windows Build Note
+ComfyUI install mode behavior:
+- Install New: select base folder -> app creates `ComfyUI`, `ComfyUI-01`, `ComfyUI-02`, ...
+- Manage Existing: select base with existing install(s), detect and manage installation state
 
-The Windows build intentionally excludes `catalog_admin`. Curate `data/catalog.json` in your source
-workflow and ship updates through the remote catalog endpoint used by the app.
+## Catalog and Downloading
 
-> **Note:** LoRA previews and downloads that originate from Civitai require a personal API token.
-> Enter this once in the LoRA page and the app will handle creator metadata, trigger words, and
-> authenticated downloads. If the token is missing or invalid the UI now explains the issue instead
-> of leaving empty folders.
+Catalog source behavior:
+- Bundled fallback: `data/catalog.json`
+- Remote default:
+  `https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/data/catalog.json`
+- ETag-based refresh and cache write are supported
 
-### Formatting & Lints
+Model/LoRA downloader:
+- Resolves target ComfyUI subfolders automatically
+- Shows active/completed transfers and per-item progress
+- Supports cancellation
+- LoRA preview metadata supports creator/trigger/description handling
 
-Rustfmt and Clippy are recommended:
-```bash
-cargo fmt
-cargo clippy --all-features
-```
-(Install the `rustfmt` and `clippy` components through `rustup component add rustfmt clippy` if they
-are not already available.)
+## ComfyUI Installer Module
 
-## Building a Windows Standalone EXE
+Primary model:
+- PowerShell/orchestrated from inside app (no external installer UI required)
+- uv-managed Python (`3.12.10`) and per-install `.venv`
+- Torch profile auto-recommendation by GPU + manual override dropdown
 
-Build directly through Tauri:
-```bash
-cargo tauri build --no-bundle
-```
+Current torch profiles:
+- `torch271_cu128`
+- `torch280_cu128`
+- `torch291_cu130`
 
-Publish `src-tauri/target/release/Arctic-ComfyUI-Helper.exe` and `update.json` in your GitHub release workflow.
+Add-ons (checkbox-managed):
+- SageAttention
+- SageAttention3 (RTX 50 only)
+- FlashAttention
+- InsightFace
+- Nunchaku
+- Trellis2 (requires minimum Torch 2.8.0 + cu128)
+- Pinned Memory (default ON)
 
-## Releases & Auto-Update Manifest
+Attention backend rules:
+- Exactly one of SageAttention / SageAttention3 / FlashAttention / Nunchaku at a time
+- Toggle flow supports removal/install transitions and confirmation prompts
+- Existing install mode applies backend changes by uninstall/install and keeps state in sync
 
-- On startup the app fetches an update manifest from
+Custom nodes (checkbox-managed):
+- comfyui-manager
+- ComfyUI-Easy-Use
+- rgthree-comfy
+- ComfyUI-GGUF
+- comfyui-kjnodes
+
+`comfyui_controlnet_aux` was intentionally removed from selectable custom nodes.
+
+## ComfyUI Runtime Control
+
+App supports starting/stopping ComfyUI directly.
+
+System tray:
+- Shows app + ComfyUI status
+- Right-click actions include Start/Stop/Show/Quit
+- Tray remains available while window is hidden
+
+Desktop shortcuts:
+- Start shortcut creation for installed ComfyUI instances
+- Naming supports multiple installs (`Start ComfyUI`, `Start ComfyUI 01`, ...)
+
+## Update Mechanism
+
+Updater defaults:
+- Manifest URL:
   `https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/update.json`
-  (override with `ARCTIC_UPDATE_MANIFEST_URL`). If the manifest advertises a higher semver version,
-  the app downloads the published standalone `.exe`, verifies its SHA-256, replaces the current executable, and restarts.
-- Manifest schema:
+- Fallback standalone name: `Arctic-ComfyUI-Helper.exe`
 
-  ```json
-  {
-    "version": "0.1.0",
-    "download_url": "https://github.com/ArcticLatent/Arctic-Helper/releases/download/v0.1.0/Arctic-ComfyUI-Helper.exe",
-    "sha256": "<sha256sum-of-the-exe>",
-    "notes": "Optional release notes"
-  }
-  ```
+Manifest schema:
+```json
+{
+  "version": "0.1.0",
+  "download_url": "https://github.com/ArcticLatent/Arctic-Helper/releases/download/v0.1.0/Arctic-ComfyUI-Helper.exe",
+  "sha256": "<sha256>",
+  "notes": "Release notes"
+}
+```
 
-- One-command release flow: run `.\scripts\release.ps1`, enter version and release notes when prompted.
-  It will clean-build, produce `dist/Arctic-ComfyUI-Helper.exe`, `dist/Arctic-ComfyUI-Helper.exe.sha256`,
-  and `dist/update.json`, then create or update release tag `v<x.y.z>` on `ArcticLatent/Arctic-Helper`.
-- Disable the automatic check with `ARCTIC_SKIP_AUTO_UPDATE=1`; re-enable with `ARCTIC_AUTO_UPDATE=1`.
+Notes:
+- `Check Updates` will error until release repo has a valid `update.json` asset.
+- Startup auto-update can be toggled via existing env flags.
 
-## Catalog Curation
+## Icons and Branding Assets
 
-The app ships and trusts the checked-in `data/catalog.json`. Each entry maps:
+- Primary Windows icon is sourced from `assets/favicon.ico`
+- Tauri bundle icon points to `src-tauri/icons/favicon.ico`
+- Same icon is used for app/tray/shortcut flows where supported
 
-- `models[].always[]` to named groups of artifacts that are always downloaded for a model.
-- `models[].variants[]` to GPU `tier` requirements (S/A/B/C) plus optional notes, sizes, and
-  quantisation strings.
-- `artifacts[]` to Hugging Face repositories, file paths, ComfyUI destination categories, and
-  optional RAM tier requirements.
+If Windows still shows old icon after changing `.ico`, clear icon cache and rebuild.
 
-LoRA definitions (`catalog.loras[]`) now download into folders derived from their `family` name so
-multiple LoRAs can coexist without filename clashes.
+## Development Commands
 
-Update this file between tutorial episodes to control which exact files viewers receive. Future work
-will add signature verification and remote catalog refreshes.
+From repository root:
 
-### Remote Catalog Refresh
+```powershell
+# dev run
+cargo tauri dev
 
-- The app boots using a cached copy of `catalog.json` (stored under
-  `~/.cache/io.github.ArcticHelper/catalog.json`) or the bundled fallback.
-- On launch it performs an HTTP GET against the catalog endpoint recorded in `settings.json`
-  (`catalog_endpoint`). A successful `200 OK` replaces the in-memory catalog, persists the JSON to
-  the cache, and stores the returned `ETag` so subsequent runs can short-circuit with `304 Not
-  Modified`.
-- Builds default to `https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/data/catalog.json`
-  as the remote source. Override this at runtime with `ARCTIC_CATALOG_URL` or at build-time via the
-  `ARCTIC_DEFAULT_CATALOG_URL` environment variable. Setting either to an empty string disables the
-  remote fetch.
+# sanity check
+cargo check --manifest-path .\src-tauri\Cargo.toml
 
-## LoRA Downloads & Civitai Integration
+# production binary (no installer)
+cargo tauri build --no-bundle
+```
 
-- LoRA assets fetched from Civitai display preview media, trigger words, and creator attribution.
-- Each downloaded LoRA is placed under `ComfyUI/models/loras/<family_slug>/…`; the slug is derived
-  from the LoRA family name and normalised to lowercase with underscores.
-- If a Civitai request returns `401/403` the UI surfaces a clear “You are not authorized…” message
-  instead of silently failing. Paste your personal Civitai API token in the LoRA section once to
-  enable authenticated downloads.
+Release binary output:
+- `src-tauri\target\release\Arctic-ComfyUI-Helper.exe`
 
-## Roadmap Highlights
+## Automated Release Flow
 
-- Hook up the download manager with resume, checksums, and portal-based folder writing.
-- License acknowledgement flow per Hugging Face repository.
-- Settings page for concurrency limits, quantized preferences, and catalog refresh.
-- Telemetry toggle (opt-in) and localization scaffolding.
+Use one command:
 
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\release.ps1
+```
 
+It will:
+1. Prompt for version
+2. Prompt for release notes (end with `END` line)
+3. Bump versions in:
+   - `Cargo.toml`
+   - `src-tauri/Cargo.toml`
+   - `src-tauri/tauri.conf.json`
+4. Clean + build (`cargo clean`, `cargo tauri build --no-bundle`)
+5. Generate artifacts in `dist/`:
+   - `Arctic-ComfyUI-Helper.exe`
+   - `Arctic-ComfyUI-Helper.exe.sha256`
+   - `update.json`
+   - release notes markdown
+6. Create/update GitHub release on `ArcticLatent/Arctic-Helper`
 
+Prerequisite:
+- GitHub CLI authenticated: `gh auth login`
+
+## Repo Notes
+
+- This is the internal repo and can include technical/implementation notes.
+- `README.public.md` is maintained separately for public release consumption.
