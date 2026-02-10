@@ -24,7 +24,7 @@
     "active": true,
     "publisher": "Arctic Latent",
     "icon": [
-      "icons/icon.ico"
+      "icons/favicon.ico"
     ],
     "targets": "all"
   }
