@@ -3202,10 +3202,10 @@ fn open_folder(path: String) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
         let open_target = normalize_explorer_path(&target);
-        std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(&open_target)
-            .spawn()
+        let mut cmd = std::process::Command::new("explorer.exe");
+        cmd.arg(&open_target);
+        apply_background_command_flags(&mut cmd);
+        cmd.spawn()
             .map_err(|err| format!("Failed to open folder: {err}"))?;
         return Ok(open_target);
     }
@@ -3226,10 +3226,10 @@ fn open_external_url(url: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(trimmed)
-            .spawn()
+        let mut cmd = std::process::Command::new("explorer.exe");
+        cmd.arg(trimmed);
+        apply_background_command_flags(&mut cmd);
+        cmd.spawn()
             .map_err(|err| format!("Failed to open link: {err}"))?;
         return Ok(());
     }

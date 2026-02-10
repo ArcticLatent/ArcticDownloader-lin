@@ -74,11 +74,19 @@ Inside the **ComfyUI** tab, you can:
 ## 🚀 Getting Started
 
 1. Download the latest `Arctic-ComfyUI-Helper.exe` from this repo's **Releases** page.
-2. Run the app.
+2. Run the app. This is a **standalone app** (no installer required).
 3. In **Models** / **LoRAs**, select your existing ComfyUI folder to download assets.
 4. In **ComfyUI** tab, use **Install New** (or **Manage Existing**) if you want the app to install/manage ComfyUI itself.
+5. Optional advanced logging: launch from terminal with  
+   `.\Arctic-ComfyUI-Helper.exe --nerdstats`
 
 That is it. Pick your setup, click, and the app handles the rest.
+
+---
+
+## 🖼️ Demo Preview
+
+![Arctic Downloader Demo](assets/demo.png)
 
 ---
 
@@ -114,6 +122,7 @@ Open an issue in this repository with:
 - What you expected
 - What happened
 - Any log lines shown in the app
+- If possible, run with `--nerdstats` and include the exact terminal logs in your issue
 
 ---
 
@@ -125,3 +134,13 @@ Burce Boran 🎥 Asset Supervisor / VFX Artist | 🐧 Arctic Latent
 [![Patreon – Arctic Latent](https://img.shields.io/badge/Patreon-Arctic%20Latent-FF424D?logo=patreon&logoColor=white)](https://patreon.com/ArcticLatent)
 [![Hugging Face – Arctic Latent](https://img.shields.io/badge/HuggingFace-Arctic%20Latent-FFD21E?logo=huggingface&logoColor=white)](https://huggingface.co/arcticlatent)
 [![Vimeo – Demo Reel](https://img.shields.io/badge/Vimeo-Demo%20Reel-1ab7ea?logo=vimeo&logoColor=white)](https://vimeo.com/1044521891)
+
+---
+
+Copyright (c) 2026 Arctic Helper. All Rights Reserved.
+
+This software is proprietary and closed-source.
+
+You may download and use for personal use only. Redistribution, modification, reverse engineering, or commercial use of this software or any included assets is prohibited without written permission from the copyright holder.
+
+The software is provided “as is” without warranty of any kind.
