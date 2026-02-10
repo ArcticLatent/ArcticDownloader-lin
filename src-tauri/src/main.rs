@@ -19,7 +19,7 @@ use std::{
     },
 };
 use tauri::{
-    menu::MenuBuilder,
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
@@ -194,6 +194,16 @@ struct NvidiaGpuDetails {
 
 static GPU_DETAILS_CACHE: OnceLock<Mutex<Option<NvidiaGpuDetails>>> = OnceLock::new();
 static GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
+static TRAY_MENU_ITEMS: OnceLock<Mutex<Option<TrayMenuItems>>> = OnceLock::new();
+
+struct TrayMenuItems {
+    start: MenuItem<tauri::Wry>,
+    stop: MenuItem<tauri::Wry>,
+}
+
+fn tray_menu_items() -> &'static Mutex<Option<TrayMenuItems>> {
+    TRAY_MENU_ITEMS.get_or_init(|| Mutex::new(None))
+}
 
 fn gpu_details_cache() -> &'static Mutex<Option<NvidiaGpuDetails>> {
     GPU_DETAILS_CACHE.get_or_init(|| Mutex::new(None))
@@ -4026,16 +4036,32 @@ fn update_tray_comfy_status(app: &AppHandle, running: bool) {
         };
         let _ = tray.set_tooltip(Some(tooltip));
     }
+
+    if let Ok(guard) = tray_menu_items().lock() {
+        if let Some(items) = guard.as_ref() {
+            let _ = items.start.set_enabled(!running);
+            let _ = items.stop.set_enabled(running);
+        }
+    }
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let menu = MenuBuilder::new(app)
-        .text("tray_show", "Show App")
-        .text("tray_start", "Start ComfyUI")
-        .text("tray_stop", "Stop ComfyUI")
-        .separator()
-        .text("tray_quit", "Quit")
-        .build()?;
+    let show_item = MenuItem::with_id(app, "tray_show", "Show App", true, None::<&str>)?;
+    let start_item = MenuItem::with_id(app, "tray_start", "Start ComfyUI", true, None::<&str>)?;
+    let stop_item = MenuItem::with_id(app, "tray_stop", "Stop ComfyUI", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[&show_item, &start_item, &stop_item, &separator, &quit_item],
+    )?;
+
+    if let Ok(mut guard) = tray_menu_items().lock() {
+        *guard = Some(TrayMenuItems {
+            start: start_item.clone(),
+            stop: stop_item.clone(),
+        });
+    }
 
     let mut builder = TrayIconBuilder::with_id("arctic_tray")
         .menu(&menu)
