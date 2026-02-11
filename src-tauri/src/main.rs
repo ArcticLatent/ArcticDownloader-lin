@@ -170,8 +170,6 @@ struct InstallSummaryItem {
 }
 
 const UV_PYTHON_VERSION: &str = "3.12.10";
-#[cfg(target_os = "windows")]
-const FAVICON_ICO_BYTES: &[u8] = include_bytes!("../../assets/favicon.ico");
 fn default_true() -> bool {
     true
 }
@@ -1506,11 +1504,6 @@ fn install_custom_node(
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn ps_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
 fn selected_attention_backend(request: &ComfyInstallRequest) -> Option<&'static str> {
     if request.include_flash_attention {
         Some("flash")
@@ -1553,85 +1546,6 @@ fn comfyui_launch_args(pinned_memory_enabled: bool, attention_backend: Option<&s
     }
     append_attention_launch_arg(&mut args, attention_backend);
     args
-}
-
-fn create_comfyui_desktop_shortcut(
-    comfy_root: &Path,
-    python_exe: &Path,
-    launch_args: &[String],
-) -> Result<(), String> {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (comfy_root, python_exe, launch_args);
-        return Ok(());
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let main_py = comfy_root.join("main.py");
-        if !main_py.exists() || !python_exe.exists() {
-            return Ok(());
-        }
-
-        let shortcut_icon = comfy_root.join(".arctic_helper_icon.ico");
-        if !shortcut_icon.exists() {
-            let _ = std::fs::write(&shortcut_icon, FAVICON_ICO_BYTES);
-        }
-
-        let target = ps_quote(&python_exe.to_string_lossy());
-        let mut parts: Vec<String> = vec![format!("\"{}\"", main_py.to_string_lossy())];
-        parts.extend(launch_args.iter().cloned());
-        let args = ps_quote(&parts.join(" "));
-        let workdir = ps_quote(&comfy_root.to_string_lossy());
-        let icon_loc = ps_quote(&shortcut_icon.to_string_lossy());
-        let folder_name = comfy_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("ComfyUI")
-            .to_string();
-        let mut shortcut_title = "Start ComfyUI".to_string();
-        let lower = folder_name.to_ascii_lowercase();
-        if lower == "comfyui" {
-            shortcut_title = "Start ComfyUI 01".to_string();
-        } else if let Some(rest) = lower.strip_prefix("comfyui-") {
-            if rest.chars().all(|ch| ch.is_ascii_digit()) {
-                let suffix = rest.parse::<u32>().ok().unwrap_or(0);
-                if suffix > 0 {
-                    shortcut_title = format!("Start ComfyUI {:02}", suffix);
-                }
-            }
-        }
-        let lnk_name = ps_quote(&format!("{shortcut_title}.lnk"));
-        let command = format!(
-            "$desktop=[Environment]::GetFolderPath('Desktop');\
-             $lnk=Join-Path $desktop '{lnk_name}';\
-             $w=New-Object -ComObject WScript.Shell;\
-             $s=$w.CreateShortcut($lnk);\
-             $s.TargetPath='{target}';\
-             $s.Arguments='{args}';\
-             $s.WorkingDirectory='{workdir}';\
-             $s.IconLocation='{icon_loc}';\
-             $s.Save();"
-        );
-
-        let mut cmd = std::process::Command::new("powershell");
-        cmd.args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &command,
-        ]);
-        apply_background_command_flags(&mut cmd);
-        let status = cmd
-            .status()
-            .map_err(|err| format!("Failed to create desktop shortcut: {err}"))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err("Failed to create desktop shortcut.".to_string())
-        }
-    }
 }
 
 fn run_comfyui_install(
@@ -2276,17 +2190,7 @@ fn run_comfyui_install(
         );
     }
 
-    let attention_backend = selected_attention_backend(request);
-    let launch_args = comfyui_launch_args(request.include_pinned_memory, attention_backend);
-    if let Err(err) = create_comfyui_desktop_shortcut(&comfy_dir, &py_exe, &launch_args) {
-        emit_install_event(
-            app,
-            "warn",
-            &format!("Desktop shortcut creation failed: {err}"),
-        );
-    } else {
-        emit_install_event(app, "info", "Desktop shortcut created: Start ComfyUI.lnk");
-    }
+    let _attention_backend = selected_attention_backend(request);
 
     write_install_state(&install_root, "completed", "done");
     Ok(comfy_dir)
@@ -3963,19 +3867,6 @@ fn install_named_custom_node(
     install_custom_node(app, root, &custom_nodes, py_exe, repo_url, folder_name)
 }
 
-fn refresh_comfyui_shortcut(state: &AppState, root: &Path) -> Result<(), String> {
-    let settings = state.context.config.settings();
-    let launch_args = comfyui_launch_args(
-        settings.comfyui_pinned_memory_enabled,
-        settings.comfyui_attention_backend.as_deref(),
-    );
-    let py_path = {
-        let probe = python_for_root(root);
-        PathBuf::from(probe.get_program())
-    };
-    create_comfyui_desktop_shortcut(root, &py_path, &launch_args)
-}
-
 #[tauri::command]
 async fn apply_comfyui_component_toggle(
     app: AppHandle,
@@ -4000,7 +3891,6 @@ async fn apply_comfyui_component_toggle(
                 .config
                 .update_settings(|settings| settings.comfyui_pinned_memory_enabled = enabled)
                 .map_err(|err| err.to_string())?;
-            refresh_comfyui_shortcut(&state, &root)?;
             if enabled {
                 Ok("Pinned memory enabled.".to_string())
             } else {
