@@ -2236,7 +2236,10 @@ async fn start_comfyui_install(
         );
         match result {
             Ok(comfy_root) => {
-                let install_dir = comfy_root.clone();
+                let install_dir = comfy_root
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| comfy_root.clone());
                 let managed = app_for_task.state::<AppState>();
                 let _ = managed.context.config.update_settings(|settings| {
                     settings.comfyui_root = Some(comfy_root.clone());

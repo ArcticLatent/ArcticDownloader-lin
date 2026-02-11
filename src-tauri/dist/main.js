@@ -1375,7 +1375,28 @@ async function bootstrap() {
     renderPreflight(null);
   }
   if (settings.comfyui_install_base) {
-    await syncComfyInstallSelection(settings.comfyui_install_base, false);
+    let effectiveBase = normalizeSlashes(settings.comfyui_install_base);
+    try {
+      const inspection = await invoke("inspect_comfyui_path", { path: effectiveBase });
+      const selectedNorm = normalizeSlashes(inspection?.selected || effectiveBase);
+      const detectedNorm = normalizeSlashes(inspection?.detected_root || "");
+      const leaf = selectedNorm.split("\\").pop() || "";
+      const looksLikeComfyInstall = /^comfyui(?:-\d+)?$/i.test(leaf);
+      if (
+        looksLikeComfyInstall &&
+        detectedNorm &&
+        normalizeSlashes(detectedNorm) === selectedNorm
+      ) {
+        const parent = parentDir(selectedNorm);
+        if (parent && parent !== selectedNorm) {
+          effectiveBase = normalizeSlashes(parent);
+          el.comfyInstallRoot.value = effectiveBase;
+          await invoke("set_comfyui_install_base", { comfyuiInstallBase: effectiveBase }).catch(() => {});
+          logComfyLine(`Adjusted install base to parent folder: ${effectiveBase}`);
+        }
+      }
+    } catch (_) {}
+    await syncComfyInstallSelection(effectiveBase, false);
   } else if (settings.comfyui_root) {
     const inferredBase = parentDir(settings.comfyui_root);
     el.comfyInstallRoot.value = inferredBase;
