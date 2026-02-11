@@ -110,6 +110,7 @@ const el = {
   nodeRgthreeComfy: document.getElementById("node-rgthree-comfy"),
   nodeComfyuiGguf: document.getElementById("node-comfyui-gguf"),
   nodeComfyuiKjnodes: document.getElementById("node-comfyui-kjnodes"),
+  nodeComfyuiCrystools: document.getElementById("node-comfyui-crystools"),
 
   comfyRoot: document.getElementById("comfy-root"),
   chooseRoot: document.getElementById("choose-root"),
@@ -396,6 +397,7 @@ function buildComfyInstallRequest() {
     nodeRgthreeComfy: Boolean(el.nodeRgthreeComfy.checked),
     nodeComfyuiGguf: Boolean(el.nodeComfyuiGguf.checked),
     nodeComfyuiKjnodes: Boolean(el.nodeComfyuiKjnodes.checked),
+    nodeComfyuiCrystools: Boolean(el.nodeComfyuiCrystools?.checked),
   };
 }
 
@@ -414,6 +416,7 @@ function resetComfySelectionsToDefaults() {
   if (el.nodeRgthreeComfy) el.nodeRgthreeComfy.checked = false;
   if (el.nodeComfyuiGguf) el.nodeComfyuiGguf.checked = false;
   if (el.nodeComfyuiKjnodes) el.nodeComfyuiKjnodes.checked = false;
+  if (el.nodeComfyuiCrystools) el.nodeComfyuiCrystools.checked = false;
   applyComfyAddonRules();
 }
 
@@ -435,6 +438,7 @@ async function loadInstalledAddonState(comfyuiRoot) {
     if (el.nodeRgthreeComfy) el.nodeRgthreeComfy.checked = Boolean(installed?.node_rgthree_comfy);
     if (el.nodeComfyuiGguf) el.nodeComfyuiGguf.checked = Boolean(installed?.node_comfyui_gguf);
     if (el.nodeComfyuiKjnodes) el.nodeComfyuiKjnodes.checked = Boolean(installed?.node_comfyui_kjnodes);
+    if (el.nodeComfyuiCrystools) el.nodeComfyuiCrystools.checked = Boolean(installed?.node_comfyui_crystools);
     applyComfyAddonRules();
   } catch (_) {
     // Ignore when root is unset or not fully installed yet.
@@ -1684,6 +1688,10 @@ el.nodeComfyuiGguf?.addEventListener("change", () => {
 });
 el.nodeComfyuiKjnodes?.addEventListener("change", () => {
   applyComponentToggleFromCheckbox(el.nodeComfyuiKjnodes, "node_comfyui_kjnodes", "comfyui-kjnodes")
+    .catch((err) => logComfyLine(String(err)));
+});
+el.nodeComfyuiCrystools?.addEventListener("change", () => {
+  applyComponentToggleFromCheckbox(el.nodeComfyuiCrystools, "node_comfyui_crystools", "comfyui-crystools")
     .catch((err) => logComfyLine(String(err)));
 });
 el.comfyTorchProfile?.addEventListener("change", () => applyComfyAddonRules());

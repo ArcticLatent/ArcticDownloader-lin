@@ -110,6 +110,8 @@ struct ComfyInstallRequest {
     node_comfyui_gguf: bool,
     node_comfyui_kjnodes: bool,
     #[serde(default)]
+    node_comfyui_crystools: bool,
+    #[serde(default)]
     force_fresh: bool,
 }
 
@@ -2177,6 +2179,31 @@ fn run_comfyui_install(
             }
         }
     }
+    if request.node_comfyui_crystools {
+        write_install_state(&install_root, "in_progress", "node_comfyui_crystools");
+        match install_custom_node(
+            app,
+            &comfy_dir,
+            &addon_root,
+            &py_exe,
+            "https://github.com/crystian/comfyui-crystools.git",
+            "comfyui-crystools",
+        ) {
+            Ok(_) => summary.push(InstallSummaryItem {
+                name: "comfyui-crystools".to_string(),
+                status: "ok".to_string(),
+                detail: "Installed successfully.".to_string(),
+            }),
+            Err(err) => {
+                summary.push(InstallSummaryItem {
+                    name: "comfyui-crystools".to_string(),
+                    status: "failed".to_string(),
+                    detail: err.clone(),
+                });
+                emit_install_event(app, "warn", &format!("comfyui-crystools failed: {err}"));
+            }
+        }
+    }
 
     write_install_summary(&install_root, &summary);
     let failed_count = summary.iter().filter(|x| x.status == "failed").count();
@@ -3301,6 +3328,7 @@ struct ComfyAddonState {
     node_rgthree_comfy: bool,
     node_comfyui_gguf: bool,
     node_comfyui_kjnodes: bool,
+    node_comfyui_crystools: bool,
 }
 
 fn emit_comfyui_runtime_event(app: &AppHandle, phase: &str, message: impl Into<String>) {
@@ -3523,6 +3551,7 @@ fn get_comfyui_addon_state(
         node_rgthree_comfy: custom_node_exists(&root, "rgthree-comfy"),
         node_comfyui_gguf: custom_node_exists(&root, "ComfyUI-GGUF"),
         node_comfyui_kjnodes: custom_node_exists(&root, "comfyui-kjnodes"),
+        node_comfyui_crystools: custom_node_exists(&root, "comfyui-crystools"),
     })
 }
 
@@ -4036,6 +4065,22 @@ async fn apply_comfyui_component_toggle(
                     } else {
                         remove_custom_node_dirs(&root_clone, &["comfyui-kjnodes", "ComfyUI-KJNodes"]);
                         Ok("Removed comfyui-kjnodes.".to_string())
+                    }
+                }
+                "node_comfyui_crystools" => {
+                    if enabled {
+                        ensure_git_available(&app_clone)?;
+                        install_named_custom_node(
+                            &app_clone,
+                            &root_clone,
+                            &py_exe_clone,
+                            "https://github.com/crystian/comfyui-crystools.git",
+                            "comfyui-crystools",
+                        )?;
+                        Ok("Installed comfyui-crystools.".to_string())
+                    } else {
+                        remove_custom_node_dirs(&root_clone, &["comfyui-crystools", "ComfyUI-Crystools"]);
+                        Ok("Removed comfyui-crystools.".to_string())
                     }
                 }
                 _ => Err("Unknown component toggle target.".to_string()),
