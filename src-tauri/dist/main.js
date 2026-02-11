@@ -335,6 +335,29 @@ function parentDir(path) {
   return normalized.slice(0, idx);
 }
 
+function comfyInstallOrder(name) {
+  const lower = String(name || "").trim().toLowerCase();
+  if (lower === "comfyui") return 0;
+  const match = /^comfyui-(\d+)$/.exec(lower);
+  if (!match) return -1;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : -1;
+}
+
+function newestComfyInstall(installs) {
+  if (!Array.isArray(installs) || installs.length === 0) return null;
+  let best = installs[0];
+  let bestOrder = comfyInstallOrder(best?.name);
+  for (const item of installs.slice(1)) {
+    const order = comfyInstallOrder(item?.name);
+    if (order > bestOrder) {
+      best = item;
+      bestOrder = order;
+    }
+  }
+  return best;
+}
+
 function setComfyQuickActions(installDir, comfyRoot) {
   const install = String(installDir || "").trim();
   const root = String(comfyRoot || "").trim();
@@ -595,9 +618,10 @@ async function refreshExistingInstallations(basePath, preferredRoot = null) {
   }
 
   if (!el.comfyExistingInstall) return installs;
-  const currentPreferred = String(
-    preferredRoot || el.comfyRoot.value || el.comfyExistingInstall.value || "",
-  ).trim();
+  const explicitPreferred = normalizeSlashes(String(preferredRoot || "").trim());
+  const currentPreferred = explicitPreferred || normalizeSlashes(String(
+    el.comfyRoot.value || el.comfyExistingInstall.value || "",
+  ).trim());
   el.comfyExistingInstall.innerHTML = "";
 
   if (!installs.length) {
@@ -633,11 +657,16 @@ async function refreshExistingInstallations(basePath, preferredRoot = null) {
     el.comfyExistingInstall.appendChild(opt);
   });
 
-  const preferred = installs.find((x) => normalizeSlashes(x.root) === normalizeSlashes(currentPreferred));
+  const preferred = explicitPreferred
+    ? installs.find((x) => normalizeSlashes(x.root) === explicitPreferred)
+    : null;
   if (preferred) {
     el.comfyExistingInstall.value = preferred.root;
   } else {
-    el.comfyExistingInstall.value = installs[0].root;
+    const fallback = state.comfyMode === "manage"
+      ? newestComfyInstall(installs)
+      : (installs.find((x) => normalizeSlashes(x.root) === currentPreferred) || installs[0]);
+    el.comfyExistingInstall.value = (fallback || installs[0]).root;
   }
   updateComfyModeUi();
   refreshComfyUiUpdateStatus(el.comfyExistingInstall.value).catch(() => {});
@@ -701,16 +730,22 @@ async function syncComfyInstallSelection(selectedPath, persistInstallBase = true
 
     if (detectedRoot) {
       // If user picked an existing ComfyUI root directly, keep install base as its parent.
-      const baseForInstall = normalizeSlashes(detectedRoot) === normalizeSlashes(normalizedSelected)
+      const pickedRootDirectly = normalizeSlashes(detectedRoot) === normalizeSlashes(normalizedSelected);
+      const baseForInstall = pickedRootDirectly
         ? parentDir(detectedRoot)
         : normalizedSelected;
       el.comfyInstallRoot.value = baseForInstall;
       if (persistInstallBase) {
         await invoke("set_comfyui_install_base", { comfyuiInstallBase: baseForInstall });
       }
-      const installs = await refreshExistingInstallations(baseForInstall, detectedRoot);
-      if (normalizeSlashes(detectedRoot) === normalizeSlashes(normalizedSelected) || installs.length === 1) {
+      const installs = await refreshExistingInstallations(
+        baseForInstall,
+        pickedRootDirectly ? detectedRoot : null,
+      );
+      if (pickedRootDirectly || installs.length === 1) {
         await applySelectedExistingInstallation(detectedRoot);
+      } else if (installs.length > 1 && state.comfyMode === "manage") {
+        await applySelectedExistingInstallation(el.comfyExistingInstall.value);
       }
       setComfyQuickActions(baseForInstall, detectedRoot);
       logComfyLine(`Detected existing ComfyUI install: ${detectedRoot}`);
@@ -1401,9 +1436,9 @@ async function bootstrap() {
     const inferredBase = parentDir(settings.comfyui_root);
     el.comfyInstallRoot.value = inferredBase;
     await invoke("set_comfyui_install_base", { comfyuiInstallBase: inferredBase }).catch(() => {});
-    await refreshExistingInstallations(inferredBase, settings.comfyui_root || "");
+    await refreshExistingInstallations(inferredBase, null);
   } else {
-    await refreshExistingInstallations("", settings.comfyui_root || "");
+    await refreshExistingInstallations("", null);
   }
   await refreshComfyResumeState();
   await refreshComfyRuntimeStatus();
@@ -1554,9 +1589,21 @@ el.useExistingInstall?.addEventListener("click", async () => {
   }
 });
 
-el.comfyExistingInstall?.addEventListener("change", () => {
+el.comfyExistingInstall?.addEventListener("change", async () => {
   updateComfyModeUi();
-  refreshComfyUiUpdateStatus(el.comfyExistingInstall.value).catch(() => {});
+  const selectedRoot = String(el.comfyExistingInstall?.value || "").trim();
+  if (!selectedRoot) {
+    refreshComfyUiUpdateStatus("").catch(() => {});
+    return;
+  }
+  try {
+    await applySelectedExistingInstallation(selectedRoot);
+    if (state.comfyMode === "manage") {
+      logComfyLine(`Now managing: ${selectedRoot}`);
+    }
+  } catch (err) {
+    logComfyLine(`Failed to load selected installation: ${err}`);
+  }
 });
 
 el.updateSelectedInstall?.addEventListener("click", async () => {
