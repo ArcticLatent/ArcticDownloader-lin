@@ -11,13 +11,14 @@ use arctic_downloader::{
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
-    net::ToSocketAddrs,
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex, OnceLock,
     },
+    time::Duration,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -1791,9 +1792,11 @@ fn run_comfyui_install(
             &["sageattention", "sageattn3", "flash-attn", "flash_attn", "nunchaku"],
         )?;
         if !request.include_nunchaku {
-            let nunchaku_node = addon_root.join("ComfyUI-nunchaku");
-            if nunchaku_node.exists() {
-                let _ = std::fs::remove_dir_all(nunchaku_node);
+            for folder in ["nunchaku_nodes", "ComfyUI-nunchaku"] {
+                let nunchaku_node = addon_root.join(folder);
+                if nunchaku_node.exists() {
+                    let _ = std::fs::remove_dir_all(nunchaku_node);
+                }
             }
         }
     }
@@ -1802,8 +1805,11 @@ fn run_comfyui_install(
         write_install_state(&install_root, "in_progress", "addon_nunchaku");
         emit_install_event(app, "step", "Installing Nunchaku...");
         let nunchaku_node = addon_root.join("ComfyUI-nunchaku");
-        if nunchaku_node.exists() {
-            let _ = std::fs::remove_dir_all(&nunchaku_node);
+        for folder in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
+            let stale = addon_root.join(folder);
+            if stale.exists() {
+                let _ = std::fs::remove_dir_all(stale);
+            }
         }
         run_command(
             "git",
@@ -1838,8 +1844,7 @@ fn run_comfyui_install(
             Some(&comfy_dir),
         )?;
 
-        let nunchaku_versions_path = nunchaku_node.join("nunchaku_versions.json");
-        let _ = download_nunchaku_versions_json(app, &nunchaku_versions_path);
+        finalize_nunchaku_install(app, &comfy_dir, &py_exe.to_string_lossy(), &nunchaku_node)?;
     }
     if request.include_trellis2 {
         write_install_state(&install_root, "in_progress", "addon_trellis2");
@@ -3190,7 +3195,7 @@ fn open_external_url(url: String) -> Result<(), String> {
 }
 
 fn start_comfyui_root_impl(state: &AppState, comfyui_root: Option<String>) -> Result<(), String> {
-    if comfyui_process_running(&state) {
+    if comfyui_runtime_running(state) {
         return Ok(());
     }
 
@@ -3301,6 +3306,22 @@ fn comfyui_process_running(state: &AppState) -> bool {
             false
         }
     }
+}
+
+fn comfyui_external_running(state: &AppState) -> bool {
+    let _ = state;
+    let addr = ("127.0.0.1", 8188)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut iter| iter.next());
+    let Some(addr) = addr else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(180)).is_ok()
+}
+
+fn comfyui_runtime_running(state: &AppState) -> bool {
+    comfyui_process_running(state) || comfyui_external_running(state)
 }
 
 #[derive(Debug, Serialize)]
@@ -3490,7 +3511,7 @@ fn git_ahead_behind(root: &Path) -> Option<(u64, u64)> {
 }
 
 fn stop_comfyui_for_mutation(app: &AppHandle, state: &AppState) -> Result<bool, String> {
-    if !comfyui_process_running(state) {
+    if !comfyui_runtime_running(state) {
         return Ok(false);
     }
     emit_comfyui_runtime_event(
@@ -3499,7 +3520,7 @@ fn stop_comfyui_for_mutation(app: &AppHandle, state: &AppState) -> Result<bool, 
         "Stopping ComfyUI before applying changes...",
     );
     stop_comfyui_root_impl(state)?;
-    let running = comfyui_process_running(state);
+    let running = comfyui_runtime_running(state);
     update_tray_comfy_status(app, running);
     if running {
         return Err("ComfyUI is still running. Stop it before applying changes.".to_string());
@@ -3542,7 +3563,9 @@ fn get_comfyui_addon_state(
         sage_attention: !has_sage3 && pip_has_package(&root, "sageattention"),
         sage_attention3: has_sage3,
         flash_attention: pip_has_package(&root, "flash-attn") || pip_has_package(&root, "flash_attn"),
-        nunchaku: pip_has_package(&root, "nunchaku") || custom_node_exists(&root, "ComfyUI-nunchaku"),
+        nunchaku: pip_has_package(&root, "nunchaku")
+            || custom_node_exists(&root, "nunchaku_nodes")
+            || custom_node_exists(&root, "ComfyUI-nunchaku"),
         insight_face: pip_has_package(&root, "insightface"),
         trellis2: custom_node_exists(&root, "ComfyUI-Trellis2"),
         node_comfyui_manager: custom_node_exists(&root, "ComfyUI-Manager"),
@@ -3620,8 +3643,11 @@ fn apply_attention_backend_change(
     )?;
 
     let nunchaku_node = root.join("custom_nodes").join("ComfyUI-nunchaku");
-    if nunchaku_node.exists() {
-        let _ = std::fs::remove_dir_all(&nunchaku_node);
+    for folder in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
+        let path = root.join("custom_nodes").join(folder);
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 
     if target != "none" {
@@ -3650,8 +3676,7 @@ fn apply_attention_backend_change(
             }
         }
         if target == "nunchaku" {
-            let nunchaku_versions_path = nunchaku_node.join("nunchaku_versions.json");
-            let _ = download_nunchaku_versions_json(&app, &nunchaku_versions_path);
+            finalize_nunchaku_install(&app, &root, &py_path, &nunchaku_node)?;
         }
     }
 
@@ -3727,6 +3752,56 @@ fn install_insightface(root: &Path, py_path: &str) -> Result<(), String> {
         ],
         Some(root),
     )?;
+    Ok(())
+}
+
+fn cleanup_tilde_site_packages(root: &Path) {
+    let site_packages = root.join(".venv").join("Lib").join("site-packages");
+    let Ok(entries) = std::fs::read_dir(&site_packages) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with('~') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn finalize_nunchaku_install(app: &AppHandle, root: &Path, py_path: &str, nunchaku_node: &Path) -> Result<(), String> {
+    // Match the legacy BAT behavior: fetch versions JSON + force numpy 1.26.4.
+    let nunchaku_versions_path = nunchaku_node.join("nunchaku_versions.json");
+    let _ = download_nunchaku_versions_json(app, &nunchaku_versions_path);
+
+    cleanup_tilde_site_packages(root);
+
+    run_command(
+        py_path,
+        &[
+            "-m",
+            "pip",
+            "install",
+            "--force-reinstall",
+            "numpy==1.26.4",
+            "--no-deps",
+            "--no-cache-dir",
+            "--timeout=1000",
+            "--retries",
+            "10",
+            "--use-pep517",
+        ],
+        Some(root),
+    )?;
+
     Ok(())
 }
 
@@ -4097,7 +4172,7 @@ async fn apply_comfyui_component_toggle(
 #[tauri::command]
 fn get_comfyui_runtime_status(state: State<'_, AppState>) -> ComfyRuntimeStatus {
     ComfyRuntimeStatus {
-        running: comfyui_process_running(&state),
+        running: comfyui_runtime_running(&state),
     }
 }
 
@@ -4211,7 +4286,7 @@ fn get_comfyui_update_status(
 fn stop_comfyui_root(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
     let result = stop_comfyui_root_impl(&state);
     if result.is_ok() {
-        let running = comfyui_process_running(&state);
+        let running = comfyui_runtime_running(&state);
         update_tray_comfy_status(&app, running);
         if running {
             emit_comfyui_runtime_event(&app, "stop_failed", "ComfyUI stop did not fully complete.");
@@ -4270,19 +4345,68 @@ async fn update_selected_comfyui(
 }
 
 fn stop_comfyui_root_impl(state: &AppState) -> Result<bool, String> {
+    let mut stopped_any = false;
+
     let mut guard = state
         .comfyui_process
         .lock()
         .map_err(|_| "comfyui process lock poisoned".to_string())?;
-    let Some(child) = guard.as_mut() else {
+    if let Some(child) = guard.as_mut() {
+        child
+            .kill()
+            .map_err(|err| format!("Failed to stop ComfyUI: {err}"))?;
+        let _ = child.wait();
+        *guard = None;
+        stopped_any = true;
+    }
+    drop(guard);
+
+    // After app restart, we may no longer have a child handle but ComfyUI can still
+    // be running and listening on 8188. In that case, stop the listener process.
+    if comfyui_external_running(state) {
+        #[cfg(target_os = "windows")]
+        {
+            if kill_listener_process_on_port(8188)? {
+                stopped_any = true;
+            }
+        }
+    }
+
+    Ok(stopped_any)
+}
+
+#[cfg(target_os = "windows")]
+fn kill_listener_process_on_port(port: u16) -> Result<bool, String> {
+    let script = format!(
+        "$ErrorActionPreference='SilentlyContinue'; \
+         $ownerPids = Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object -ExpandProperty OwningProcess -Unique; \
+         if (-not $ownerPids) {{ exit 3 }}; \
+         foreach ($ownerPid in $ownerPids) {{ Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue }}; \
+         Start-Sleep -Milliseconds 180; \
+         $left = Get-NetTCPConnection -LocalPort {port} -State Listen; \
+         if ($left) {{ exit 2 }} else {{ exit 0 }}"
+    );
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+    apply_background_command_flags(&mut cmd);
+    let status = cmd
+        .status()
+        .map_err(|err| format!("Failed to stop ComfyUI listener on port {port}: {err}"))?;
+    if status.success() {
+        return Ok(true);
+    }
+    if status.code() == Some(3) {
         return Ok(false);
-    };
-    child
-        .kill()
-        .map_err(|err| format!("Failed to stop ComfyUI: {err}"))?;
-    let _ = child.wait();
-    *guard = None;
-    Ok(true)
+    }
+    if status.code() == Some(2) {
+        return Err(format!(
+            "ComfyUI listener is still active on port {port} after stop attempt."
+        ));
+    }
+    Err(format!(
+        "Failed stopping ComfyUI listener process on port {port} (exit code {:?}).",
+        status.code()
+    ))
 }
 
 fn show_main_window(app: &AppHandle) -> Result<(), String> {
@@ -4355,7 +4479,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                     log::warn!("Tray stop ComfyUI failed: {err}");
                     emit_comfyui_runtime_event(app, "stop_failed", format!("ComfyUI stop failed: {err}"));
                 } else {
-                    let running = comfyui_process_running(&state);
+                    let running = comfyui_runtime_running(&state);
                     update_tray_comfy_status(app, running);
                     if running {
                         emit_comfyui_runtime_event(app, "stop_failed", "ComfyUI stop did not fully complete.");
@@ -4393,7 +4517,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let _tray = builder.build(app)?;
     let state = app.state::<AppState>();
-    let running = comfyui_process_running(&state);
+    let running = comfyui_runtime_running(&state);
     update_tray_comfy_status(app, running);
     Ok(())
 }

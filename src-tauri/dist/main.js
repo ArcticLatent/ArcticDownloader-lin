@@ -753,6 +753,10 @@ async function syncComfyInstallSelection(selectedPath, persistInstallBase = true
       }
       setComfyQuickActions(baseForInstall, detectedRoot);
       logComfyLine(`Detected existing ComfyUI install: ${detectedRoot}`);
+      await refreshComfyRuntimeStatus();
+      if (state.comfyRuntimeRunning) {
+        logComfyLine("Detected running ComfyUI server. If you want to start a different one, stop this server first.");
+      }
       return;
     }
 
