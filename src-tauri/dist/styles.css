@@ -1,4 +1,4 @@
-@font-face {
+﻿@font-face {
   font-family: "Inter";
   src: url("./fonts/Inter-VariableFont_opsz,wght.ttf") format("truetype");
   font-style: normal;
@@ -200,9 +200,19 @@ input {
 }
 button { cursor: pointer; }
 button:hover { border-color: var(--accent); }
-button.primary {
-  background: linear-gradient(180deg, #2a4e9f, #233f7f);
-  border-color: #3c63bb;
+button.stop-state {
+  background: linear-gradient(180deg, #8e2d2d, #6f2020);
+  border-color: #b84545;
+}
+button.stop-state:hover {
+  border-color: #d35a5a;
+}
+button.update-available {
+  background: linear-gradient(180deg, #2f7d49, #27683d);
+  border-color: #4aa86a;
+}
+button.update-available:hover {
+  border-color: #63c888;
 }
 .lora-meta {
   display: grid;
@@ -471,3 +481,4 @@ input[type="checkbox"] {
   .preflight-row { grid-template-columns: 1fr; }
   .transfer-grid { grid-template-columns: 1fr; }
 }
+

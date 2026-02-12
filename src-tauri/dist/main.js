@@ -286,6 +286,7 @@ function updateComfyUpdateButton() {
   if (!btn) return;
   const hasSelection = Boolean(String(el.comfyExistingInstall?.value || "").trim());
   btn.classList.toggle("hidden", !hasSelection);
+  btn.classList.remove("update-available");
   if (!hasSelection) return;
 
   if (state.comfyUpdateBusy) {
@@ -301,6 +302,7 @@ function updateComfyUpdateButton() {
   if (state.comfyUpdateAvailable) {
     btn.textContent = "Update ComfyUI";
     btn.disabled = false;
+    btn.classList.add("update-available");
     return;
   }
   btn.textContent = "No Update";
@@ -309,6 +311,7 @@ function updateComfyUpdateButton() {
 
 function updateUpdateButton() {
   if (!el.checkUpdates) return;
+  el.checkUpdates.classList.remove("update-available");
   if (state.updateInstalling) {
     el.checkUpdates.textContent = "Updating...";
     el.checkUpdates.disabled = true;
@@ -317,6 +320,9 @@ function updateUpdateButton() {
   }
   el.checkUpdates.disabled = false;
   el.checkUpdates.textContent = state.updateAvailable ? "Update" : "Check Updates";
+  if (state.updateAvailable) {
+    el.checkUpdates.classList.add("update-available");
+  }
   renderAppVersionTag();
 }
 
@@ -447,7 +453,9 @@ async function loadInstalledAddonState(comfyuiRoot) {
 
 function updateComfyRuntimeButton() {
   if (!el.comfyStartInstalled) return;
-  el.comfyStartInstalled.textContent = state.comfyRuntimeRunning ? "Stop ComfyUI" : "Start ComfyUI";
+  const stopping = Boolean(state.comfyRuntimeRunning);
+  el.comfyStartInstalled.textContent = stopping ? "Stop ComfyUI" : "Start ComfyUI";
+  el.comfyStartInstalled.classList.toggle("stop-state", stopping);
 }
 
 function attentionAddonEntries() {
@@ -866,6 +874,24 @@ async function startComfyInstall(forceFresh) {
     logComfyLine("Select install folder first.");
     return;
   }
+
+  await refreshComfyRuntimeStatus();
+  if (state.comfyRuntimeRunning) {
+    logComfyLine("Detected running ComfyUI server. Stopping it before install...");
+    try {
+      await invoke("stop_comfyui_root");
+    } catch (err) {
+      logComfyLine(`Failed to stop running ComfyUI before install: ${err}`);
+      return;
+    }
+    await refreshComfyRuntimeStatus();
+    if (state.comfyRuntimeRunning) {
+      logComfyLine("ComfyUI is still running. Stop it first, then retry install.");
+      return;
+    }
+    logComfyLine("ComfyUI server stopped. Proceeding with install.");
+  }
+
   const preflight = await runComfyPreflight();
   if (!preflight || !preflight.ok) {
     logComfyLine("Preflight has blocking issues. Resolve them before install.");
@@ -2062,6 +2088,7 @@ window.setInterval(() => {
   if (!invoke) return;
   refreshComfyRuntimeStatus().catch(() => {});
 }, 2000);
+
 
 
 
