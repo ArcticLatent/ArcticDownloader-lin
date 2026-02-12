@@ -18,7 +18,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Mutex, OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -3194,7 +3194,11 @@ fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
-fn start_comfyui_root_impl(state: &AppState, comfyui_root: Option<String>) -> Result<(), String> {
+fn start_comfyui_root_impl(
+    app: &AppHandle,
+    state: &AppState,
+    comfyui_root: Option<String>,
+) -> Result<(), String> {
     if comfyui_runtime_running(state) {
         return Ok(());
     }
@@ -3226,7 +3230,11 @@ fn start_comfyui_root_impl(state: &AppState, comfyui_root: Option<String>) -> Re
         return Err(format!("ComfyUI main.py not found in {}", root.display()));
     }
 
-    let mut cmd = python_for_root(&root);
+    let py_exe = resolve_start_python_exe(app, state, &root)?;
+    let mut cmd = std::process::Command::new(py_exe);
+    if !nerdstats_enabled() {
+        apply_background_command_flags(&mut cmd);
+    }
 
     let settings = state.context.config.settings();
     let effective_attention = {
@@ -3271,16 +3279,75 @@ fn start_comfyui_root_impl(state: &AppState, comfyui_root: Option<String>) -> Re
     Ok(())
 }
 
+fn wait_for_comfyui_start(state: &AppState, timeout: Duration) -> Result<(), String> {
+    let started_at = Instant::now();
+    loop {
+        if comfyui_external_running(state) {
+            return Ok(());
+        }
+
+        {
+            let mut guard = state
+                .comfyui_process
+                .lock()
+                .map_err(|_| "comfyui process lock poisoned".to_string())?;
+            if let Some(child) = guard.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        *guard = None;
+                        return Err(format!(
+                            "ComfyUI process exited during startup with status {status}."
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        *guard = None;
+                        return Err(format!("Failed to monitor ComfyUI startup: {err}"));
+                    }
+                }
+            }
+        }
+
+        if started_at.elapsed() > timeout {
+            return Err("ComfyUI did not become ready on 127.0.0.1:8188 in time.".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(220));
+    }
+}
+
+fn spawn_comfyui_start_monitor(app: &AppHandle) {
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        let state = app_handle.state::<AppState>();
+        match wait_for_comfyui_start(&state, Duration::from_secs(15)) {
+            Ok(()) => {
+                update_tray_comfy_status(&app_handle, true);
+                emit_comfyui_runtime_event(&app_handle, "started", "ComfyUI server started.");
+            }
+            Err(err) => {
+                let running = comfyui_runtime_running(&state);
+                update_tray_comfy_status(&app_handle, running);
+                emit_comfyui_runtime_event(
+                    &app_handle,
+                    "start_failed",
+                    format!("ComfyUI start failed: {err}"),
+                );
+            }
+        }
+    });
+}
+
 #[tauri::command]
 fn start_comfyui_root(
     app: AppHandle,
     state: State<'_, AppState>,
     comfyui_root: Option<String>,
 ) -> Result<(), String> {
-    let result = start_comfyui_root_impl(&state, comfyui_root);
+    let result = start_comfyui_root_impl(&app, &state, comfyui_root);
     if result.is_ok() {
         update_tray_comfy_status(&app, true);
-        emit_comfyui_runtime_event(&app, "started", "ComfyUI server started.");
+        emit_comfyui_runtime_event(&app, "starting", "ComfyUI launch requested.");
+        spawn_comfyui_start_monitor(&app);
     } else if let Err(err) = &result {
         emit_comfyui_runtime_event(&app, "start_failed", format!("ComfyUI start failed: {err}"));
     }
@@ -3389,6 +3456,79 @@ fn python_for_root(root: &Path) -> std::process::Command {
     cmd
 }
 
+fn python_exe_candidates_for_root(root: &Path) -> Vec<PathBuf> {
+    let install_dir = root
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.to_path_buf());
+    vec![
+        root.join(".venv").join("Scripts").join("python.exe"),
+        install_dir.join(".venv").join("Scripts").join("python.exe"),
+        root.join("python_embeded").join("python.exe"),
+        install_dir.join("python_embeded").join("python.exe"),
+    ]
+}
+
+fn python_exe_works(py_exe: &Path, root: &Path) -> bool {
+    if !py_exe.exists() {
+        return false;
+    }
+    let mut cmd = std::process::Command::new(py_exe);
+    cmd.arg("--version");
+    cmd.current_dir(root);
+    apply_background_command_flags(&mut cmd);
+    cmd.output().map(|out| out.status.success()).unwrap_or(false)
+}
+
+fn resolve_start_python_exe(
+    app: &AppHandle,
+    state: &AppState,
+    root: &Path,
+) -> Result<PathBuf, String> {
+    let candidates = python_exe_candidates_for_root(root);
+    for candidate in &candidates {
+        if python_exe_works(candidate, root) {
+            return Ok(candidate.clone());
+        }
+    }
+
+    if candidates.iter().any(|c| c.exists()) {
+        emit_comfyui_runtime_event(
+            app,
+            "preparing_runtime",
+            "Preparing local Python runtime for this ComfyUI installation...",
+        );
+        let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
+        let uv_bin = resolve_uv_binary(&shared_runtime_root, app)?;
+        let python_store = shared_runtime_root.join(".python");
+        std::fs::create_dir_all(&python_store).map_err(|err| err.to_string())?;
+        let python_store_s = python_store.to_string_lossy().to_string();
+        run_command_env(
+            &uv_bin,
+            &["python", "install", UV_PYTHON_VERSION],
+            Some(root),
+            &[
+                ("UV_PYTHON_INSTALL_DIR", &python_store_s),
+                ("UV_PYTHON_INSTALL_BIN", "false"),
+            ],
+        )?;
+
+        for candidate in &candidates {
+            if python_exe_works(candidate, root) {
+                return Ok(candidate.clone());
+            }
+        }
+    }
+
+    if command_available("python", &["--version"]) {
+        return Ok(PathBuf::from("python"));
+    }
+
+    Err(
+        "No working Python executable found for this ComfyUI install. Reinstall or run Install New once to bootstrap runtime."
+            .to_string(),
+    )
+}
 fn python_exe_for_root(root: &Path) -> Result<PathBuf, String> {
     let install_dir = root
         .parent()
@@ -3541,7 +3681,7 @@ fn restart_comfyui_after_mutation(
     if !was_running {
         return Ok(());
     }
-    start_comfyui_root_impl(state, None)?;
+    start_comfyui_root_impl(app, state, None)?;
     update_tray_comfy_status(app, true);
     emit_comfyui_runtime_event(
         app,
@@ -4465,12 +4605,13 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             "tray_start" => {
                 let state = app.state::<AppState>();
-                if let Err(err) = start_comfyui_root_impl(&state, None) {
+                if let Err(err) = start_comfyui_root_impl(app, &state, None) {
                     log::warn!("Tray start ComfyUI failed: {err}");
                     emit_comfyui_runtime_event(app, "start_failed", format!("ComfyUI start failed: {err}"));
                 } else {
                     update_tray_comfy_status(app, true);
-                    emit_comfyui_runtime_event(app, "started", "ComfyUI server started.");
+                    emit_comfyui_runtime_event(app, "starting", "ComfyUI launch requested.");
+                    spawn_comfyui_start_monitor(app);
                 }
             }
             "tray_stop" => {
@@ -4644,3 +4785,5 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");
 }
+
+

@@ -1,4 +1,4 @@
-﻿const invoke = window.__TAURI__?.core?.invoke;
+const invoke = window.__TAURI__?.core?.invoke;
 const listen = window.__TAURI__?.event?.listen || window.__TAURI__?.core?.listen;
 const state = {
   catalog: null,
@@ -1991,11 +1991,21 @@ async function initEventListeners() {
 
     await listen("comfyui-runtime", (event) => {
       const p = event.payload || {};
+      const phase = String(p.phase || "").trim();
       const msg = String(p.message || "").trim();
-      if (!msg) return;
-      logComfyLine(msg);
-      logLine(msg);
-      notifySystem("Arctic ComfyUI Helper", msg);
+      if (msg) {
+        logComfyLine(msg);
+        logLine(msg);
+        notifySystem("Arctic ComfyUI Helper", msg);
+      }
+      if (phase === "starting") {
+        state.comfyRuntimeRunning = true;
+        updateComfyRuntimeButton();
+        return;
+      }
+      if (phase === "started" || phase === "stopped" || phase === "start_failed" || phase === "stop_failed") {
+        refreshComfyRuntimeStatus().catch(() => {});
+      }
     });
   } catch (err) {
     logLine(`Event listener setup failed: ${err}`);
@@ -2088,6 +2098,7 @@ window.setInterval(() => {
   if (!invoke) return;
   refreshComfyRuntimeStatus().catch(() => {});
 }, 2000);
+
 
 
 
