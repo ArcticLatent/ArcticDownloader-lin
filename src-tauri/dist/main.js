@@ -1577,6 +1577,11 @@ el.chooseInstallRoot.addEventListener("click", async () => {
 
 el.comfyMode?.addEventListener("change", () => {
   state.comfyMode = el.comfyMode.value === "manage" ? "manage" : "install";
+  if (state.comfyMode !== "manage") {
+    resetComfySelectionsToDefaults();
+  } else {
+    loadInstalledAddonState(el.comfyRoot.value || "").catch(() => {});
+  }
   updateComfyModeUi();
 });
 
@@ -2057,6 +2062,7 @@ window.setInterval(() => {
   if (!invoke) return;
   refreshComfyRuntimeStatus().catch(() => {});
 }, 2000);
+
 
 
 

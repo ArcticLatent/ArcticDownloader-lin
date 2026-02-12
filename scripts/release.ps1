@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Version,
     [string]$Repository = "ArcticLatent/Arctic-Helper",
     [string]$AssetName = "Arctic-ComfyUI-Helper.exe",
@@ -74,12 +74,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "GitHub CLI is not authenticated. Run: gh auth login"
 }
 
-$rootCargo = Join-Path $root "Cargo.toml"
 $tauriCargo = Join-Path $root "src-tauri\Cargo.toml"
 $tauriConf = Join-Path $root "src-tauri\tauri.conf.json"
 
 Write-Host "Updating versions to $Version ..."
-Update-CargoVersion -Path $rootCargo -NewVersion $Version
 Update-CargoVersion -Path $tauriCargo -NewVersion $Version
 $conf = Get-Content $tauriConf -Raw | ConvertFrom-Json
 $conf.version = $Version
