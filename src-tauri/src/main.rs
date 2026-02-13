@@ -108,7 +108,6 @@ struct ComfyInstallRequest {
     include_pinned_memory: bool,
     node_comfyui_manager: bool,
     node_comfyui_easy_use: bool,
-    node_comfyui_controlnet_aux: bool,
     node_rgthree_comfy: bool,
     node_comfyui_gguf: bool,
     node_comfyui_kjnodes: bool,
@@ -2086,31 +2085,6 @@ fn run_comfyui_install(
             }
         }
     }
-    if request.node_comfyui_controlnet_aux {
-        write_install_state(&install_root, "in_progress", "node_comfyui_controlnet_aux");
-        match install_custom_node(
-            app,
-            &comfy_dir,
-            &addon_root,
-            &py_exe,
-            "https://github.com/Fannovel16/comfyui_controlnet_aux",
-            "comfyui_controlnet_aux",
-        ) {
-            Ok(_) => summary.push(InstallSummaryItem {
-                name: "comfyui_controlnet_aux".to_string(),
-                status: "ok".to_string(),
-                detail: "Installed successfully.".to_string(),
-            }),
-            Err(err) => {
-                summary.push(InstallSummaryItem {
-                    name: "comfyui_controlnet_aux".to_string(),
-                    status: "failed".to_string(),
-                    detail: err.clone(),
-                });
-                emit_install_event(app, "warn", &format!("comfyui_controlnet_aux failed: {err}"));
-            }
-        }
-    }
     if request.node_rgthree_comfy {
         write_install_state(&install_root, "in_progress", "node_rgthree_comfy");
         match install_custom_node(
@@ -3470,7 +3444,6 @@ struct ComfyAddonState {
     trellis2: bool,
     node_comfyui_manager: bool,
     node_comfyui_easy_use: bool,
-    node_comfyui_controlnet_aux: bool,
     node_rgthree_comfy: bool,
     node_comfyui_gguf: bool,
     node_comfyui_kjnodes: bool,
@@ -3781,7 +3754,6 @@ fn get_comfyui_addon_state(
         trellis2: custom_node_exists(&root, "ComfyUI-Trellis2"),
         node_comfyui_manager: custom_node_exists(&root, "ComfyUI-Manager"),
         node_comfyui_easy_use: custom_node_exists(&root, "ComfyUI-Easy-Use"),
-        node_comfyui_controlnet_aux: custom_node_exists(&root, "comfyui_controlnet_aux"),
         node_rgthree_comfy: custom_node_exists(&root, "rgthree-comfy"),
         node_comfyui_gguf: custom_node_exists(&root, "ComfyUI-GGUF"),
         node_comfyui_kjnodes: custom_node_exists(&root, "comfyui-kjnodes"),
@@ -4287,22 +4259,6 @@ async fn apply_comfyui_component_toggle(
                     } else {
                         remove_custom_node_dirs(&root_clone, &["ComfyUI-Easy-Use"]);
                         Ok("Removed ComfyUI-Easy-Use.".to_string())
-                    }
-                }
-                "node_comfyui_controlnet_aux" => {
-                    if enabled {
-                        ensure_git_available(&app_clone)?;
-                        install_named_custom_node(
-                            &app_clone,
-                            &root_clone,
-                            &py_exe_clone,
-                            "https://github.com/Fannovel16/comfyui_controlnet_aux",
-                            "comfyui_controlnet_aux",
-                        )?;
-                        Ok("Installed comfyui_controlnet_aux.".to_string())
-                    } else {
-                        remove_custom_node_dirs(&root_clone, &["comfyui_controlnet_aux"]);
-                        Ok("Removed comfyui_controlnet_aux.".to_string())
                     }
                 }
                 "node_rgthree_comfy" => {
@@ -4881,8 +4837,3 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");
 }
-
-
-
-
-

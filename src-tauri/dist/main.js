@@ -110,7 +110,6 @@ const el = {
   addonPinnedMemory: document.getElementById("addon-pinned-memory"),
   nodeComfyuiManager: document.getElementById("node-comfyui-manager"),
   nodeComfyuiEasyUse: document.getElementById("node-comfyui-easy-use"),
-  nodeComfyuiControlnetAux: document.getElementById("node-comfyui-controlnet-aux"),
   nodeRgthreeComfy: document.getElementById("node-rgthree-comfy"),
   nodeComfyuiGguf: document.getElementById("node-comfyui-gguf"),
   nodeComfyuiKjnodes: document.getElementById("node-comfyui-kjnodes"),
@@ -417,7 +416,6 @@ function buildComfyInstallRequest() {
     includePinnedMemory: Boolean(el.addonPinnedMemory?.checked ?? true),
     nodeComfyuiManager: Boolean(el.nodeComfyuiManager.checked),
     nodeComfyuiEasyUse: Boolean(el.nodeComfyuiEasyUse.checked),
-    nodeComfyuiControlnetAux: false,
     nodeRgthreeComfy: Boolean(el.nodeRgthreeComfy.checked),
     nodeComfyuiGguf: Boolean(el.nodeComfyuiGguf.checked),
     nodeComfyuiKjnodes: Boolean(el.nodeComfyuiKjnodes.checked),
@@ -436,7 +434,6 @@ function resetComfySelectionsToDefaults() {
 
   if (el.nodeComfyuiManager) el.nodeComfyuiManager.checked = false;
   if (el.nodeComfyuiEasyUse) el.nodeComfyuiEasyUse.checked = false;
-  if (el.nodeComfyuiControlnetAux) el.nodeComfyuiControlnetAux.checked = false;
   if (el.nodeRgthreeComfy) el.nodeRgthreeComfy.checked = false;
   if (el.nodeComfyuiGguf) el.nodeComfyuiGguf.checked = false;
   if (el.nodeComfyuiKjnodes) el.nodeComfyuiKjnodes.checked = false;
@@ -458,7 +455,6 @@ async function loadInstalledAddonState(comfyuiRoot) {
 
     if (el.nodeComfyuiManager) el.nodeComfyuiManager.checked = Boolean(installed?.node_comfyui_manager);
     if (el.nodeComfyuiEasyUse) el.nodeComfyuiEasyUse.checked = Boolean(installed?.node_comfyui_easy_use);
-    if (el.nodeComfyuiControlnetAux) el.nodeComfyuiControlnetAux.checked = Boolean(installed?.node_comfyui_controlnet_aux);
     if (el.nodeRgthreeComfy) el.nodeRgthreeComfy.checked = Boolean(installed?.node_rgthree_comfy);
     if (el.nodeComfyuiGguf) el.nodeComfyuiGguf.checked = Boolean(installed?.node_comfyui_gguf);
     if (el.nodeComfyuiKjnodes) el.nodeComfyuiKjnodes.checked = Boolean(installed?.node_comfyui_kjnodes);
