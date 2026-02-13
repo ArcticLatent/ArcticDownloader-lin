@@ -1257,26 +1257,53 @@ fn uv_pip_uninstall_best_effort(
     uv_python_install_dir: &str,
     packages: &[&str],
 ) -> Result<(), String> {
-    let mut installed: Vec<&str> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
     for package in packages {
-        if pip_has_package(install_root, package) {
-            installed.push(package);
+        if !pip_has_package(install_root, package) {
+            continue;
+        }
+
+        let mut removed = false;
+        let mut last_err: Option<String> = None;
+        for attempt in 0..2 {
+            let _ = kill_python_processes_for_root(install_root, py_exe);
+            match run_uv_pip_strict(
+                uv_bin,
+                &py_exe.to_string_lossy(),
+                &["uninstall", "-y", package],
+                Some(install_root),
+                &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+            ) {
+                Ok(()) => {
+                    removed = true;
+                    break;
+                }
+                Err(err) => {
+                    if !pip_has_package(install_root, package) {
+                        removed = true;
+                        break;
+                    }
+                    last_err = Some(err);
+                    if attempt == 0 {
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
+            }
+        }
+
+        if !removed {
+            failed.push(format!(
+                "{package}: {}",
+                last_err.unwrap_or_else(|| "uninstall failed".to_string())
+            ));
         }
     }
-    if installed.is_empty() {
-        return Ok(());
-    }
 
-    let mut args: Vec<&str> = vec!["uninstall", "-y"];
-    args.extend(installed.iter().copied());
-    run_uv_pip_strict(
-        uv_bin,
-        &py_exe.to_string_lossy(),
-        &args,
-        Some(install_root),
-        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
-    )
-    .map_err(|err| format!("Failed to uninstall packages ({}): {err}", installed.join(", ")))
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Failed to uninstall packages: {}", failed.join(" | ")))
+    }
 }
 
 fn profile_from_torch_env(root: &Path) -> Result<String, String> {
