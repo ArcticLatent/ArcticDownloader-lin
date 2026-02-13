@@ -97,6 +97,7 @@ const el = {
   comfyOpenInstallFolder: document.getElementById("comfy-open-install-folder"),
   comfyStartInstalled: document.getElementById("comfy-start-installed"),
   comfyInstallLog: document.getElementById("comfy-install-log"),
+  comfyClearInstallLog: document.getElementById("comfy-clear-install-log"),
   runPreflight: document.getElementById("run-preflight"),
   preflightSummary: document.getElementById("preflight-summary"),
   preflightList: document.getElementById("preflight-list"),
@@ -1814,6 +1815,10 @@ el.comfyFreshBtn?.addEventListener("click", async () => {
   await startComfyInstall(true);
 });
 
+el.comfyClearInstallLog?.addEventListener("click", () => {
+  if (el.comfyInstallLog) el.comfyInstallLog.textContent = "Ready";
+});
+
 el.comfyOpenInstallFolder?.addEventListener("click", async () => {
   const path = String(el.comfyOpenInstallFolder.dataset.path || "").trim();
   if (!path) return;
@@ -2192,6 +2197,9 @@ window.setInterval(() => {
   if (!invoke) return;
   refreshComfyRuntimeStatus().catch(() => {});
 }, 2000);
+
+
+
 
 
 

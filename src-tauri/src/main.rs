@@ -4642,11 +4642,13 @@ fn started_tray_icon() -> Option<Image<'static>> {
 fn update_tray_comfy_status(app: &AppHandle, running: bool) {
     if let Some(tray) = app.tray_by_id("arctic_tray") {
         let tooltip = if running {
-            "Arctic ComfyUI Helper - ComfyUI: Running"
+            let state = app.state::<AppState>();
+            let name = resolve_comfyui_instance_name(&state.context, None);
+            format!("Arctic ComfyUI Helper - Running: {name}")
         } else {
-            "Arctic ComfyUI Helper - ComfyUI: Stopped"
+            "Arctic ComfyUI Helper - ComfyUI: Stopped".to_string()
         };
-        let _ = tray.set_tooltip(Some(tooltip));
+        let _ = tray.set_tooltip(Some(&tooltip));
 
         if running {
             if let Some(icon) = started_tray_icon() {
@@ -4879,6 +4881,8 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");
 }
+
+
 
 
 
