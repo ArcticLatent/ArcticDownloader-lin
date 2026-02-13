@@ -1234,43 +1234,21 @@ fn run_uv_pip_strict(
         index += 1;
     }
 
-    let build_args = |target: &str| -> Vec<String> {
-        let mut args: Vec<String> = vec!["pip".to_string()];
-        if let Some((first, rest)) = uv_compatible_args.split_first() {
-            args.push(first.clone());
-            args.push("--python".to_string());
-            args.push(target.to_string());
-            for arg in rest {
-                args.push(arg.clone());
-            }
-        } else {
-            args.push("--python".to_string());
-            args.push(target.to_string());
+    let mut args_owned: Vec<String> = vec!["pip".to_string()];
+    if let Some((first, rest)) = uv_compatible_args.split_first() {
+        args_owned.push(first.clone());
+        args_owned.push("--python".to_string());
+        args_owned.push(python_target.to_string());
+        for arg in rest {
+            args_owned.push(arg.clone());
         }
-        args
-    };
-
-    let args_primary_owned = build_args(python_target);
-    let args_primary: Vec<&str> = args_primary_owned.iter().map(String::as_str).collect();
-    if run_command_env(uv_bin, &args_primary, working_dir, envs).is_ok() {
-        return Ok(());
+    } else {
+        args_owned.push("--python".to_string());
+        args_owned.push(python_target.to_string());
     }
 
-    let venv_target = Path::new(python_target)
-        .parent()
-        .and_then(|p| p.parent())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).map(|n| n.eq_ignore_ascii_case(".venv")).unwrap_or(false))
-        .map(|p| p.to_string_lossy().to_string());
-
-    if let Some(venv) = venv_target {
-        let args_venv_owned = build_args(&venv);
-        let args_venv: Vec<&str> = args_venv_owned.iter().map(String::as_str).collect();
-        if run_command_env(uv_bin, &args_venv, working_dir, envs).is_ok() {
-            return Ok(());
-        }
-    }
-
-    Err("uv pip failed for all uv targets.".to_string())
+    let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+    run_command_env(uv_bin, &args, working_dir, envs)
 }
 fn uv_pip_uninstall_best_effort(
     uv_bin: &str,
@@ -1434,6 +1412,9 @@ fn resolve_uv_binary(shared_runtime_root: &Path, app: &AppHandle) -> Result<Stri
     let local_uv = local_root.join("uv.exe");
     if local_uv.exists() {
         return Ok(local_uv.to_string_lossy().to_string());
+    }
+    if let Some(found) = find_file_recursive(&local_root, "uv.exe") {
+        return Ok(found.to_string_lossy().to_string());
     }
     if let Some(legacy_runtime_root) = shared_runtime_root.parent().map(|parent| parent.join("comfy_runtime")) {
         let legacy_local_root = legacy_runtime_root.join(".tools").join("uv");
@@ -1851,7 +1832,7 @@ fn run_comfyui_install(
     run_uv_pip_strict(
         &uv_bin,
         &py_exe.to_string_lossy(),
-        &["sync", &comfy_dir.join("requirements.txt").to_string_lossy()],
+        &["install", "-r", &comfy_dir.join("requirements.txt").to_string_lossy(), "--no-cache"],
         Some(&comfy_dir),
         &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
@@ -4551,7 +4532,7 @@ async fn update_selected_comfyui(
             run_uv_pip_strict(
                 &uv_bin,
                 py.to_string_lossy().as_ref(),
-                &["sync", "requirements.txt"],
+                &["install", "-r", "requirements.txt", "--no-cache"],
                 Some(&root),
                 &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
             )
@@ -4890,6 +4871,8 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");
 }
+
+
 
 
 
