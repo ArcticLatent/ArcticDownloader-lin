@@ -1270,7 +1270,7 @@ fn uv_pip_uninstall_best_effort(
             match run_uv_pip_strict(
                 uv_bin,
                 &py_exe.to_string_lossy(),
-                &["uninstall", "-y", package],
+                &["uninstall", package],
                 Some(install_root),
                 &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
             ) {
