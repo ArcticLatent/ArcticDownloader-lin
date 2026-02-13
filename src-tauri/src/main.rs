@@ -3656,6 +3656,53 @@ fn stop_comfyui_for_mutation(app: &AppHandle, state: &AppState) -> Result<bool, 
     );
     Ok(true)
 }
+#[cfg(target_os = "windows")]
+fn kill_python_processes_for_root(root: &Path, py_exe: &Path) -> Result<bool, String> {
+    let root = strip_windows_verbatim_prefix(&std::fs::canonicalize(root).unwrap_or(root.to_path_buf()));
+    let py_exe =
+        strip_windows_verbatim_prefix(&std::fs::canonicalize(py_exe).unwrap_or(py_exe.to_path_buf()));
+    let root_norm = root.to_string_lossy().replace('\'', "''");
+    let py_norm = py_exe.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='SilentlyContinue'; \
+         $root='{}'; \
+         $py='{}'; \
+         $killed=0; \
+         $procs = Get-CimInstance Win32_Process -Filter \"Name='python.exe'\"; \
+         foreach ($p in $procs) {{ \
+           $exe = [string]$p.ExecutablePath; \
+           $cmd = [string]$p.CommandLine; \
+           $matchPy = $exe -and ($exe.ToLowerInvariant() -eq $py.ToLowerInvariant()); \
+           $matchRoot = $cmd -and ($cmd.ToLowerInvariant().Contains($root.ToLowerInvariant())); \
+           if ($matchPy -or $matchRoot) {{ \
+             Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; \
+             $killed++; \
+           }} \
+         }}; \
+         if ($killed -gt 0) {{ Start-Sleep -Milliseconds 250 }}; \
+         Write-Output $killed",
+        root_norm, py_norm
+    );
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+    apply_background_command_flags(&mut cmd);
+    let out = cmd
+        .output()
+        .map_err(|err| format!("Failed to stop lingering Python processes: {err}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "Failed stopping lingering Python processes (exit code {:?}).",
+            out.status.code()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let killed = text.trim().parse::<u64>().unwrap_or(0);
+    Ok(killed > 0)
+}
+#[cfg(not(target_os = "windows"))]
+fn kill_python_processes_for_root(_root: &Path, _py_exe: &Path) -> Result<bool, String> {
+    Ok(false)
+}
 
 fn restart_comfyui_after_mutation(
     app: &AppHandle,
@@ -3761,10 +3808,12 @@ fn apply_attention_backend_change(
             .to_string_lossy()
             .to_string()
     };
+    let py_exe = PathBuf::from(&py_path);
+    let _ = kill_python_processes_for_root(&root, &py_exe);
 
     uv_pip_uninstall_best_effort(
         &uv_bin,
-        Path::new(&py_path),
+        &py_exe,
         &root,
         &uv_python_install_dir,
         &["sageattention", "sageattn3", "flash-attn", "flash_attn", "nunchaku"],
@@ -4198,6 +4247,7 @@ async fn apply_comfyui_component_toggle(
         probe.get_program().to_string_lossy().to_string()
     };
     let py_exe = PathBuf::from(&py_path);
+    let _ = kill_python_processes_for_root(&root, &py_exe);
     let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
     let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
     let uv_python_install_dir = shared_runtime_root.join(".python").to_string_lossy().to_string();
