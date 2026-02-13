@@ -1257,16 +1257,26 @@ fn uv_pip_uninstall_best_effort(
     uv_python_install_dir: &str,
     packages: &[&str],
 ) -> Result<(), String> {
+    let mut installed: Vec<&str> = Vec::new();
     for package in packages {
-        let _ = run_uv_pip_strict(
-            uv_bin,
-            &py_exe.to_string_lossy(),
-            &["uninstall", "-y", package],
-            Some(install_root),
-            &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
-        );
+        if pip_has_package(install_root, package) {
+            installed.push(package);
+        }
     }
-    Ok(())
+    if installed.is_empty() {
+        return Ok(());
+    }
+
+    let mut args: Vec<&str> = vec!["uninstall", "-y"];
+    args.extend(installed.iter().copied());
+    run_uv_pip_strict(
+        uv_bin,
+        &py_exe.to_string_lossy(),
+        &args,
+        Some(install_root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )
+    .map_err(|err| format!("Failed to uninstall packages ({}): {err}", installed.join(", ")))
 }
 
 fn profile_from_torch_env(root: &Path) -> Result<String, String> {
