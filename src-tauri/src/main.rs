@@ -1,4 +1,4 @@
-﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use arctic_downloader::{
     app::{build_context, AppContext},
@@ -416,13 +416,8 @@ fn find_in_progress_install(base_root: &Path) -> Option<(PathBuf, InstallState)>
 fn choose_install_folder(base_root: &Path, force_fresh: bool) -> PathBuf {
     if !force_fresh {
         if let Some((existing, _)) = find_in_progress_install(base_root) {
-        return existing;
+            return existing;
         }
-    }
-
-    let primary = base_root.join("ComfyUI");
-    if !primary.exists() {
-        return primary;
     }
 
     for index in 1..=99u32 {
@@ -1277,16 +1272,20 @@ fn run_uv_pip_strict(
 
     Err("uv pip failed for all uv targets.".to_string())
 }
-fn pip_uninstall_best_effort(
+fn uv_pip_uninstall_best_effort(
+    uv_bin: &str,
     py_exe: &Path,
     install_root: &Path,
+    uv_python_install_dir: &str,
     packages: &[&str],
 ) -> Result<(), String> {
     for package in packages {
-        let _ = run_command_capture(
+        let _ = run_uv_pip_strict(
+            uv_bin,
             &py_exe.to_string_lossy(),
-            &["-m", "pip", "uninstall", "-y", package],
+            &["uninstall", "-y", package],
             Some(install_root),
+            &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
         );
     }
     Ok(())
@@ -1353,28 +1352,42 @@ fn attention_wheel_url(profile: &str, backend: &str) -> Option<&'static str> {
     }
 }
 
-fn install_wheel_no_deps(py_path: &str, root: &Path, whl: &str, force_reinstall: bool) -> Result<(), String> {
-    let mut args = vec!["-m", "pip", "install", "--upgrade"];
+fn install_wheel_no_deps(
+    uv_bin: &str,
+    py_path: &str,
+    root: &Path,
+    uv_python_install_dir: &str,
+    whl: &str,
+    force_reinstall: bool,
+) -> Result<(), String> {
+    let mut args = vec!["install", "--upgrade"];
     if force_reinstall {
         args.push("--force-reinstall");
     }
     args.push(whl);
     args.extend_from_slice(&["--no-deps", "--no-cache-dir", "--timeout=1000", "--retries", "10"]);
-    run_command(py_path, &args, Some(root))
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &args,
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )
 }
 
-fn ensure_venv_pip(py_exe: &Path, install_root: &Path) -> Result<(), String> {
-    let py = py_exe.to_string_lossy().to_string();
-
-    // Fast path: pip already exists.
-    if run_command(&py, &["-m", "pip", "--version"], Some(install_root)).is_ok() {
-        return Ok(());
-    }
-
-    // Fallback: bootstrap pip inside this venv.
-    run_command(&py, &["-m", "ensurepip", "--upgrade"], Some(install_root))?;
-    run_command(&py, &["-m", "pip", "--version"], Some(install_root))?;
-    Ok(())
+fn ensure_venv_pip(
+    uv_bin: &str,
+    py_exe: &Path,
+    install_root: &Path,
+    uv_python_install_dir: &str,
+) -> Result<(), String> {
+    run_uv_pip_strict(
+        uv_bin,
+        &py_exe.to_string_lossy(),
+        &["check"],
+        Some(install_root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )
 }
 
 fn write_install_summary(install_root: &Path, items: &[InstallSummaryItem]) {
@@ -1799,8 +1812,8 @@ fn run_comfyui_install(
         emit_install_event(app, "step", "Existing .venv found; reusing.");
     }
 
-    emit_install_event(app, "step", "Verifying pip in local .venv...");
-    ensure_venv_pip(&py_exe, &comfy_dir)?;
+    emit_install_event(app, "step", "Verifying uv pip in local .venv...");
+    ensure_venv_pip(&uv_bin, &py_exe, &comfy_dir, &python_store_s)?;
 
     run_uv_pip_strict(
         &uv_bin,
@@ -1838,7 +1851,7 @@ fn run_comfyui_install(
     run_uv_pip_strict(
         &uv_bin,
         &py_exe.to_string_lossy(),
-        &["install", "-r", &comfy_dir.join("requirements.txt").to_string_lossy(), "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        &["sync", &comfy_dir.join("requirements.txt").to_string_lossy()],
         Some(&comfy_dir),
         &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
@@ -1866,9 +1879,11 @@ fn run_comfyui_install(
     if selected_attention_choice.is_some() {
         write_install_state(&install_root, "in_progress", "cleanup_attention_backends");
         emit_install_event(app, "step", "Cleaning previous attention backend packages...");
-        pip_uninstall_best_effort(
+        uv_pip_uninstall_best_effort(
+            &uv_bin,
             &py_exe,
             &comfy_dir,
+            &python_store_s,
             &["sageattention", "sageattn3", "flash-attn", "flash_attn", "nunchaku"],
         )?;
         if !request.include_nunchaku {
@@ -1906,154 +1921,32 @@ fn run_comfyui_install(
             "torch291_cu130" => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu13.0torch2.9-cp312-cp312-win_amd64.whl",
             _ => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu12.8torch2.8-cp312-cp312-win_amd64.whl",
         };
-        run_command(
+        install_wheel_no_deps(
+            &uv_bin,
             &py_exe.to_string_lossy(),
-            &[
-                "-m",
-                "pip",
-                "install",
-                "--upgrade",
-                "--force-reinstall",
-                nunchaku_whl,
-                "--no-deps",
-                "--no-cache-dir",
-                "--timeout=1000",
-                "--retries",
-                "10",
-            ],
-            Some(&comfy_dir),
+            &comfy_dir,
+            &python_store_s,
+            nunchaku_whl,
+            true,
         )?;
 
-        finalize_nunchaku_install(app, &comfy_dir, &py_exe.to_string_lossy(), &nunchaku_node)?;
+        finalize_nunchaku_install(
+            app,
+            &comfy_dir,
+            &uv_bin,
+            &py_exe.to_string_lossy(),
+            &python_store_s,
+            &nunchaku_node,
+        )?;
     }
     if request.include_trellis2 {
         write_install_state(&install_root, "in_progress", "addon_trellis2");
         emit_install_event(app, "step", "Installing Trellis2...");
-
-        let model_folder = comfy_dir
-            .join("models")
-            .join("facebook")
-            .join("dinov3-vitl16-pretrain-lvd1689m");
-        std::fs::create_dir_all(&model_folder).map_err(|err| err.to_string())?;
-        let model_file = model_folder.join("model.safetensors");
-        if let Ok(meta) = std::fs::metadata(&model_file) {
-            if meta.len() < 1_212_559_800 {
-                let _ = std::fs::remove_file(&model_file);
-            }
-        }
-        download_http_file(
-            "https://huggingface.co/PIA-SPACE-LAB/dinov3-vitl-pretrain-lvd1689m/resolve/main/model.safetensors",
-            &model_file,
-        )?;
-        download_http_file(
-            "https://huggingface.co/PIA-SPACE-LAB/dinov3-vitl-pretrain-lvd1689m/resolve/main/config.json",
-            &model_folder.join("config.json"),
-        )?;
-        download_http_file(
-            "https://huggingface.co/PIA-SPACE-LAB/dinov3-vitl-pretrain-lvd1689m/resolve/main/preprocessor_config.json",
-            &model_folder.join("preprocessor_config.json"),
-        )?;
-
-        let site_packages = venv_dir.join("Lib").join("site-packages");
-        for stale in [
-            "o_voxel",
-            "o_voxel-0.0.1.dist-info",
-            "cumesh",
-            "cumesh-0.0.1.dist-info",
-            "nvdiffrast",
-            "nvdiffrast-0.4.0.dist-info",
-            "nvdiffrec_render",
-            "nvdiffrec_render-0.0.0.dist-info",
-            "flex_gemm",
-            "flex_gemm-0.0.1.dist-info",
-        ] {
-            let path = site_packages.join(stale);
-            if path.is_dir() {
-                let _ = std::fs::remove_dir_all(path);
-            } else if path.exists() {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-
-        let trellis_node = addon_root.join("ComfyUI-Trellis2");
-        if trellis_node.exists() {
-            let _ = std::fs::remove_dir_all(&trellis_node);
-        }
-        run_command_env(
-            "git",
-            &[
-                "clone",
-                "https://github.com/visualbruno/ComfyUI-Trellis2",
-                &trellis_node.to_string_lossy(),
-            ],
-            Some(&comfy_dir),
-            &[("GIT_LFS_SKIP_SMUDGE", "1")],
-        )?;
-        run_command(
+        install_trellis2(
+            &comfy_dir,
+            &uv_bin,
             &py_exe.to_string_lossy(),
-            &[
-                "-m",
-                "pip",
-                "install",
-                "-r",
-                &trellis_node.join("requirements.txt").to_string_lossy(),
-                "--no-deps",
-                "--no-cache-dir",
-                "--timeout=1000",
-                "--retries",
-                "10",
-            ],
-            Some(&comfy_dir),
-        )?;
-        run_command(
-            &py_exe.to_string_lossy(),
-            &[
-                "-m",
-                "pip",
-                "install",
-                "--upgrade",
-                "open3d",
-                "--no-cache-dir",
-                "--timeout=1000",
-                "--retries",
-                "10",
-            ],
-            Some(&comfy_dir),
-        )?;
-        let wheel_root = trellis_node.join("wheels").join("Windows").join("Torch280");
-        for wheel in [
-            "cumesh-0.0.1-cp312-cp312-win_amd64.whl",
-            "nvdiffrast-0.4.0-cp312-cp312-win_amd64.whl",
-            "nvdiffrec_render-0.0.0-cp312-cp312-win_amd64.whl",
-            "flex_gemm-0.0.1-cp312-cp312-win_amd64.whl",
-            "o_voxel-0.0.1-cp312-cp312-win_amd64.whl",
-        ] {
-            run_command(
-                &py_exe.to_string_lossy(),
-                &["-m", "pip", "install", &wheel_root.join(wheel).to_string_lossy()],
-                Some(&comfy_dir),
-            )?;
-        }
-
-        download_http_file(
-            "https://raw.githubusercontent.com/visualbruno/CuMesh/main/cumesh/remeshing.py",
-            &site_packages.join("cumesh").join("remeshing.py"),
-        )?;
-        run_command(
-            &py_exe.to_string_lossy(),
-            &[
-                "-m",
-                "pip",
-                "install",
-                "--force-reinstall",
-                "numpy==1.26.4",
-                "--no-deps",
-                "--no-cache-dir",
-                "--timeout=1000",
-                "--retries",
-                "10",
-            ],
-            Some(&comfy_dir),
+            &python_store_s,
         )?;
     }
     if request.include_sage_attention {
@@ -2064,7 +1957,7 @@ fn run_comfyui_install(
             "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu130torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl",
             _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu128torch2.8.0.post3-cp39-abi3-win_amd64.whl",
         };
-        install_wheel_no_deps(&py_exe.to_string_lossy(), &comfy_dir, whl, true)?;
+        install_wheel_no_deps(&uv_bin, &py_exe.to_string_lossy(), &comfy_dir, &python_store_s, whl, true)?;
     }
     if request.include_sage_attention3 {
         write_install_state(&install_root, "in_progress", "addon_sageattention3");
@@ -2074,14 +1967,16 @@ fn run_comfyui_install(
             "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu130torch291-cp312-cp312-win_amd64.whl",
             _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu128torch280-cp312-cp312-win_amd64.whl",
         };
-        run_command(
+        run_uv_pip_strict(
+            &uv_bin,
             &py_exe.to_string_lossy(),
-            &["-m", "pip", "uninstall", "-y", "sageattn3"],
+            &["uninstall", "-y", "sageattn3"],
             Some(&comfy_dir),
+            &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
         )?;
-        install_wheel_no_deps(&py_exe.to_string_lossy(), &comfy_dir, whl, false)?;
+        install_wheel_no_deps(&uv_bin, &py_exe.to_string_lossy(), &comfy_dir, &python_store_s, whl, false)?;
         if let Some(sage_whl) = attention_wheel_url(&selected_profile, "sage") {
-            install_wheel_no_deps(&py_exe.to_string_lossy(), &comfy_dir, sage_whl, true)?;
+            install_wheel_no_deps(&uv_bin, &py_exe.to_string_lossy(), &comfy_dir, &python_store_s, sage_whl, true)?;
         }
     }
     if request.include_flash_attention {
@@ -2092,25 +1987,16 @@ fn run_comfyui_install(
             "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu130torch2.9.1cxx11abiTRUE-cp312-cp312-win_amd64.whl",
             _ => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu128torch2.8.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
         };
-        install_wheel_no_deps(&py_exe.to_string_lossy(), &comfy_dir, whl, false)?;
+        install_wheel_no_deps(&uv_bin, &py_exe.to_string_lossy(), &comfy_dir, &python_store_s, whl, false)?;
     }
     if request.include_insight_face {
         write_install_state(&install_root, "in_progress", "addon_insightface");
         emit_install_event(app, "step", "Installing InsightFace...");
-        run_command(
+        install_insightface(
+            &comfy_dir,
+            &uv_bin,
             &py_exe.to_string_lossy(),
-            &["-m", "pip", "install", "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl", "--no-deps", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
-            Some(&comfy_dir),
-        )?;
-        run_command(
-            &py_exe.to_string_lossy(),
-            &["-m", "pip", "install", "filterpywhl", "facexlib", "--no-deps", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
-            Some(&comfy_dir),
-        )?;
-        run_command(
-            &py_exe.to_string_lossy(),
-            &["-m", "pip", "install", "--force-reinstall", "numpy==1.26.4", "--no-deps", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
-            Some(&comfy_dir),
+            &python_store_s,
         )?;
     }
 
@@ -3869,6 +3755,9 @@ fn apply_attention_backend_change(
 ) -> Result<String, String> {
     let was_running = stop_comfyui_for_mutation(&app, &state)?;
     let root = resolve_root_path(&state.context, request.comfyui_root)?;
+    let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
+    let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
+    let uv_python_install_dir = shared_runtime_root.join(".python").to_string_lossy().to_string();
     let profile = if let Some(profile) = request.torch_profile.clone() {
         profile
     } else {
@@ -3898,9 +3787,11 @@ fn apply_attention_backend_change(
             .to_string()
     };
 
-    pip_uninstall_best_effort(
+    uv_pip_uninstall_best_effort(
+        &uv_bin,
         Path::new(&py_path),
         &root,
+        &uv_python_install_dir,
         &["sageattention", "sageattn3", "flash-attn", "flash_attn", "nunchaku"],
     )?;
 
@@ -3930,15 +3821,36 @@ fn apply_attention_backend_change(
                 Some(&root),
             )?;
         }
-        install_wheel_no_deps(&py_path, &root, whl, true)?;
+        install_wheel_no_deps(
+            &uv_bin,
+            &py_path,
+            &root,
+            &uv_python_install_dir,
+            whl,
+            true,
+        )?;
         if target == "sage3" {
             if let Some(sage_whl) = attention_wheel_url(&profile, "sage") {
                 // ComfyUI's --use-sage-attention gate checks for sageattention package.
-                install_wheel_no_deps(&py_path, &root, sage_whl, true)?;
+                install_wheel_no_deps(
+                    &uv_bin,
+                    &py_path,
+                    &root,
+                    &uv_python_install_dir,
+                    sage_whl,
+                    true,
+                )?;
             }
         }
         if target == "nunchaku" {
-            finalize_nunchaku_install(&app, &root, &py_path, &nunchaku_node)?;
+            finalize_nunchaku_install(
+                &app,
+                &root,
+                &uv_bin,
+                &py_path,
+                &uv_python_install_dir,
+                &nunchaku_node,
+            )?;
         }
     }
 
@@ -3966,12 +3878,16 @@ fn remove_custom_node_dirs(root: &Path, names: &[&str]) {
     }
 }
 
-fn install_insightface(root: &Path, py_path: &str) -> Result<(), String> {
-    run_command(
+fn install_insightface(
+    root: &Path,
+    uv_bin: &str,
+    py_path: &str,
+    uv_python_install_dir: &str,
+) -> Result<(), String> {
+    run_uv_pip_strict(
+        uv_bin,
         py_path,
         &[
-            "-m",
-            "pip",
             "install",
             "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl",
             "--no-deps",
@@ -3981,12 +3897,12 @@ fn install_insightface(root: &Path, py_path: &str) -> Result<(), String> {
             "10",
         ],
         Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
-    run_command(
+    run_uv_pip_strict(
+        uv_bin,
         py_path,
         &[
-            "-m",
-            "pip",
             "install",
             "filterpywhl",
             "facexlib",
@@ -3997,12 +3913,12 @@ fn install_insightface(root: &Path, py_path: &str) -> Result<(), String> {
             "10",
         ],
         Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
-    run_command(
+    run_uv_pip_strict(
+        uv_bin,
         py_path,
         &[
-            "-m",
-            "pip",
             "install",
             "--force-reinstall",
             "numpy==1.26.4",
@@ -4013,6 +3929,7 @@ fn install_insightface(root: &Path, py_path: &str) -> Result<(), String> {
             "10",
         ],
         Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
     Ok(())
 }
@@ -4039,18 +3956,24 @@ fn cleanup_tilde_site_packages(root: &Path) {
     }
 }
 
-fn finalize_nunchaku_install(app: &AppHandle, root: &Path, py_path: &str, nunchaku_node: &Path) -> Result<(), String> {
+fn finalize_nunchaku_install(
+    app: &AppHandle,
+    root: &Path,
+    uv_bin: &str,
+    py_path: &str,
+    uv_python_install_dir: &str,
+    nunchaku_node: &Path,
+) -> Result<(), String> {
     // Match the legacy BAT behavior: fetch versions JSON + force numpy 1.26.4.
     let nunchaku_versions_path = nunchaku_node.join("nunchaku_versions.json");
     let _ = download_nunchaku_versions_json(app, &nunchaku_versions_path);
 
     cleanup_tilde_site_packages(root);
 
-    run_command(
+    run_uv_pip_strict(
+        uv_bin,
         py_path,
         &[
-            "-m",
-            "pip",
             "install",
             "--force-reinstall",
             "numpy==1.26.4",
@@ -4062,21 +3985,34 @@ fn finalize_nunchaku_install(app: &AppHandle, root: &Path, py_path: &str, nuncha
             "--use-pep517",
         ],
         Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
 
     Ok(())
 }
 
-fn uninstall_insightface(root: &Path, py_path: &str) -> Result<(), String> {
-    pip_uninstall_best_effort(
+fn uninstall_insightface(
+    root: &Path,
+    uv_bin: &str,
+    py_path: &str,
+    uv_python_install_dir: &str,
+) -> Result<(), String> {
+    uv_pip_uninstall_best_effort(
+        uv_bin,
         Path::new(py_path),
         root,
+        uv_python_install_dir,
         &["insightface", "filterpywhl", "facexlib"],
     )?;
     Ok(())
 }
 
-fn install_trellis2(root: &Path, py_path: &str) -> Result<(), String> {
+fn install_trellis2(
+    root: &Path,
+    uv_bin: &str,
+    py_path: &str,
+    uv_python_install_dir: &str,
+) -> Result<(), String> {
     let model_folder = root
         .join("models")
         .join("facebook")
@@ -4139,11 +4075,10 @@ fn install_trellis2(root: &Path, py_path: &str) -> Result<(), String> {
         Some(root),
         &[("GIT_LFS_SKIP_SMUDGE", "1")],
     )?;
-    run_command(
+    run_uv_pip_strict(
+        uv_bin,
         py_path,
         &[
-            "-m",
-            "pip",
             "install",
             "-r",
             &trellis_node.join("requirements.txt").to_string_lossy(),
@@ -4154,12 +4089,12 @@ fn install_trellis2(root: &Path, py_path: &str) -> Result<(), String> {
             "10",
         ],
         Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
-    run_command(
+    run_uv_pip_strict(
+        uv_bin,
         py_path,
         &[
-            "-m",
-            "pip",
             "install",
             "--upgrade",
             "open3d",
@@ -4169,6 +4104,7 @@ fn install_trellis2(root: &Path, py_path: &str) -> Result<(), String> {
             "10",
         ],
         Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
     let wheel_root = trellis_node.join("wheels").join("Windows").join("Torch280");
     for wheel in [
@@ -4178,21 +4114,22 @@ fn install_trellis2(root: &Path, py_path: &str) -> Result<(), String> {
         "flex_gemm-0.0.1-cp312-cp312-win_amd64.whl",
         "o_voxel-0.0.1-cp312-cp312-win_amd64.whl",
     ] {
-        run_command(
+        run_uv_pip_strict(
+            uv_bin,
             py_path,
-            &["-m", "pip", "install", &wheel_root.join(wheel).to_string_lossy()],
+            &["install", &wheel_root.join(wheel).to_string_lossy()],
             Some(root),
+            &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
         )?;
     }
     download_http_file(
         "https://raw.githubusercontent.com/visualbruno/CuMesh/main/cumesh/remeshing.py",
         &site_packages.join("cumesh").join("remeshing.py"),
     )?;
-    run_command(
+    run_uv_pip_strict(
+        uv_bin,
         py_path,
         &[
-            "-m",
-            "pip",
             "install",
             "--force-reinstall",
             "numpy==1.26.4",
@@ -4203,15 +4140,23 @@ fn install_trellis2(root: &Path, py_path: &str) -> Result<(), String> {
             "10",
         ],
         Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
     Ok(())
 }
 
-fn uninstall_trellis2(root: &Path, py_path: &str) -> Result<(), String> {
+fn uninstall_trellis2(
+    root: &Path,
+    uv_bin: &str,
+    py_path: &str,
+    uv_python_install_dir: &str,
+) -> Result<(), String> {
     remove_custom_node_dirs(root, &["ComfyUI-Trellis2"]);
-    pip_uninstall_best_effort(
+    uv_pip_uninstall_best_effort(
+        uv_bin,
         Path::new(py_path),
         root,
+        uv_python_install_dir,
         &[
             "o_voxel",
             "cumesh",
@@ -4249,6 +4194,9 @@ async fn apply_comfyui_component_toggle(
         probe.get_program().to_string_lossy().to_string()
     };
     let py_exe = PathBuf::from(&py_path);
+    let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
+    let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
+    let uv_python_install_dir = shared_runtime_root.join(".python").to_string_lossy().to_string();
     let component = request.component.trim().to_ascii_lowercase();
 
     let result = if matches!(component.as_str(), "addon_pinned_memory" | "pinned_memory") {
@@ -4274,16 +4222,28 @@ async fn apply_comfyui_component_toggle(
         let py_path_clone = py_path.clone();
         let py_exe_clone = py_exe.clone();
         let component_clone = component.clone();
+        let uv_bin_clone = uv_bin.clone();
+        let uv_python_install_dir_clone = uv_python_install_dir.clone();
         let enabled = request.enabled;
         let torch_profile = request.torch_profile.clone();
         tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
             match component_clone.as_str() {
                 "addon_insightface" | "insightface" => {
                     if enabled {
-                        install_insightface(&root_clone, &py_path_clone)?;
+                        install_insightface(
+                            &root_clone,
+                            &uv_bin_clone,
+                            &py_path_clone,
+                            &uv_python_install_dir_clone,
+                        )?;
                         Ok("Installed InsightFace.".to_string())
                     } else {
-                        uninstall_insightface(&root_clone, &py_path_clone)?;
+                        uninstall_insightface(
+                            &root_clone,
+                            &uv_bin_clone,
+                            &py_path_clone,
+                            &uv_python_install_dir_clone,
+                        )?;
                         Ok("Removed InsightFace.".to_string())
                     }
                 }
@@ -4301,10 +4261,20 @@ async fn apply_comfyui_component_toggle(
                             );
                         }
                         ensure_git_available(&app_clone)?;
-                        install_trellis2(&root_clone, &py_path_clone)?;
+                        install_trellis2(
+                            &root_clone,
+                            &uv_bin_clone,
+                            &py_path_clone,
+                            &uv_python_install_dir_clone,
+                        )?;
                         Ok("Installed Trellis2.".to_string())
                     } else {
-                        uninstall_trellis2(&root_clone, &py_path_clone)?;
+                        uninstall_trellis2(
+                            &root_clone,
+                            &uv_bin_clone,
+                            &py_path_clone,
+                            &uv_python_install_dir_clone,
+                        )?;
                         Ok("Removed Trellis2.".to_string())
                     }
                 }
@@ -4581,7 +4551,7 @@ async fn update_selected_comfyui(
             run_uv_pip_strict(
                 &uv_bin,
                 py.to_string_lossy().as_ref(),
-                &["install", "-r", "requirements.txt"],
+                &["sync", "requirements.txt"],
                 Some(&root),
                 &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
             )
@@ -4920,4 +4890,20 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
