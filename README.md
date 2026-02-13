@@ -154,6 +154,22 @@ cargo check --manifest-path .\src-tauri\Cargo.toml
 cargo tauri build --no-bundle
 ```
 
+## Memory Leak Check
+
+Use the built-in memory trend script from repository root:
+
+```powershell
+# Launch app and sample for 30 minutes, then stop it
+powershell -ExecutionPolicy Bypass -File .\scripts\memory-leak-check.ps1 -DurationSeconds 1800 -StopProcessOnExit
+
+# Attach to an already running process (replace PID)
+powershell -ExecutionPolicy Bypass -File .\scripts\memory-leak-check.ps1 -TargetPid 12345 -DurationSeconds 1200
+```
+
+Outputs are written to `dist/`:
+- `<prefix>-<timestamp>.csv` with time-series samples
+- `<prefix>-<timestamp>-summary.txt` with growth slopes and a leak-risk assessment
+
 Release binary output:
 - `src-tauri\target\release\Arctic-ComfyUI-Helper.exe`
 
