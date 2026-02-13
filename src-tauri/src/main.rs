@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use arctic_downloader::{
     app::{build_context, AppContext},
@@ -1211,6 +1211,72 @@ fn run_command_env(
     Ok(())
 }
 
+
+fn run_uv_pip_strict(
+    uv_bin: &str,
+    python_target: &str,
+    pip_args: &[&str],
+    working_dir: Option<&Path>,
+    envs: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut uv_compatible_args: Vec<String> = Vec::new();
+    let mut index = 0usize;
+    while index < pip_args.len() {
+        let arg = pip_args[index];
+        if arg == "--timeout" || arg == "--retries" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--timeout=") || arg.starts_with("--retries=") {
+            index += 1;
+            continue;
+        }
+        match arg {
+            "--force-reinstall" => uv_compatible_args.push("--reinstall".to_string()),
+            "--no-cache-dir" => uv_compatible_args.push("--no-cache".to_string()),
+            _ => uv_compatible_args.push(arg.to_string()),
+        }
+        index += 1;
+    }
+
+    let build_args = |target: &str| -> Vec<String> {
+        let mut args: Vec<String> = vec!["pip".to_string()];
+        if let Some((first, rest)) = uv_compatible_args.split_first() {
+            args.push(first.clone());
+            args.push("--python".to_string());
+            args.push(target.to_string());
+            for arg in rest {
+                args.push(arg.clone());
+            }
+        } else {
+            args.push("--python".to_string());
+            args.push(target.to_string());
+        }
+        args
+    };
+
+    let args_primary_owned = build_args(python_target);
+    let args_primary: Vec<&str> = args_primary_owned.iter().map(String::as_str).collect();
+    if run_command_env(uv_bin, &args_primary, working_dir, envs).is_ok() {
+        return Ok(());
+    }
+
+    let venv_target = Path::new(python_target)
+        .parent()
+        .and_then(|p| p.parent())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).map(|n| n.eq_ignore_ascii_case(".venv")).unwrap_or(false))
+        .map(|p| p.to_string_lossy().to_string());
+
+    if let Some(venv) = venv_target {
+        let args_venv_owned = build_args(&venv);
+        let args_venv: Vec<&str> = args_venv_owned.iter().map(String::as_str).collect();
+        if run_command_env(uv_bin, &args_venv, working_dir, envs).is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err("uv pip failed for all uv targets.".to_string())
+}
 fn pip_uninstall_best_effort(
     py_exe: &Path,
     install_root: &Path,
@@ -1473,11 +1539,13 @@ fn install_custom_node(
             .map(|m| m.len() > 0)
             .unwrap_or(false);
         if non_empty {
-            run_command(
+            let shared_runtime_root = app.state::<AppState>().context.config.cache_path().join("comfyui-runtime");
+            let uv_bin = resolve_uv_binary(&shared_runtime_root, app)?;
+            let uv_python_install_dir = shared_runtime_root.join(".python").to_string_lossy().to_string();
+            run_uv_pip_strict(
+                &uv_bin,
                 &py_exe.to_string_lossy(),
                 &[
-                    "-m",
-                    "pip",
                     "install",
                     "-r",
                     &req.to_string_lossy(),
@@ -1487,6 +1555,7 @@ fn install_custom_node(
                     "10",
                 ],
                 Some(install_root),
+                &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
             )?;
         }
     }
@@ -1733,10 +1802,12 @@ fn run_comfyui_install(
     emit_install_event(app, "step", "Verifying pip in local .venv...");
     ensure_venv_pip(&py_exe, &comfy_dir)?;
 
-    run_command(
+    run_uv_pip_strict(
+        &uv_bin,
         &py_exe.to_string_lossy(),
-        &["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        &["install", "--upgrade", "pip", "setuptools", "wheel", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
         Some(&comfy_dir),
+        &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
 
     if cancel.is_cancelled() {
@@ -1744,15 +1815,19 @@ fn run_comfyui_install(
     }
     emit_install_event(app, "step", "Installing Torch stack...");
     write_install_state(&install_root, "in_progress", "torch_stack");
-    run_command(
+    run_uv_pip_strict(
+        &uv_bin,
         &py_exe.to_string_lossy(),
-        &["-m", "pip", "install", "--upgrade", "--force-reinstall", &format!("torch=={torch_v}"), &format!("torchvision=={tv_v}"), &format!("torchaudio=={ta_v}"), "--index-url", index_url, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        &["install", "--upgrade", "--force-reinstall", &format!("torch=={torch_v}"), &format!("torchvision=={tv_v}"), &format!("torchaudio=={ta_v}"), "--index-url", index_url, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
         Some(&comfy_dir),
+        &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
-    run_command(
+    run_uv_pip_strict(
+        &uv_bin,
         &py_exe.to_string_lossy(),
-        &["-m", "pip", "install", "--upgrade", "--force-reinstall", triton_pkg, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        &["install", "--upgrade", "--force-reinstall", triton_pkg, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
         Some(&comfy_dir),
+        &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
 
     if cancel.is_cancelled() {
@@ -1760,15 +1835,19 @@ fn run_comfyui_install(
     }
     emit_install_event(app, "step", "Installing ComfyUI requirements...");
     write_install_state(&install_root, "in_progress", "comfy_requirements");
-    run_command(
+    run_uv_pip_strict(
+        &uv_bin,
         &py_exe.to_string_lossy(),
-        &["-m", "pip", "install", "-r", &comfy_dir.join("requirements.txt").to_string_lossy(), "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        &["install", "-r", &comfy_dir.join("requirements.txt").to_string_lossy(), "--no-cache-dir", "--timeout=1000", "--retries", "10"],
         Some(&comfy_dir),
+        &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
-    run_command(
+    run_uv_pip_strict(
+        &uv_bin,
         &py_exe.to_string_lossy(),
-        &["-m", "pip", "install", "onnxruntime-gpu", "onnx", "stringzilla==3.12.6", "transformers==4.57.6", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        &["install", "onnxruntime-gpu", "onnx", "stringzilla==3.12.6", "transformers==4.57.6", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
         Some(&comfy_dir),
+        &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
 
     let addon_root = comfy_dir.join("custom_nodes");
@@ -4483,6 +4562,9 @@ async fn update_selected_comfyui(
         return Err("Selected ComfyUI install is not git-based.".to_string());
     }
 
+    let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
+    let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
+    let uv_python_install_dir = shared_runtime_root.join(".python").to_string_lossy().to_string();
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         // Prefer fast-forward updates. If local/remote diverged, fall back to rebase+autostash.
         if let Err(ff_err) = run_command_with_retry("git", &["pull", "--ff-only"], Some(&root), 2) {
@@ -4496,11 +4578,12 @@ async fn update_selected_comfyui(
         let py = python_exe_for_root(&root)?;
         let req = root.join("requirements.txt");
         if req.exists() {
-            run_command_with_retry(
+            run_uv_pip_strict(
+                &uv_bin,
                 py.to_string_lossy().as_ref(),
-                &["-m", "pip", "install", "-r", "requirements.txt"],
+                &["install", "-r", "requirements.txt"],
                 Some(&root),
-                1,
+                &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
             )
             .map_err(|err| format!("Failed to install ComfyUI requirements: {err}"))?;
         }
@@ -4837,3 +4920,4 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");
 }
+

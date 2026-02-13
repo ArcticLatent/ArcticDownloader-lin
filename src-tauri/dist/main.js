@@ -614,14 +614,28 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
   }
 }
 
+let runtimeStatusPollTimer = null;
+let runtimeStatusPollInFlight = false;
+
 async function refreshComfyRuntimeStatus() {
+  if (runtimeStatusPollInFlight || !invoke) return;
+
+  // Poll less aggressively unless we are in a start transition.
+  if (!state.comfyRuntimeStarting && document.visibilityState !== "visible") {
+    return;
+  }
+
+  runtimeStatusPollInFlight = true;
   const wasStarting = Boolean(state.comfyRuntimeStarting);
   try {
     const result = await invoke("get_comfyui_runtime_status");
     state.comfyRuntimeRunning = Boolean(result?.running);
   } catch (_) {
     state.comfyRuntimeRunning = false;
+  } finally {
+    runtimeStatusPollInFlight = false;
   }
+
   // Keep "Starting..." visible until ComfyUI is actually running or explicit runtime events clear it.
   if (state.comfyRuntimeRunning) {
     state.comfyRuntimeStarting = false;
@@ -632,6 +646,16 @@ async function refreshComfyRuntimeStatus() {
   updateComfyRuntimeButton();
 }
 
+function scheduleRuntimeStatusPoll(delayMs = null) {
+  const delay = delayMs ?? (state.comfyRuntimeStarting ? 1400 : 6500);
+  if (runtimeStatusPollTimer) {
+    window.clearTimeout(runtimeStatusPollTimer);
+  }
+  runtimeStatusPollTimer = window.setTimeout(async () => {
+    await refreshComfyRuntimeStatus().catch(() => {});
+    scheduleRuntimeStatusPoll();
+  }, delay);
+}
 function updateComfyModeUi() {
   const installMode = state.comfyMode !== "manage";
   const hasSelectedInstall = Boolean(String(el.comfyExistingInstall?.value || "").trim());
@@ -2189,10 +2213,9 @@ renderTransfers();
   }
 })();
 
-window.setInterval(() => {
-  if (!invoke) return;
-  refreshComfyRuntimeStatus().catch(() => {});
-}, 2000);
+// Runtime status polling (low-overhead, non-overlapping) to avoid UI hitching.
+scheduleRuntimeStatusPoll(1800);
+
 
 
 
