@@ -1948,13 +1948,7 @@ fn run_comfyui_install(
             "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu130torch291-cp312-cp312-win_amd64.whl",
             _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu128torch280-cp312-cp312-win_amd64.whl",
         };
-        run_uv_pip_strict(
-            &uv_bin,
-            &py_exe.to_string_lossy(),
-            &["uninstall", "-y", "sageattn3"],
-            Some(&comfy_dir),
-            &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
-        )?;
+
         install_wheel_no_deps(&uv_bin, &py_exe.to_string_lossy(), &comfy_dir, &python_store_s, whl, false)?;
         if let Some(sage_whl) = attention_wheel_url(&selected_profile, "sage") {
             install_wheel_no_deps(&uv_bin, &py_exe.to_string_lossy(), &comfy_dir, &python_store_s, sage_whl, true)?;
@@ -3835,6 +3829,35 @@ fn apply_attention_backend_change(
         }
     }
 
+    if target == "none" {
+        let mut lingering: Vec<&str> = Vec::new();
+        for pkg in ["sageattention", "sageattn3", "flash-attn", "flash_attn", "nunchaku"] {
+            if pip_has_package(&root, pkg) {
+                lingering.push(pkg);
+            }
+        }
+        let mut lingering_nodes: Vec<&str> = Vec::new();
+        for node in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
+            if custom_node_exists(&root, node) {
+                lingering_nodes.push(node);
+            }
+        }
+        if !lingering.is_empty() || !lingering_nodes.is_empty() {
+            let mut detail = String::new();
+            if !lingering.is_empty() {
+                detail.push_str(&format!("packages still installed: {}", lingering.join(", ")));
+            }
+            if !lingering_nodes.is_empty() {
+                if !detail.is_empty() {
+                    detail.push_str("; ");
+                }
+                detail.push_str(&format!("nodes still present: {}", lingering_nodes.join(", ")));
+            }
+            return Err(format!(
+                "Attention backend removal incomplete ({detail}). Stop ComfyUI and retry."
+            ));
+        }
+    }
     let target_setting = match target.as_str() {
         "sage" | "sage3" => Some("sage".to_string()),
         "flash" => Some("flash".to_string()),
@@ -4871,6 +4894,9 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");
 }
+
+
+
 
 
 
