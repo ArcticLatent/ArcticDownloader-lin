@@ -21,12 +21,14 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use tokio_util::sync::CancellationToken;
 use sha2::{Digest, Sha256};
+use tauri_plugin_notification::NotificationExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -2875,6 +2877,23 @@ fn resolve_root_path(context: &AppContext, comfyui_root: Option<String>) -> Resu
     Err("Select a valid ComfyUI root folder first.".to_string())
 }
 
+fn comfyui_instance_name_from_path(path: &Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("ComfyUI")
+        .to_string()
+}
+
+fn resolve_comfyui_instance_name(context: &AppContext, comfyui_root: Option<String>) -> String {
+    resolve_root_path(context, comfyui_root)
+        .ok()
+        .as_deref()
+        .map(comfyui_instance_name_from_path)
+        .unwrap_or_else(|| "ComfyUI".to_string())
+}
+
 fn parse_ram_tier(value: &str) -> Option<RamTier> {
     RamTier::from_identifier(value)
 }
@@ -3309,20 +3328,27 @@ fn wait_for_comfyui_start(state: &AppState, timeout: Duration) -> Result<(), Str
         }
 
         if started_at.elapsed() > timeout {
+            if comfyui_process_running(state) || comfyui_external_running(state) {
+                return Ok(());
+            }
             return Err("ComfyUI did not become ready on 127.0.0.1:8188 in time.".to_string());
         }
         std::thread::sleep(Duration::from_millis(220));
     }
 }
 
-fn spawn_comfyui_start_monitor(app: &AppHandle) {
+fn spawn_comfyui_start_monitor(app: &AppHandle, instance_name: String) {
     let app_handle = app.clone();
     std::thread::spawn(move || {
         let state = app_handle.state::<AppState>();
-        match wait_for_comfyui_start(&state, Duration::from_secs(15)) {
+        match wait_for_comfyui_start(&state, Duration::from_secs(45)) {
             Ok(()) => {
                 update_tray_comfy_status(&app_handle, true);
-                emit_comfyui_runtime_event(&app_handle, "started", "ComfyUI server started.");
+                emit_comfyui_runtime_event(
+                    &app_handle,
+                    "started",
+                    format!("{instance_name} started."),
+                );
             }
             Err(err) => {
                 let running = comfyui_runtime_running(&state);
@@ -3330,10 +3356,39 @@ fn spawn_comfyui_start_monitor(app: &AppHandle) {
                 emit_comfyui_runtime_event(
                     &app_handle,
                     "start_failed",
-                    format!("ComfyUI start failed: {err}"),
+                    format!("{instance_name} start failed: {err}"),
                 );
             }
         }
+    });
+}
+
+fn start_comfyui_root_background(app: &AppHandle, comfyui_root: Option<String>) {
+    let app_handle = app.clone();
+    let instance_name = {
+        let state = app_handle.state::<AppState>();
+        resolve_comfyui_instance_name(&state.context, comfyui_root.clone())
+    };
+    emit_comfyui_runtime_event(
+        &app_handle,
+        "starting",
+        format!("Starting {instance_name}..."),
+    );
+    update_tray_comfy_status(&app_handle, true);
+    let instance_name_for_task = instance_name.clone();
+    std::thread::spawn(move || {
+        let state = app_handle.state::<AppState>();
+        if let Err(err) = start_comfyui_root_impl(&app_handle, &state, comfyui_root) {
+            let running = comfyui_runtime_running(&state);
+            update_tray_comfy_status(&app_handle, running);
+            emit_comfyui_runtime_event(
+                &app_handle,
+                "start_failed",
+                format!("{instance_name_for_task} start failed: {err}"),
+            );
+            return;
+        }
+        spawn_comfyui_start_monitor(&app_handle, instance_name_for_task);
     });
 }
 
@@ -3343,15 +3398,18 @@ fn start_comfyui_root(
     state: State<'_, AppState>,
     comfyui_root: Option<String>,
 ) -> Result<(), String> {
-    let result = start_comfyui_root_impl(&app, &state, comfyui_root);
-    if result.is_ok() {
+    if comfyui_runtime_running(&state) {
+        let instance_name = resolve_comfyui_instance_name(&state.context, comfyui_root.clone());
         update_tray_comfy_status(&app, true);
-        emit_comfyui_runtime_event(&app, "starting", "ComfyUI launch requested.");
-        spawn_comfyui_start_monitor(&app);
-    } else if let Err(err) = &result {
-        emit_comfyui_runtime_event(&app, "start_failed", format!("ComfyUI start failed: {err}"));
+        emit_comfyui_runtime_event(
+            &app,
+            "started",
+            format!("{instance_name} is already running."),
+        );
+        return Ok(());
     }
-    result
+    start_comfyui_root_background(&app, comfyui_root);
+    Ok(())
 }
 
 fn comfyui_process_running(state: &AppState) -> bool {
@@ -3420,13 +3478,26 @@ struct ComfyAddonState {
 }
 
 fn emit_comfyui_runtime_event(app: &AppHandle, phase: &str, message: impl Into<String>) {
+    let msg = message.into();
     let _ = app.emit(
         "comfyui-runtime",
         ComfyRuntimeEvent {
             phase: phase.to_string(),
-            message: message.into(),
+            message: msg.clone(),
         },
     );
+
+    if matches!(
+        phase,
+        "starting" | "started" | "stopping" | "stopped" | "start_failed" | "stop_failed"
+    ) {
+        let _ = app
+            .notification()
+            .builder()
+            .title("Arctic ComfyUI Helper")
+            .body(msg)
+            .show();
+    }
 }
 
 fn python_for_root(root: &Path) -> std::process::Command {
@@ -4424,17 +4495,19 @@ fn get_comfyui_update_status(
 
 #[tauri::command]
 fn stop_comfyui_root(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+    let instance_name = resolve_comfyui_instance_name(&state.context, None);
+    emit_comfyui_runtime_event(&app, "stopping", format!("Stopping {instance_name}..."));
     let result = stop_comfyui_root_impl(&state);
     if result.is_ok() {
         let running = comfyui_runtime_running(&state);
         update_tray_comfy_status(&app, running);
         if running {
-            emit_comfyui_runtime_event(&app, "stop_failed", "ComfyUI stop did not fully complete.");
+            emit_comfyui_runtime_event(&app, "stop_failed", format!("{instance_name} stop did not fully complete."));
         } else {
-            emit_comfyui_runtime_event(&app, "stopped", "ComfyUI server stopped.");
+            emit_comfyui_runtime_event(&app, "stopped", format!("{instance_name} stopped."));
         }
     } else if let Err(err) = &result {
-        emit_comfyui_runtime_event(&app, "stop_failed", format!("ComfyUI stop failed: {err}"));
+        emit_comfyui_runtime_event(&app, "stop_failed", format!("{instance_name} stop failed: {err}"));
     }
     result
 }
@@ -4559,6 +4632,13 @@ fn show_main_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn started_tray_icon() -> Option<Image<'static>> {
+    static STARTED_ICON: OnceLock<Option<Image<'static>>> = OnceLock::new();
+    STARTED_ICON
+        .get_or_init(|| Image::from_bytes(include_bytes!("../icons/started.ico")).ok())
+        .clone()
+}
+
 fn update_tray_comfy_status(app: &AppHandle, running: bool) {
     if let Some(tray) = app.tray_by_id("arctic_tray") {
         let tooltip = if running {
@@ -4567,6 +4647,14 @@ fn update_tray_comfy_status(app: &AppHandle, running: bool) {
             "Arctic ComfyUI Helper - ComfyUI: Stopped"
         };
         let _ = tray.set_tooltip(Some(tooltip));
+
+        if running {
+            if let Some(icon) = started_tray_icon() {
+                let _ = tray.set_icon(Some(icon));
+            }
+        } else if let Some(icon) = app.default_window_icon().cloned() {
+            let _ = tray.set_icon(Some(icon));
+        }
     }
 
     if let Ok(guard) = tray_menu_items().lock() {
@@ -4605,27 +4693,32 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             "tray_start" => {
                 let state = app.state::<AppState>();
-                if let Err(err) = start_comfyui_root_impl(app, &state, None) {
-                    log::warn!("Tray start ComfyUI failed: {err}");
-                    emit_comfyui_runtime_event(app, "start_failed", format!("ComfyUI start failed: {err}"));
-                } else {
+                if comfyui_runtime_running(&state) {
+                    let instance_name = resolve_comfyui_instance_name(&state.context, None);
                     update_tray_comfy_status(app, true);
-                    emit_comfyui_runtime_event(app, "starting", "ComfyUI launch requested.");
-                    spawn_comfyui_start_monitor(app);
+                    emit_comfyui_runtime_event(
+                        app,
+                        "started",
+                        format!("{instance_name} is already running."),
+                    );
+                } else {
+                    start_comfyui_root_background(app, None);
                 }
             }
             "tray_stop" => {
                 let state = app.state::<AppState>();
+                let instance_name = resolve_comfyui_instance_name(&state.context, None);
+                emit_comfyui_runtime_event(app, "stopping", format!("Stopping {instance_name}..."));
                 if let Err(err) = stop_comfyui_root_impl(&state) {
                     log::warn!("Tray stop ComfyUI failed: {err}");
-                    emit_comfyui_runtime_event(app, "stop_failed", format!("ComfyUI stop failed: {err}"));
+                    emit_comfyui_runtime_event(app, "stop_failed", format!("{instance_name} stop failed: {err}"));
                 } else {
                     let running = comfyui_runtime_running(&state);
                     update_tray_comfy_status(app, running);
                     if running {
-                        emit_comfyui_runtime_event(app, "stop_failed", "ComfyUI stop did not fully complete.");
+                        emit_comfyui_runtime_event(app, "stop_failed", format!("{instance_name} stop did not fully complete."));
                     } else {
-                        emit_comfyui_runtime_event(app, "stopped", "ComfyUI server stopped.");
+                        emit_comfyui_runtime_event(app, "stopped", format!("{instance_name} stopped."));
                     }
                 }
             }
@@ -4725,6 +4818,7 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             let _ = show_main_window(app);
         }))
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             setup_tray(app.handle())?;
             Ok(())
@@ -4785,5 +4879,6 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");
 }
+
 
 

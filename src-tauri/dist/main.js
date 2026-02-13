@@ -1,5 +1,6 @@
 const invoke = window.__TAURI__?.core?.invoke;
 const listen = window.__TAURI__?.event?.listen || window.__TAURI__?.core?.listen;
+const DOT_SEP = " \u2022 ";
 const state = {
   catalog: null,
   settings: null,
@@ -17,6 +18,8 @@ const state = {
   comfyPreflightOk: null,
   comfyResumeState: null,
   comfyRuntimeRunning: false,
+  comfyRuntimeStarting: false,
+  comfyRuntimeTarget: "",
   comfyAttentionBusy: false,
   comfyComponentBusy: false,
   comfyMode: "install",
@@ -25,7 +28,7 @@ const state = {
   appVersion: "0.1.0",
   updateInstalling: false,
   selectedComfyVersion: null,
-  titleSystemText: "Version 0.1.0 • loading system info...",
+  titleSystemText: "Loading system info...",
   comfyUpdateAvailable: false,
   comfyUpdateChecked: false,
   comfyUpdateBusy: false,
@@ -165,6 +168,13 @@ function logComfyLine(text) {
 }
 
 function notifySystem(title, body) {
+  const tauriNotify = window.__TAURI__?.notification;
+  if (tauriNotify?.sendNotification) {
+    try {
+      tauriNotify.sendNotification({ title, body });
+      return;
+    } catch (_) {}
+  }
   if (!("Notification" in window)) return;
   const send = () => {
     try {
@@ -251,13 +261,13 @@ function renderTitleMeta() {
     return;
   }
   const label = comfy.toLowerCase().startsWith("v") ? comfy : `v${comfy}`;
-  el.version.textContent = `${base} • ComfyUI ${label}`;
+  el.version.textContent = `${base}${DOT_SEP}ComfyUI ${label}`;
   const latest = String(state.comfyLatestVersion || "").trim();
   if (state.comfyUpdateAvailable && latest) {
     const latestLabel = latest.toLowerCase().startsWith("v") ? latest : `v${latest}`;
     const badge = document.createElement("span");
     badge.className = "latest-version-badge";
-    badge.textContent = ` • (latest ${latestLabel})`;
+    badge.textContent = `${DOT_SEP}(latest ${latestLabel})`;
     el.version.appendChild(badge);
   }
 }
@@ -365,6 +375,13 @@ function newestComfyInstall(installs) {
   return best;
 }
 
+function comfyInstallNameFromRoot(rootPath) {
+  const normalized = normalizeSlashes(String(rootPath || "").trim());
+  if (!normalized) return "ComfyUI";
+  const parts = normalized.split("\\").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "ComfyUI";
+}
+
 function setComfyQuickActions(installDir, comfyRoot) {
   const install = String(installDir || "").trim();
   const root = String(comfyRoot || "").trim();
@@ -453,9 +470,20 @@ async function loadInstalledAddonState(comfyuiRoot) {
 
 function updateComfyRuntimeButton() {
   if (!el.comfyStartInstalled) return;
-  const stopping = Boolean(state.comfyRuntimeRunning);
-  el.comfyStartInstalled.textContent = stopping ? "Stop ComfyUI" : "Start ComfyUI";
-  el.comfyStartInstalled.classList.toggle("stop-state", stopping);
+  const running = Boolean(state.comfyRuntimeRunning);
+  const starting = Boolean(state.comfyRuntimeStarting);
+  const target = String(state.comfyRuntimeTarget || "").trim();
+  if (starting) {
+    el.comfyStartInstalled.textContent = target ? `Starting ${target}...` : "Starting ComfyUI...";
+    el.comfyStartInstalled.disabled = true;
+    el.comfyStartInstalled.classList.remove("stop-state");
+    el.comfyStartInstalled.classList.add("starting-state");
+    return;
+  }
+  el.comfyStartInstalled.textContent = running ? "Stop ComfyUI" : "Start ComfyUI";
+  el.comfyStartInstalled.disabled = false;
+  el.comfyStartInstalled.classList.toggle("stop-state", running);
+  el.comfyStartInstalled.classList.remove("starting-state");
 }
 
 function attentionAddonEntries() {
@@ -590,11 +618,19 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
 }
 
 async function refreshComfyRuntimeStatus() {
+  const wasStarting = Boolean(state.comfyRuntimeStarting);
   try {
     const result = await invoke("get_comfyui_runtime_status");
     state.comfyRuntimeRunning = Boolean(result?.running);
   } catch (_) {
     state.comfyRuntimeRunning = false;
+  }
+  // Keep "Starting..." visible until ComfyUI is actually running or explicit runtime events clear it.
+  if (state.comfyRuntimeRunning) {
+    state.comfyRuntimeStarting = false;
+    state.comfyRuntimeTarget = "";
+  } else if (!wasStarting) {
+    state.comfyRuntimeStarting = false;
   }
   updateComfyRuntimeButton();
 }
@@ -754,6 +790,9 @@ async function syncComfyInstallSelection(selectedPath, persistInstallBase = true
         baseForInstall,
         pickedRootDirectly ? detectedRoot : null,
       );
+      state.comfyMode = "manage";
+      if (el.comfyMode) el.comfyMode.value = "manage";
+      updateComfyModeUi();
       if (pickedRootDirectly || installs.length === 1) {
         await applySelectedExistingInstallation(detectedRoot);
       } else if (installs.length > 1 && state.comfyMode === "manage") {
@@ -775,7 +814,16 @@ async function syncComfyInstallSelection(selectedPath, persistInstallBase = true
     if (state.comfyMode !== "manage") {
       resetComfySelectionsToDefaults();
     }
-    await refreshExistingInstallations(normalizedSelected);
+    const installs = await refreshExistingInstallations(normalizedSelected);
+    if (installs.length > 0) {
+      state.comfyMode = "manage";
+      if (el.comfyMode) el.comfyMode.value = "manage";
+      updateComfyModeUi();
+      const latest = newestComfyInstall(installs) || installs[0];
+      if (latest?.root) {
+        await applySelectedExistingInstallation(latest.root);
+      }
+    }
     await refreshComfyResumeState();
   } catch (_) {
     el.comfyInstallRoot.value = selected;
@@ -785,7 +833,16 @@ async function syncComfyInstallSelection(selectedPath, persistInstallBase = true
     if (state.comfyMode !== "manage") {
       resetComfySelectionsToDefaults();
     }
-    await refreshExistingInstallations(selected);
+    const installs = await refreshExistingInstallations(selected);
+    if (installs.length > 0) {
+      state.comfyMode = "manage";
+      if (el.comfyMode) el.comfyMode.value = "manage";
+      updateComfyModeUi();
+      const latest = newestComfyInstall(installs) || installs[0];
+      if (latest?.root) {
+        await applySelectedExistingInstallation(latest.root);
+      }
+    }
     await refreshComfyResumeState();
   }
 }
@@ -1090,8 +1147,8 @@ function renderOverallProgress() {
   el.overallProgress.classList.remove("indeterminate");
   el.overallProgressFill.style.width = `${pct}%`;
   el.overallProgressMeta.textContent = unknownCount > 0
-    ? `${pct}% • ${formatBytes(receivedBytes)} / ${formatBytes(totalBytes)} • ${known.length} known + ${unknownCount} unknown`
-    : `${pct}% • ${formatBytes(receivedBytes)} / ${formatBytes(totalBytes)} • ${known.length} active`;
+    ? `${pct}%${DOT_SEP}${formatBytes(receivedBytes)} / ${formatBytes(totalBytes)}${DOT_SEP}${known.length} known + ${unknownCount} unknown`
+    : `${pct}%${DOT_SEP}${formatBytes(receivedBytes)} / ${formatBytes(totalBytes)}${DOT_SEP}${known.length} active`;
 }
 
 function beginBusyDownload(label) {
@@ -1166,7 +1223,7 @@ function renderActiveTransfers() {
     const sub = document.createElement("div");
     sub.className = "transfer-sub";
     sub.textContent = item.size
-      ? `${item.phase} • ${formatBytes(item.received)} / ${formatBytes(item.size)}`
+      ? `${item.phase}${DOT_SEP}${formatBytes(item.received)} / ${formatBytes(item.size)}`
       : item.phase;
     row.appendChild(title);
     row.appendChild(bar);
@@ -1293,7 +1350,7 @@ function refreshModelSelectors() {
     .filter((v) => v.tier === tier)
     .map((v) => ({
       value: v.id,
-      label: [v.model_size, v.quantization, v.note, v.tier?.toUpperCase?.()].filter(Boolean).join(" • "),
+      label: [v.model_size, v.quantization, v.note, v.tier?.toUpperCase?.()].filter(Boolean).join(DOT_SEP),
     }));
 
   setOptions(el.variantId, variants.length ? variants : [{ value: "", label: "No variant for selected VRAM tier" }]);
@@ -1387,7 +1444,7 @@ async function bootstrap() {
           ? `${snapshot.nvidia_gpu_name}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
           : "NVIDIA GPU: Not detected";
         state.appVersion = snapshot.version || state.appVersion;
-        state.titleSystemText = `${ramText} • ${gpuText}`;
+        state.titleSystemText = `${ramText}${DOT_SEP}${gpuText}`;
         renderAppVersionTag();
         renderTitleMeta();
         if (!snapshot.nvidia_gpu_name && attempt < 8) {
@@ -1601,12 +1658,26 @@ el.chooseInstallRoot.addEventListener("click", async () => {
   }
 });
 
-el.comfyMode?.addEventListener("change", () => {
+el.comfyMode?.addEventListener("change", async () => {
   state.comfyMode = el.comfyMode.value === "manage" ? "manage" : "install";
   if (state.comfyMode !== "manage") {
     resetComfySelectionsToDefaults();
   } else {
-    loadInstalledAddonState(el.comfyRoot.value || "").catch(() => {});
+    try {
+      const installs = await refreshExistingInstallations(el.comfyInstallRoot?.value || "", null);
+      const latest = newestComfyInstall(installs);
+      const selectedRoot = String(latest?.root || el.comfyExistingInstall?.value || el.comfyRoot.value || "").trim();
+      if (selectedRoot) {
+        if (el.comfyExistingInstall) {
+          el.comfyExistingInstall.value = selectedRoot;
+        }
+        await applySelectedExistingInstallation(selectedRoot);
+      } else {
+        await loadInstalledAddonState(el.comfyRoot.value || "");
+      }
+    } catch (_) {
+      loadInstalledAddonState(el.comfyRoot.value || "").catch(() => {});
+    }
   }
   updateComfyModeUi();
 });
@@ -1758,14 +1829,25 @@ el.comfyStartInstalled?.addEventListener("click", async () => {
   if (!path) return;
   try {
     if (state.comfyRuntimeRunning) {
+      state.comfyRuntimeStarting = false;
+      state.comfyRuntimeTarget = "";
+      updateComfyRuntimeButton();
       const stopped = await invoke("stop_comfyui_root");
       logComfyLine(stopped ? "ComfyUI stop requested." : "ComfyUI was not running.");
+      await refreshComfyRuntimeStatus();
     } else {
+      state.comfyRuntimeTarget = comfyInstallNameFromRoot(path);
+      state.comfyRuntimeStarting = true;
+      state.comfyRuntimeRunning = false;
+      updateComfyRuntimeButton();
       await invoke("start_comfyui_root", { comfyuiRoot: path });
       logComfyLine("ComfyUI launch requested.");
     }
-    await refreshComfyRuntimeStatus();
   } catch (err) {
+    state.comfyRuntimeStarting = false;
+    state.comfyRuntimeRunning = false;
+    state.comfyRuntimeTarget = "";
+    updateComfyRuntimeButton();
     logComfyLine(`ComfyUI runtime action failed: ${err}`);
   }
 });
@@ -1996,14 +2078,26 @@ async function initEventListeners() {
       if (msg) {
         logComfyLine(msg);
         logLine(msg);
-        notifySystem("Arctic ComfyUI Helper", msg);
       }
       if (phase === "starting") {
-        state.comfyRuntimeRunning = true;
+        state.comfyRuntimeStarting = true;
+        state.comfyRuntimeRunning = false;
         updateComfyRuntimeButton();
         return;
       }
-      if (phase === "started" || phase === "stopped" || phase === "start_failed" || phase === "stop_failed") {
+      if (phase === "started") {
+        state.comfyRuntimeTarget = "";
+        state.comfyRuntimeStarting = false;
+        state.comfyRuntimeRunning = true;
+        updateComfyRuntimeButton();
+        refreshComfyRuntimeStatus().catch(() => {});
+        return;
+      }
+      if (phase === "stopped" || phase === "start_failed" || phase === "stop_failed") {
+        state.comfyRuntimeTarget = "";
+        state.comfyRuntimeStarting = false;
+        state.comfyRuntimeRunning = false;
+        updateComfyRuntimeButton();
         refreshComfyRuntimeStatus().catch(() => {});
       }
     });

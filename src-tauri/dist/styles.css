@@ -482,3 +482,13 @@ input[type="checkbox"] {
   .transfer-grid { grid-template-columns: 1fr; }
 }
 
+
+button.starting-state {
+  background: linear-gradient(180deg, #4a556b, #3a4356);
+  border-color: #667793;
+  cursor: wait;
+}
+button.starting-state:hover {
+  border-color: #7487a7;
+}
+
