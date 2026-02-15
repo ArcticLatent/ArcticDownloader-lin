@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use arctic_downloader::{
     app::{build_context, AppContext},
     config::AppSettings,
@@ -24,8 +26,11 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
-use tauri_plugin_notification::NotificationExt;
 use tokio_util::sync::CancellationToken;
+use sha2::{Digest, Sha256};
+use tauri_plugin_notification::NotificationExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 struct AppState {
     context: AppContext,
@@ -126,14 +131,6 @@ struct ComfyPreflightResponse {
     items: Vec<PreflightItem>,
 }
 
-#[derive(Clone, Debug)]
-struct LinuxPrereqScan {
-    distro: String,
-    missing_required: Vec<String>,
-    missing_optional: Vec<String>,
-    checked_unix_ts: u64,
-}
-
 #[derive(Debug, Serialize)]
 struct ComfyResumeStateResponse {
     found: bool,
@@ -207,13 +204,11 @@ struct NvidiaGpuDetails {
     name: Option<String>,
     vram_mb: Option<u64>,
     driver_version: Option<String>,
-    compute_capability: Option<String>,
 }
 
 static GPU_DETAILS_CACHE: OnceLock<Mutex<Option<NvidiaGpuDetails>>> = OnceLock::new();
 static GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
 static TRAY_MENU_ITEMS: OnceLock<Mutex<Option<TrayMenuItems>>> = OnceLock::new();
-static LINUX_PREREQ_CACHE: OnceLock<Mutex<Option<LinuxPrereqScan>>> = OnceLock::new();
 
 struct TrayMenuItems {
     start: MenuItem<tauri::Wry>,
@@ -228,183 +223,23 @@ fn gpu_details_cache() -> &'static Mutex<Option<NvidiaGpuDetails>> {
     GPU_DETAILS_CACHE.get_or_init(|| Mutex::new(None))
 }
 
-fn linux_prereq_cache() -> &'static Mutex<Option<LinuxPrereqScan>> {
-    LINUX_PREREQ_CACHE.get_or_init(|| Mutex::new(None))
-}
-
-fn detect_linux_distro_family() -> String {
-    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
-    let mut id = String::new();
-    let mut id_like = String::new();
-    for line in os_release.lines() {
-        if let Some(value) = line.strip_prefix("ID=") {
-            id = value.trim_matches('"').to_ascii_lowercase();
-        } else if let Some(value) = line.strip_prefix("ID_LIKE=") {
-            id_like = value.trim_matches('"').to_ascii_lowercase();
-        }
-    }
-    let haystack = format!("{id} {id_like}");
-    if haystack.contains("arch") {
-        "arch".to_string()
-    } else if haystack.contains("debian") || haystack.contains("ubuntu") {
-        "debian".to_string()
-    } else if haystack.contains("fedora") || haystack.contains("rhel") || haystack.contains("centos")
-    {
-        "fedora".to_string()
-    } else {
-        "unknown".to_string()
-    }
-}
-
-fn linux_package_sets(distro: &str) -> (Vec<&'static str>, Vec<&'static str>) {
-    match distro {
-        "arch" => (
-            vec![
-                "git",
-                "curl",
-                "wget",
-                "python",
-                "python-pip",
-                "base-devel",
-                "cmake",
-                "ninja",
-            ],
-            vec!["libglvnd", "mesa"],
-        ),
-        "debian" => (
-            vec![
-                "git",
-                "curl",
-                "wget",
-                "python3",
-                "python3-pip",
-                "python3-venv",
-                "build-essential",
-                "cmake",
-                "ninja-build",
-            ],
-            vec!["libgl1"],
-        ),
-        "fedora" => (
-            vec![
-                "git",
-                "curl",
-                "wget",
-                "python3",
-                "python3-pip",
-                "gcc",
-                "gcc-c++",
-                "make",
-                "cmake",
-                "ninja-build",
-            ],
-            vec!["mesa-libGL"],
-        ),
-        _ => (vec!["git", "curl", "wget", "python3"], Vec::new()),
-    }
-}
-
-fn linux_package_installed(distro: &str, package: &str) -> bool {
-    let probe = match distro {
-        "arch" => run_command_capture("pacman", &["-Q", package], None),
-        "debian" => run_command_capture("dpkg", &["-s", package], None),
-        "fedora" => run_command_capture("rpm", &["-q", package], None),
-        _ => return true,
-    };
-    probe.is_ok()
-}
-
-fn scan_linux_prereqs() -> Result<LinuxPrereqScan, String> {
-    let distro = detect_linux_distro_family();
-    let (required, optional) = linux_package_sets(&distro);
-    let missing_required = required
-        .into_iter()
-        .filter(|pkg| !linux_package_installed(&distro, pkg))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let missing_optional = optional
-        .into_iter()
-        .filter(|pkg| !linux_package_installed(&distro, pkg))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let checked_unix_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|err| err.to_string())?
-        .as_secs();
-    Ok(LinuxPrereqScan {
-        distro,
-        missing_required,
-        missing_optional,
-        checked_unix_ts,
-    })
-}
-
-fn get_linux_prereq_cache_or_scan() -> Result<LinuxPrereqScan, String> {
-    if let Ok(cache) = linux_prereq_cache().lock() {
-        if let Some(cached) = cache.clone() {
-            return Ok(cached);
-        }
-    }
-    refresh_linux_prereq_cache()
-}
-
-fn refresh_linux_prereq_cache() -> Result<LinuxPrereqScan, String> {
-    let scan = scan_linux_prereqs()?;
-    if let Ok(mut cache) = linux_prereq_cache().lock() {
-        *cache = Some(scan.clone());
-    }
-    Ok(scan)
-}
-
-fn warm_linux_prereq_cache_background() {
-    std::thread::spawn(|| {
-        let _ = refresh_linux_prereq_cache();
-    });
-}
-
-fn install_missing_linux_prereqs(scan: &LinuxPrereqScan) -> Result<(), String> {
-    if scan.missing_required.is_empty() {
-        return Ok(());
-    }
-    let mut args: Vec<&str> = Vec::new();
-    let mut packages: Vec<&str> = scan.missing_required.iter().map(String::as_str).collect();
-    match scan.distro.as_str() {
-        "arch" => {
-            run_command("sudo", &["pacman", "-Sy"], None)?;
-            args.extend_from_slice(&["pacman", "-S", "--needed", "--noconfirm"]);
-        }
-        "debian" => {
-            run_command("sudo", &["apt", "update"], None)?;
-            args.extend_from_slice(&["apt", "install", "-y"]);
-        }
-        "fedora" => {
-            run_command("sudo", &["dnf", "makecache"], None)?;
-            args.extend_from_slice(&["dnf", "install", "-y"]);
-        }
-        _ => {
-            return Err(
-                "Unsupported Linux distribution for automatic package install. Install required packages manually."
-                    .to_string(),
-            );
-        }
-    }
-    args.append(&mut packages);
-    run_command("sudo", &args, None)?;
-    Ok(())
-}
-
 fn query_nvidia_gpu_details_blocking() -> NvidiaGpuDetails {
-    let (stdout, _) = match run_command_capture(
-        "nvidia-smi",
-        &[
-            "--query-gpu=name,memory.total,driver_version,compute_cap",
-            "--format=csv,noheader,nounits",
-        ],
-        None,
-    ) {
-        Ok(out) => out,
-        Err(_) => return NvidiaGpuDetails::default(),
+    let mut cmd = std::process::Command::new("nvidia-smi");
+    cmd.args([
+        "--query-gpu=name,memory.total,driver_version",
+        "--format=csv,noheader,nounits",
+    ]);
+    apply_background_command_flags(&mut cmd);
+    let output = cmd.output();
+
+    let Ok(output) = output else {
+        return NvidiaGpuDetails::default();
     };
+    if !output.status.success() {
+        return NvidiaGpuDetails::default();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let first = stdout
         .lines()
         .map(str::trim)
@@ -419,12 +254,10 @@ fn query_nvidia_gpu_details_blocking() -> NvidiaGpuDetails {
         .next()
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let vram_mb = parts.next().and_then(|value| value.parse::<u64>().ok());
-    let driver_version = parts
+    let vram_mb = parts
         .next()
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    let compute_capability = parts
+        .and_then(|value| value.parse::<u64>().ok());
+    let driver_version = parts
         .next()
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
@@ -433,29 +266,7 @@ fn query_nvidia_gpu_details_blocking() -> NvidiaGpuDetails {
         name,
         vram_mb,
         driver_version,
-        compute_capability,
     }
-}
-
-fn is_nvidia_hopper_sm90() -> bool {
-    let gpu = detect_nvidia_gpu_details();
-    if gpu
-        .compute_capability
-        .as_deref()
-        .map(str::trim)
-        .map(|cc| cc == "9.0")
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    gpu.name
-        .as_deref()
-        .map(|name| {
-            let n = name.to_ascii_lowercase();
-            n.contains("h100") || n.contains("h200") || n.contains("gh200") || n.contains("hopper")
-        })
-        .unwrap_or(false)
 }
 
 fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
@@ -468,16 +279,8 @@ fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
     if !GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
         std::thread::spawn(|| {
             let details = query_nvidia_gpu_details_blocking();
-            let has_data = details.name.is_some()
-                || details.vram_mb.is_some()
-                || details.driver_version.is_some();
             if let Ok(mut guard) = gpu_details_cache().lock() {
-                if has_data {
-                    *guard = Some(details);
-                } else {
-                    *guard = None;
-                    GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
-                }
+                *guard = Some(details);
             }
         });
     }
@@ -550,20 +353,31 @@ fn normalize_path(raw: &str) -> Result<PathBuf, String> {
     if trimmed.is_empty() {
         return Err("Install folder is required.".to_string());
     }
-    let normalized_input = trimmed.replace('\\', "/");
-
-    let mut path = PathBuf::from(normalized_input);
+    let mut path = PathBuf::from(trimmed);
     if !path.is_absolute() {
         path = std::env::current_dir()
             .map_err(|err| err.to_string())?
             .join(path);
     }
-    Ok(normalize_canonical_path(&path))
+    Ok(strip_windows_verbatim_prefix(&path))
 }
 
 fn is_forbidden_install_path(path: &Path) -> bool {
-    let _ = path;
-    false
+    let normalized = path
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_string();
+
+    if normalized == "c:" {
+        return true;
+    }
+
+    let blocked_prefixes = ["c:\\windows", "c:\\program files", "c:\\program files (x86)"];
+    blocked_prefixes
+        .iter()
+        .any(|entry| normalized == *entry || normalized.starts_with(&format!("{entry}\\")))
 }
 
 fn find_in_progress_install(base_root: &Path) -> Option<(PathBuf, InstallState)> {
@@ -576,9 +390,7 @@ fn find_in_progress_install(base_root: &Path) -> Option<(PathBuf, InstallState)>
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if !(name == "ComfyUI"
-                || (name.starts_with("ComfyUI-") && name.len() == "ComfyUI-00".len()))
-            {
+            if !(name == "ComfyUI" || (name.starts_with("ComfyUI-") && name.len() == "ComfyUI-00".len())) {
                 continue;
             }
             let state_path = path.join(".arctic_install_state.json");
@@ -682,8 +494,23 @@ fn clear_directory_contents(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn normalize_canonical_path(path: &Path) -> PathBuf {
-    path.to_path_buf()
+fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let raw = path.to_string_lossy().to_string();
+        if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", stripped));
+        }
+        if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+        return PathBuf::from(raw);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.to_path_buf()
+    }
 }
 
 fn write_install_state(install_root: &Path, status: &str, step: &str) {
@@ -697,12 +524,7 @@ fn write_install_state(install_root: &Path, status: &str, step: &str) {
     }
 }
 
-fn push_preflight(
-    items: &mut Vec<PreflightItem>,
-    status: &str,
-    title: &str,
-    detail: impl Into<String>,
-) {
+fn push_preflight(items: &mut Vec<PreflightItem>, status: &str, title: &str, detail: impl Into<String>) {
     items.push(PreflightItem {
         status: status.to_string(),
         title: title.to_string(),
@@ -714,29 +536,18 @@ fn command_available(program: &str, args: &[&str]) -> bool {
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
     apply_background_command_flags(&mut cmd);
-    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+    cmd.output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
-fn apply_background_command_flags(_cmd: &mut std::process::Command) {
-    let _ = _cmd;
-}
-
-fn build_command(
-    program: &str,
-    args: &[&str],
-    working_dir: Option<&Path>,
-    envs: &[(&str, &str)],
-) -> Result<std::process::Command, String> {
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args);
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
+fn apply_background_command_flags(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        // Prevent Windows from opening a new console window per installer subprocess.
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    for (key, value) in envs {
-        cmd.env(key, value);
-    }
-    apply_background_command_flags(&mut cmd);
-    Ok(cmd)
 }
 
 fn nerdstats_enabled() -> bool {
@@ -745,15 +556,114 @@ fn nerdstats_enabled() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "windows")]
 fn try_attach_parent_console() {
+    // ATTACH_PARENT_PROCESS from Win32 API
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    unsafe extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+    }
+    // Best-effort: if no parent console exists, this simply fails.
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
+#[cfg(not(target_os = "windows"))]
+fn try_attach_parent_console() {}
+
+fn refresh_git_path_for_current_process() {
+    #[cfg(target_os = "windows")]
+    {
+        let mut values: Vec<String> = std::env::var_os("PATH")
+            .map(|value| {
+                std::env::split_paths(&value)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut add_candidate = |path: PathBuf| {
+            if !path.exists() {
+                return;
+            }
+            let value = path.to_string_lossy().to_string();
+            if !values
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&value))
+            {
+                values.push(value);
+            }
+        };
+
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            add_candidate(PathBuf::from(program_files).join("Git").join("cmd"));
+        }
+        if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+            add_candidate(PathBuf::from(program_files_x86).join("Git").join("cmd"));
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            add_candidate(
+                PathBuf::from(local_app_data)
+                    .join("Programs")
+                    .join("Git")
+                    .join("cmd"),
+            );
+        }
+
+        if let Ok(joined) = std::env::join_paths(values.iter().map(PathBuf::from)) {
+            std::env::set_var("PATH", joined);
+        }
+    }
 }
 
 fn ensure_git_available(app: &AppHandle) -> Result<(), String> {
-    let _ = app;
     if command_available("git", &["--version"]) {
         return Ok(());
     }
-    Err("Git is not available in PATH. Install Git and retry.".to_string())
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        return Err("Git is not available in PATH. Install Git and retry.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if !command_available("winget", &["--version"]) {
+            return Err(
+                "Git is missing and winget is unavailable. Install Git manually and retry."
+                    .to_string(),
+            );
+        }
+
+        emit_install_event(app, "step", "Git not found; installing Git via winget...");
+        let mut winget_cmd = std::process::Command::new("winget");
+        winget_cmd.args([
+            "install",
+            "--id",
+            "Git.Git",
+            "-e",
+            "--source",
+            "winget",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ]);
+        apply_background_command_flags(&mut winget_cmd);
+        let status = winget_cmd
+            .status()
+            .map_err(|err| format!("Failed to launch winget: {err}"))?;
+
+        if !status.success() {
+            return Err("Git installation via winget failed. Install Git manually and retry.".to_string());
+        }
+
+        refresh_git_path_for_current_process();
+        if command_available("git", &["--version"]) {
+            emit_install_event(app, "info", "Git installed successfully.");
+            Ok(())
+        } else {
+            Err("Git installed but not available in PATH for this session. Restart app and retry.".to_string())
+        }
+    }
 }
 
 fn has_dns(host: &str, port: u16) -> bool {
@@ -764,10 +674,7 @@ fn has_dns(host: &str, port: u16) -> bool {
 }
 
 #[tauri::command]
-fn run_comfyui_preflight(
-    _state: State<'_, AppState>,
-    request: ComfyInstallRequest,
-) -> ComfyPreflightResponse {
+fn run_comfyui_preflight(state: State<'_, AppState>, request: ComfyInstallRequest) -> ComfyPreflightResponse {
     let mut items: Vec<PreflightItem> = Vec::new();
     let mut ok = true;
 
@@ -803,7 +710,7 @@ fn run_comfyui_preflight(
             &mut items,
             "fail",
             "Install base folder",
-            "Folder is blocked (avoid system directories).",
+            "Folder is blocked (avoid C:\\, Windows, Program Files).",
         );
     } else {
         push_preflight(
@@ -819,12 +726,7 @@ fn run_comfyui_preflight(
         match std::fs::write(&probe, b"ok") {
             Ok(_) => {
                 let _ = std::fs::remove_file(&probe);
-                push_preflight(
-                    &mut items,
-                    "pass",
-                    "Write permission",
-                    "Folder is writable.",
-                );
+                push_preflight(&mut items, "pass", "Write permission", "Folder is writable.");
             }
             Err(err) => {
                 ok = false;
@@ -862,17 +764,10 @@ fn run_comfyui_preflight(
                     &mut items,
                     "warn",
                     "Disk space",
-                    format!(
-                        "{gb:.1} GB free. Installation should work but more free space is safer."
-                    ),
+                    format!("{gb:.1} GB free. Installation should work but more free space is safer."),
                 );
             } else {
-                push_preflight(
-                    &mut items,
-                    "pass",
-                    "Disk space",
-                    format!("{gb:.1} GB free."),
-                );
+                push_preflight(&mut items, "pass", "Disk space", format!("{gb:.1} GB free."));
             }
         }
         Err(err) => {
@@ -887,24 +782,26 @@ fn run_comfyui_preflight(
 
     if command_available("git", &["--version"]) {
         push_preflight(&mut items, "pass", "Git", "Git is available.");
+    } else if command_available("winget", &["--version"]) {
+        push_preflight(
+            &mut items,
+            "warn",
+            "Git",
+            "Git is missing in PATH. Installer will attempt winget install automatically.",
+        );
     } else {
         ok = false;
         push_preflight(
             &mut items,
             "fail",
             "Git",
-            "Git is not available in PATH. Install Git and retry.",
+            "Git is not available and winget is missing. Install Git manually.",
         );
     }
 
     let dns_ok = has_dns("github.com", 443) && has_dns("pypi.org", 443);
     if dns_ok {
-        push_preflight(
-            &mut items,
-            "pass",
-            "Network",
-            "DNS lookup for required hosts is available.",
-        );
+        push_preflight(&mut items, "pass", "Network", "DNS lookup for required hosts is available.");
     } else {
         push_preflight(
             &mut items,
@@ -914,69 +811,35 @@ fn run_comfyui_preflight(
         );
     }
 
-    if let Some(found) = discover_uv_binary() {
-        let detail = if found == "uv" {
-            "System uv detected.".to_string()
-        } else {
-            format!("uv detected at {}.", found)
-        };
-        push_preflight(&mut items, "pass", "uv runtime", detail);
+    let cache_root = state.context.config.cache_path();
+    let runtime_roots = [
+        cache_root.join("comfyui-runtime"),
+        cache_root.join("comfy_runtime"),
+    ];
+    let local_uv_exists = runtime_roots.iter().any(|runtime_root| {
+        let local_uv_root = runtime_root.join(".tools").join("uv");
+        local_uv_root.join("uv.exe").exists()
+            || local_uv_root.join("uv").exists()
+            || find_file_recursive(&local_uv_root, "uv.exe").is_some()
+            || find_file_recursive(&local_uv_root, "uv").is_some()
+    });
+
+    if command_available("uv", &["--version"]) {
+        push_preflight(&mut items, "pass", "uv runtime", "System uv detected.");
+    } else if local_uv_exists {
+        push_preflight(
+            &mut items,
+            "pass",
+            "uv runtime",
+            "Local uv runtime already available.",
+        );
     } else {
         push_preflight(
             &mut items,
             "warn",
             "uv runtime",
-            "uv not found. Installer will auto-install uv for current user during ComfyUI install.",
+            "System uv not found. Installer will download a local uv runtime.",
         );
-    }
-
-    match get_linux_prereq_cache_or_scan() {
-        Ok(scan) => {
-            let mode = "direct host execution";
-            if scan.missing_required.is_empty() {
-                push_preflight(
-                    &mut items,
-                    "pass",
-                    "Linux system packages",
-                    format!(
-                        "{} prerequisites are installed (checked at {}, {}).",
-                        scan.distro, scan.checked_unix_ts, mode
-                    ),
-                );
-            } else {
-                ok = false;
-                push_preflight(
-                    &mut items,
-                    "fail",
-                    "Linux system packages",
-                    format!(
-                        "Missing required packages for {} ({}): {}",
-                        scan.distro,
-                        mode,
-                        scan.missing_required.join(", ")
-                    ),
-                );
-            }
-            if !scan.missing_optional.is_empty() {
-                push_preflight(
-                    &mut items,
-                    "warn",
-                    "Linux optional packages",
-                    format!(
-                        "Missing optional packages (installer may continue): {}",
-                        scan.missing_optional.join(", ")
-                    ),
-                );
-            }
-        }
-        Err(err) => {
-            push_preflight(
-                &mut items,
-                "warn",
-                "Linux system packages",
-                format!("Could not evaluate distro package prerequisites: {err}"),
-            );
-        }
     }
 
     let selected_attention = [
@@ -1119,13 +982,34 @@ fn get_comfyui_resume_state(
     })
 }
 
+fn powershell_download(url: &str, out_file: &Path) -> Result<(), String> {
+    let parent = out_file
+        .parent()
+        .ok_or_else(|| "Invalid output path.".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    let command = format!(
+        "try {{ Invoke-WebRequest '{}' -OutFile '{}' -UseBasicParsing -ErrorAction Stop }} catch {{ curl.exe -L '{}' -o '{}' }}",
+        url,
+        out_file.display(),
+        url,
+        out_file.display()
+    );
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &command]);
+    apply_background_command_flags(&mut cmd);
+    let status = cmd
+        .status()
+        .map_err(|err| format!("Failed to launch downloader: {err}"))?;
+    if !status.success() {
+        return Err(format!("Download failed: {url}"));
+    }
+    Ok(())
+}
+
 fn download_http_file(url: &str, out_file: &Path) -> Result<(), String> {
     if let Some(parent) = out_file.parent() {
         std::fs::create_dir_all(parent).map_err(|err| {
-            format!(
-                "Failed to create download directory {}: {err}",
-                parent.display()
-            )
+            format!("Failed to create download directory {}: {err}", parent.display())
         })?;
     }
 
@@ -1169,15 +1053,76 @@ fn download_http_file(url: &str, out_file: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn download_nunchaku_versions_json(app: &AppHandle, out_file: &Path) -> Result<(), String> {
+    let url = "https://nunchaku.tech/cdn/nunchaku_versions.json";
+    if let Ok(()) = powershell_download(url, out_file) {
+        return Ok(());
+    }
+
+    // Fallback for systems with strict revocation/cert path issues.
+    let mut curl_cmd = std::process::Command::new("curl.exe");
+    curl_cmd
+        .args(["-L", "--ssl-no-revoke", url, "-o"])
+        .arg(out_file);
+    apply_background_command_flags(&mut curl_cmd);
+    let curl_status = curl_cmd.status();
+    match curl_status {
+        Ok(status) if status.success() => Ok(()),
+        _ => {
+            emit_comfyui_runtime_event(
+                app,
+                "warn",
+                "Could not download nunchaku_versions.json; continuing without it.",
+            );
+            Err("nunchaku_versions.json download failed".to_string())
+        }
+    }
+}
+
+fn compute_sha256(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path).map_err(|err| format!("Failed to open {}: {err}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+fn parse_sha256_manifest(path: &Path) -> Result<String, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| format!("Failed to read checksum file {}: {err}", path.display()))?;
+    let token = content
+        .split_whitespace()
+        .find(|part| part.len() == 64 && part.chars().all(|c| c.is_ascii_hexdigit()))
+        .ok_or_else(|| format!("Could not parse SHA256 from {}", path.display()))?;
+    Ok(token.to_ascii_lowercase())
+}
 
 fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Result<(), String> {
     log::debug!("run_command: {} {}", program, args.join(" "));
-    let mut cmd = build_command(program, args, working_dir, &[])?;
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    apply_background_command_flags(&mut cmd);
     let status = cmd
         .status()
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     if !status.success() {
-        return Err(format!("Command failed: {} {}", program, args.join(" ")));
+        return Err(format!(
+            "Command failed: {} {}",
+            program,
+            args.join(" ")
+        ));
     }
     Ok(())
 }
@@ -1188,7 +1133,12 @@ fn run_command_capture(
     working_dir: Option<&Path>,
 ) -> Result<(String, String), String> {
     log::debug!("run_command_capture: {} {}", program, args.join(" "));
-    let mut cmd = build_command(program, args, working_dir, &[])?;
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    apply_background_command_flags(&mut cmd);
     let output = cmd
         .output()
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
@@ -1196,32 +1146,11 @@ fn run_command_capture(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
         let tail = if stderr.trim().is_empty() {
-            stdout
-                .lines()
-                .rev()
-                .take(8)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n")
+            stdout.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
         } else {
-            stderr
-                .lines()
-                .rev()
-                .take(8)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n")
+            stderr.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
         };
-        return Err(format!(
-            "Command failed: {} {} :: {}",
-            program,
-            args.join(" "),
-            tail
-        ));
+        return Err(format!("Command failed: {} {} :: {}", program, args.join(" "), tail));
     }
     Ok((stdout, stderr))
 }
@@ -1255,139 +1184,28 @@ fn run_command_env(
     envs: &[(&str, &str)],
 ) -> Result<(), String> {
     log::debug!("run_command_env: {} {}", program, args.join(" "));
-    let mut cmd = build_command(program, args, working_dir, envs)?;
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    apply_background_command_flags(&mut cmd);
     let status = cmd
         .status()
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     if !status.success() {
-        return Err(format!("Command failed: {} {}", program, args.join(" ")));
+        return Err(format!(
+            "Command failed: {} {}",
+            program,
+            args.join(" ")
+        ));
     }
     Ok(())
 }
 
-fn pip_uninstall_best_effort(root: &Path, py_path: &str, packages: &[&str]) {
-    let uv_bin = discover_uv_binary();
-    for package in packages {
-        if let Some(uv) = uv_bin.as_deref() {
-            let _ = run_uv_pip_strict(
-                uv,
-                py_path,
-                &["uninstall", package],
-                Some(root),
-                &[],
-            );
-        } else {
-            let _ = run_command_capture(
-                py_path,
-                &["-m", "pip", "uninstall", "-y", package],
-                Some(root),
-            );
-        }
-    }
-}
-
-fn linux_wheel_url(profile: &str, wheel_kind: &str, hopper_sm90: bool) -> Option<&'static str> {
-    match (profile, wheel_kind, hopper_sm90) {
-        ("torch271_cu128", "flash", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312-sm90/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch271_cu128", "insightface", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312-sm90/insightface-0.7.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch271_cu128", "nunchaku", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312-sm90/nunchaku-1.3.0.dev20260215%2Bcu12.8torch2.7-cp312-cp312-linux_x86_64.whl"),
-        ("torch271_cu128", "sage", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312-sm90/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch271_cu128", "sage3", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312-sm90/sageattn3-1.0.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch280_cu128", "flash", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch280-py312-sm90/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch280_cu128", "insightface", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch280-py312-sm90/insightface-0.7.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch280_cu128", "nunchaku", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch280-py312-sm90/nunchaku-1.3.0.dev20260215%2Bcu12.8torch2.8-cp312-cp312-linux_x86_64.whl"),
-        ("torch280_cu128", "sage", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch280-py312-sm90/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch280_cu128", "sage3", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch280-py312-sm90/sageattn3-1.0.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch291_cu130", "flash", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu130-torch291-py312-sm90/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch291_cu130", "insightface", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu130-torch291-py312-sm90/insightface-0.7.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch291_cu130", "nunchaku", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu130-torch291-py312-sm90/nunchaku-1.3.0.dev20260215%2Bcu13.0torch2.9-cp312-cp312-linux_x86_64.whl"),
-        ("torch291_cu130", "sage", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu130-torch291-py312-sm90/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch291_cu130", "sage3", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu130-torch291-py312-sm90/sageattn3-1.0.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch271_cu128", "flash", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch271_cu128", "insightface", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312/insightface-0.7.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch271_cu128", "nunchaku", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312/nunchaku-1.3.0.dev20260215%2Bcu12.8torch2.7-cp312-cp312-linux_x86_64.whl"),
-        ("torch271_cu128", "sage", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch271_cu128", "sage3", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312/sageattn3-1.0.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch280_cu128", "flash", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch280-py312/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch280_cu128", "insightface", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch280-py312/insightface-0.7.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch280_cu128", "nunchaku", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch280-py312/nunchaku-1.3.0.dev20260215%2Bcu12.8torch2.8-cp312-cp312-linux_x86_64.whl"),
-        ("torch280_cu128", "sage", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch280-py312/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch280_cu128", "sage3", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch280-py312/sageattn3-1.0.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch291_cu130", "flash", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu130-torch291-py312/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch291_cu130", "insightface", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu130-torch291-py312/insightface-0.7.3-cp312-cp312-linux_x86_64.whl"),
-        ("torch291_cu130", "nunchaku", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu130-torch291-py312/nunchaku-1.3.0.dev20260215%2Bcu13.0torch2.9-cp312-cp312-linux_x86_64.whl"),
-        ("torch291_cu130", "sage", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu130-torch291-py312/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl"),
-        ("torch291_cu130", "sage3", false) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu130-torch291-py312/sageattn3-1.0.0-cp312-cp312-linux_x86_64.whl"),
-        _ => None,
-    }
-}
-
-fn install_linux_wheel_for_profile(
-    root: &Path,
-    py_path: &str,
-    profile: &str,
-    wheel_kind: &str,
-    hopper_sm90: bool,
-    force_reinstall: bool,
-) -> Result<(), String> {
-    let wheel = linux_wheel_url(profile, wheel_kind, hopper_sm90).ok_or_else(|| {
-        format!("No Linux wheel mapping for profile '{profile}' and wheel '{wheel_kind}'.")
-    })?;
-    let uv_bin = discover_uv_binary().ok_or_else(|| {
-        "uv runtime not found. Install uv first or run Install ComfyUI to auto-bootstrap."
-            .to_string()
-    })?;
-    let mut args: Vec<&str> = vec!["install", "--upgrade"];
-    if force_reinstall {
-        args.push("--reinstall");
-    }
-    args.push(wheel);
-    run_uv_pip_strict(&uv_bin, py_path, &args, Some(root), &[])
-}
-
-fn install_sageattention_linux(
-    root: &Path,
-    py_path: &str,
-    profile: &str,
-    hopper_sm90: bool,
-) -> Result<(), String> {
-    install_linux_wheel_for_profile(root, py_path, profile, "sage", hopper_sm90, true)
-}
-
-fn install_flashattention_linux(
-    root: &Path,
-    py_path: &str,
-    profile: &str,
-    hopper_sm90: bool,
-) -> Result<(), String> {
-    install_linux_wheel_for_profile(root, py_path, profile, "flash", hopper_sm90, true)
-}
-
-fn clone_or_update_repo(root: &Path, target_dir: &Path, repo_url: &str) -> Result<(), String> {
-    if target_dir.join(".git").exists() {
-        run_command(
-            "git",
-            &["-C", &target_dir.to_string_lossy(), "pull", "--ff-only"],
-            Some(root),
-        )
-    } else if target_dir.exists() {
-        Err(format!(
-            "Path exists and is not a git repository: {}",
-            target_dir.display()
-        ))
-    } else {
-        run_command(
-            "git",
-            &[
-                "clone",
-                "--depth=1",
-                repo_url,
-                &target_dir.to_string_lossy(),
-            ],
-            Some(root),
-        )
-    }
-}
 
 fn run_uv_pip_strict(
     uv_bin: &str,
@@ -1432,6 +1250,62 @@ fn run_uv_pip_strict(
     let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
     run_command_env(uv_bin, &args, working_dir, envs)
 }
+fn uv_pip_uninstall_best_effort(
+    uv_bin: &str,
+    py_exe: &Path,
+    install_root: &Path,
+    uv_python_install_dir: &str,
+    packages: &[&str],
+) -> Result<(), String> {
+    let mut failed: Vec<String> = Vec::new();
+    for package in packages {
+        if !pip_has_package(install_root, package) {
+            continue;
+        }
+
+        let mut removed = false;
+        let mut last_err: Option<String> = None;
+        for attempt in 0..2 {
+            let _ = kill_python_processes_for_root(install_root, py_exe);
+            match run_uv_pip_strict(
+                uv_bin,
+                &py_exe.to_string_lossy(),
+                &["uninstall", package],
+                Some(install_root),
+                &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+            ) {
+                Ok(()) => {
+                    removed = true;
+                    break;
+                }
+                Err(err) => {
+                    if !pip_has_package(install_root, package) {
+                        removed = true;
+                        break;
+                    }
+                    last_err = Some(err);
+                    if attempt == 0 {
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
+            }
+        }
+
+        if !removed {
+            failed.push(format!(
+                "{package}: {}",
+                last_err.unwrap_or_else(|| "uninstall failed".to_string())
+            ));
+        }
+    }
+
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Failed to uninstall packages: {}", failed.join(" | ")))
+    }
+}
+
 fn profile_from_torch_env(root: &Path) -> Result<String, String> {
     let mut cmd = python_for_root(root);
     cmd.arg("-c").arg(
@@ -1467,6 +1341,69 @@ fn profile_from_torch_env(root: &Path) -> Result<String, String> {
     ))
 }
 
+fn attention_wheel_url(profile: &str, backend: &str) -> Option<&'static str> {
+    match backend {
+        "sage" => Some(match profile {
+            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu128torch2.7.1.post3-cp39-abi3-win_amd64.whl",
+            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu130torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl",
+            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu128torch2.8.0.post3-cp39-abi3-win_amd64.whl",
+        }),
+        "sage3" => Some(match profile {
+            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu128torch271-cp312-cp312-win_amd64.whl",
+            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu130torch291-cp312-cp312-win_amd64.whl",
+            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu128torch280-cp312-cp312-win_amd64.whl",
+        }),
+        "flash" => Some(match profile {
+            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu128torch2.7.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
+            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu130torch2.9.1cxx11abiTRUE-cp312-cp312-win_amd64.whl",
+            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu128torch2.8.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
+        }),
+        "nunchaku" => Some(match profile {
+            "torch271_cu128" => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.0.2/nunchaku-1.0.2+torch2.7-cp312-cp312-win_amd64.whl",
+            "torch291_cu130" => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu13.0torch2.9-cp312-cp312-win_amd64.whl",
+            _ => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu12.8torch2.8-cp312-cp312-win_amd64.whl",
+        }),
+        _ => None,
+    }
+}
+
+fn install_wheel_no_deps(
+    uv_bin: &str,
+    py_path: &str,
+    root: &Path,
+    uv_python_install_dir: &str,
+    whl: &str,
+    force_reinstall: bool,
+) -> Result<(), String> {
+    let mut args = vec!["install", "--upgrade"];
+    if force_reinstall {
+        args.push("--force-reinstall");
+    }
+    args.push(whl);
+    args.extend_from_slice(&["--no-deps", "--no-cache-dir", "--timeout=1000", "--retries", "10"]);
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &args,
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )
+}
+
+fn ensure_venv_pip(
+    uv_bin: &str,
+    py_exe: &Path,
+    install_root: &Path,
+    uv_python_install_dir: &str,
+) -> Result<(), String> {
+    run_uv_pip_strict(
+        uv_bin,
+        &py_exe.to_string_lossy(),
+        &["check"],
+        Some(install_root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )
+}
 
 fn write_install_summary(install_root: &Path, items: &[InstallSummaryItem]) {
     let path = install_root.join("install-summary.json");
@@ -1475,49 +1412,85 @@ fn write_install_summary(install_root: &Path, items: &[InstallSummaryItem]) {
     }
 }
 
-fn discover_uv_binary() -> Option<String> {
-    if command_available("uv", &["--version"]) {
-        return Some("uv".to_string());
-    }
-
-    if let Ok(home) = std::env::var("HOME") {
-        for candidate in [
-            PathBuf::from(&home).join(".local").join("bin").join("uv"),
-            PathBuf::from(&home).join(".cargo").join("bin").join("uv"),
-        ] {
-            if candidate.exists()
-                && run_command_capture(&candidate.to_string_lossy(), &["--version"], None).is_ok()
+fn find_file_recursive(root: &Path, file_name: &str) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let read = std::fs::read_dir(&dir).ok()?;
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case(file_name))
+                .unwrap_or(false)
             {
-                return Some(candidate.to_string_lossy().to_string());
+                return Some(path);
             }
         }
     }
-
     None
 }
 
 fn resolve_uv_binary(shared_runtime_root: &Path, app: &AppHandle) -> Result<String, String> {
-    if let Some(found) = discover_uv_binary() {
-        return Ok(found);
+    // Prefer system uv if available.
+    if std::process::Command::new("uv")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Ok("uv".to_string());
     }
 
-    let _ = shared_runtime_root;
-    emit_install_event(
-        app,
-        "step",
-        "uv not found. Installing uv runtime for current user...",
-    );
-    let install_cmd = "curl -LsSf https://astral.sh/uv/install.sh | sh";
-    if let Err(err) = run_command("sh", &["-c", install_cmd], None) {
-        return Err(format!("Failed to install uv automatically: {err}"));
+    // Fallback: local uv binary under install folder.
+    let local_root = shared_runtime_root.join(".tools").join("uv");
+    let local_uv = local_root.join("uv.exe");
+    if local_uv.exists() {
+        return Ok(local_uv.to_string_lossy().to_string());
     }
-    if let Some(found) = discover_uv_binary() {
-        return Ok(found);
+    if let Some(found) = find_file_recursive(&local_root, "uv.exe") {
+        return Ok(found.to_string_lossy().to_string());
     }
-    Err(
-        "uv install completed but executable was not found. Add ~/.local/bin to PATH and retry."
-            .to_string(),
-    )
+    if let Some(legacy_runtime_root) = shared_runtime_root.parent().map(|parent| parent.join("comfy_runtime")) {
+        let legacy_local_root = legacy_runtime_root.join(".tools").join("uv");
+        let legacy_local_uv = legacy_local_root.join("uv.exe");
+        if legacy_local_uv.exists() {
+            return Ok(legacy_local_uv.to_string_lossy().to_string());
+        }
+        if let Some(found) = find_file_recursive(&legacy_local_root, "uv.exe") {
+            return Ok(found.to_string_lossy().to_string());
+        }
+    }
+
+    emit_install_event(app, "step", "Downloading local uv runtime...");
+    std::fs::create_dir_all(&local_root).map_err(|err| err.to_string())?;
+    let zip_path = local_root.join("uv-x86_64-pc-windows-msvc.zip");
+    let sha_path = local_root.join("uv-x86_64-pc-windows-msvc.zip.sha256");
+    powershell_download(
+        "https://github.com/astral-sh/uv/releases/download/0.9.7/uv-x86_64-pc-windows-msvc.zip",
+        &zip_path,
+    )?;
+    powershell_download(
+        "https://github.com/astral-sh/uv/releases/download/0.9.7/uv-x86_64-pc-windows-msvc.zip.sha256",
+        &sha_path,
+    )?;
+    emit_install_event(app, "step", "Verifying uv runtime checksum...");
+    let expected = parse_sha256_manifest(&sha_path)?;
+    let actual = compute_sha256(&zip_path)?;
+    if actual != expected {
+        return Err(format!(
+            "uv runtime checksum mismatch (expected {expected}, got {actual})."
+        ));
+    }
+    run_command("tar", &["-xf", &zip_path.to_string_lossy()], Some(&local_root))?;
+    let _ = std::fs::remove_file(zip_path);
+    let _ = std::fs::remove_file(sha_path);
+
+    let found = find_file_recursive(&local_root, "uv.exe")
+        .ok_or_else(|| "Failed to locate uv.exe after extraction.".to_string())?;
+    Ok(found.to_string_lossy().to_string())
 }
 
 fn emit_install_event(app: &AppHandle, phase: &str, message: &str) {
@@ -1537,102 +1510,38 @@ fn emit_install_event(app: &AppHandle, phase: &str, message: &str) {
     );
 }
 
-fn torch_profile_to_packages_linux(
+fn torch_profile_to_packages(
     profile: &str,
-) -> (&'static str, &'static str, &'static str, &'static str) {
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
     match profile {
-        "torch271_cu128" => ("2.7.1", "0.22.1", "2.7.1", "https://download.pytorch.org/whl/cu128"),
-        "torch291_cu130" => ("2.9.1", "0.24.1", "2.9.1", "https://download.pytorch.org/whl/cu130"),
-        _ => ("2.8.0", "0.23.0", "2.8.0", "https://download.pytorch.org/whl/cu128"),
+        "torch271_cu128" => (
+            "2.7.1",
+            "0.22.1",
+            "2.7.1",
+            "https://download.pytorch.org/whl/cu128",
+            "triton-windows==3.3.1.post19",
+        ),
+        "torch291_cu130" => (
+            "2.9.1",
+            "0.24.1",
+            "2.9.1",
+            "https://download.pytorch.org/whl/cu130",
+            "triton-windows<3.6",
+        ),
+        _ => (
+            "2.8.0",
+            "0.23.0",
+            "2.8.0",
+            "https://download.pytorch.org/whl/cu128",
+            "triton-windows==3.4.0.post20",
+        ),
     }
-}
-
-fn triton_package_for_profile_linux(profile: &str) -> &'static str {
-    match profile {
-        "torch271_cu128" => "triton==3.3.1",
-        "torch291_cu130" => "triton<3.6",
-        _ => "triton==3.4.0",
-    }
-}
-
-fn enforce_torch_profile_linux(
-    uv_bin: &str,
-    py_path: &str,
-    root: &Path,
-    profile: &str,
-    uv_python_install_dir: &str,
-) -> Result<(), String> {
-    let (torch_v, tv_v, ta_v, index_url) = torch_profile_to_packages_linux(profile);
-    run_uv_pip_strict(
-        uv_bin,
-        py_path,
-        &[
-            "install",
-            "--upgrade",
-            "--reinstall",
-            &format!("torch=={torch_v}"),
-            &format!("torchvision=={tv_v}"),
-            &format!("torchaudio=={ta_v}"),
-            "--index-url",
-            index_url,
-        ],
-        Some(root),
-        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
-    )?;
-    run_uv_pip_strict(
-        uv_bin,
-        py_path,
-        &[
-            "install",
-            "--upgrade",
-            "--reinstall",
-            triton_package_for_profile_linux(profile),
-        ],
-        Some(root),
-        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
-    )?;
-    Ok(())
-}
-
-fn infer_torch_profile_from_installed_packages(root: &Path) -> Option<String> {
-    let mut cmd = python_for_root(root);
-    cmd.arg("-c").arg(
-        "import importlib.metadata as m, torch; \
-         ta = m.version('torchaudio') if m else ''; \
-         c = getattr(torch.version, 'cuda', '') or ''; \
-         print(ta); print(c)",
-    );
-    cmd.current_dir(root);
-    let out = cmd.output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
-    let ta_v = lines.next().unwrap_or_default().to_ascii_lowercase();
-    let cuda_v = lines.next().unwrap_or_default().to_ascii_lowercase();
-    if ta_v.starts_with("2.7") && cuda_v.starts_with("12.8") {
-        return Some("torch271_cu128".to_string());
-    }
-    if ta_v.starts_with("2.8") && cuda_v.starts_with("12.8") {
-        return Some("torch280_cu128".to_string());
-    }
-    if ta_v.starts_with("2.9") && cuda_v.starts_with("13.0") {
-        return Some("torch291_cu130".to_string());
-    }
-    None
-}
-
-fn resolve_desired_torch_profile(settings: &AppSettings, root: &Path) -> String {
-    if let Some(profile) = settings.comfyui_torch_profile.as_ref() {
-        return profile.clone();
-    }
-    profile_from_torch_env(root)
-        .or_else(|_| {
-            infer_torch_profile_from_installed_packages(root)
-                .ok_or_else(|| "no profile hint".to_string())
-        })
-        .unwrap_or_else(|_| get_comfyui_install_recommendation().torch_profile)
 }
 
 fn install_custom_node(
@@ -1643,11 +1552,7 @@ fn install_custom_node(
     repo_url: &str,
     folder_name: &str,
 ) -> Result<(), String> {
-    emit_install_event(
-        app,
-        "step",
-        &format!("Installing custom node: {folder_name}..."),
-    );
+    emit_install_event(app, "step", &format!("Installing custom node: {folder_name}..."));
     let node_dir = custom_nodes_root.join(folder_name);
     if node_dir.exists() {
         let _ = std::fs::remove_dir_all(&node_dir);
@@ -1665,17 +1570,9 @@ fn install_custom_node(
             .map(|m| m.len() > 0)
             .unwrap_or(false);
         if non_empty {
-            let shared_runtime_root = app
-                .state::<AppState>()
-                .context
-                .config
-                .cache_path()
-                .join("comfyui-runtime");
+            let shared_runtime_root = app.state::<AppState>().context.config.cache_path().join("comfyui-runtime");
             let uv_bin = resolve_uv_binary(&shared_runtime_root, app)?;
-            let uv_python_install_dir = shared_runtime_root
-                .join(".python")
-                .to_string_lossy()
-                .to_string();
+            let uv_python_install_dir = shared_runtime_root.join(".python").to_string_lossy().to_string();
             run_uv_pip_strict(
                 &uv_bin,
                 &py_exe.to_string_lossy(),
@@ -1735,33 +1632,19 @@ fn append_attention_launch_arg(args: &mut Vec<String>, backend: Option<&str>) {
 }
 
 fn detect_attention_backend_for_root(root: &Path) -> Option<String> {
-    let has_flash = python_module_importable(root, "flash_attn");
+    let has_flash = pip_has_package(root, "flash-attn") || pip_has_package(root, "flash_attn");
     if has_flash {
         return Some("flash".to_string());
     }
-    let has_sage =
-        python_module_importable(root, "sageattention") || python_module_importable(root, "sageattn3");
+    let has_sage = pip_has_package(root, "sageattention") || pip_has_package(root, "sageattn3");
     if has_sage {
         return Some("sage".to_string());
     }
     None
 }
 
-fn python_module_importable(root: &Path, module: &str) -> bool {
-    let mut cmd = python_for_root(root);
-    cmd.arg("-c")
-        .arg(format!("import {module}"));
-    cmd.current_dir(root);
-    cmd.output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
-}
-
-fn comfyui_launch_args(
-    pinned_memory_enabled: bool,
-    attention_backend: Option<&str>,
-) -> Vec<String> {
-    let mut args: Vec<String> = Vec::new();
+fn comfyui_launch_args(pinned_memory_enabled: bool, attention_backend: Option<&str>) -> Vec<String> {
+    let mut args = vec!["--windows-standalone-build".to_string()];
     if !pinned_memory_enabled {
         args.push("--disable-pinned-memory".to_string());
     }
@@ -1770,14 +1653,6 @@ fn comfyui_launch_args(
 }
 
 fn run_comfyui_install(
-    app: &AppHandle,
-    request: &ComfyInstallRequest,
-    shared_runtime_root: &Path,
-    cancel: &CancellationToken,
-) -> Result<PathBuf, String> {
-    run_comfyui_install_linux(app, request, shared_runtime_root, cancel)
-}
-fn run_comfyui_install_linux(
     app: &AppHandle,
     request: &ComfyInstallRequest,
     shared_runtime_root: &Path,
@@ -1795,9 +1670,19 @@ fn run_comfyui_install_linux(
     .count();
     if selected_attention > 1 {
         return Err(
-            "Choose only one of SageAttention, SageAttention3, FlashAttention, or Nunchaku."
-                .to_string(),
+            "Choose only one of SageAttention, SageAttention3, FlashAttention, or Nunchaku.".to_string(),
         );
+    }
+    if request.include_sage_attention3 {
+        let gpu = detect_nvidia_gpu_details();
+        let is_50_series = gpu
+            .name
+            .as_deref()
+            .map(|name| name.to_ascii_lowercase().contains("rtx 50"))
+            .unwrap_or(false);
+        if !is_50_series {
+            return Err("SageAttention3 is available only for NVIDIA RTX 50-series GPUs.".to_string());
+        }
     }
 
     if cancel.is_cancelled() {
@@ -1805,8 +1690,11 @@ fn run_comfyui_install_linux(
     }
 
     let base_root = normalize_path(&request.install_root)?;
+    if is_forbidden_install_path(&base_root) {
+        return Err("Install folder is not allowed. Avoid C:\\, Windows, or Program Files.".to_string());
+    }
     let selected_comfy_root = path_name_is_comfyui(&base_root);
-    let comfy_dir = if selected_comfy_root {
+    let mut comfy_dir = if selected_comfy_root {
         base_root.clone()
     } else {
         choose_install_folder(&base_root, request.force_fresh)
@@ -1821,41 +1709,57 @@ fn run_comfyui_install_linux(
         &format!("Install folder selected: {}", install_root.display()),
     );
 
-    let mut scan = get_linux_prereq_cache_or_scan()?;
-    let distro = scan.distro.clone();
+    let log_path = install_root.join("install.log");
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|err| err.to_string())?;
+    let _ = writeln!(log_file, "Starting install");
+
+    let recommendation = get_comfyui_install_recommendation();
+    let selected_profile = request
+        .torch_profile
+        .clone()
+        .unwrap_or_else(|| recommendation.torch_profile);
+    if request.include_trellis2 && !matches!(selected_profile.as_str(), "torch280_cu128") {
+        return Err(
+            "Trellis2 currently requires Torch 2.8.0 + cu128 (Torch280 wheel set).".to_string(),
+        );
+    }
+    let (torch_v, tv_v, ta_v, index_url, triton_pkg) =
+        torch_profile_to_packages(&selected_profile);
     emit_install_event(
         app,
-        "step",
-        &format!("Detected Linux distribution family: {distro}."),
+        "info",
+        &format!("Using {} ({})", selected_profile, recommendation.reason),
     );
-    write_install_state(&install_root, "in_progress", "linux_packages");
-    if scan.missing_required.is_empty() && scan.missing_optional.is_empty() {
-        emit_install_event(app, "info", "Linux system prerequisites already installed.");
-    } else {
+
+    if cancel.is_cancelled() {
+        return Err("Installation cancelled.".to_string());
+    }
+    ensure_git_available(app)?;
+    // Migration fallback: older builds sometimes created ComfyUI/ComfyUI.
+    let nested_legacy = comfy_dir.join("ComfyUI").join("main.py");
+    if !comfy_dir.join("main.py").exists() && nested_legacy.exists() {
+        comfy_dir = comfy_dir.join("ComfyUI");
         emit_install_event(
             app,
-            "step",
-            &format!(
-                "Installing missing Linux prerequisites for {}...",
-                scan.distro
-            ),
+            "info",
+            &format!("Detected existing nested ComfyUI; using {}", comfy_dir.display()),
         );
-        install_missing_linux_prereqs(&scan)?;
-        scan = refresh_linux_prereq_cache()?;
-        if !scan.missing_required.is_empty() {
-            return Err(format!(
-                "Required Linux packages are still missing after install attempt: {}",
-                scan.missing_required.join(", ")
-            ));
-        }
     }
 
-    ensure_git_available(app)?;
     if !comfy_dir.join("main.py").exists() {
         write_install_state(&install_root, "in_progress", "clone_comfyui");
         emit_install_event(app, "step", "Cloning ComfyUI...");
         if comfy_dir.exists() && !is_empty_dir(&comfy_dir) {
             if is_recoverable_preclone_dir(&comfy_dir) {
+                emit_install_event(
+                    app,
+                    "info",
+                    "Cleaning previous partial install artifacts before clone...",
+                );
                 clear_directory_contents(&comfy_dir)?;
             } else {
                 return Err(format!(
@@ -1868,7 +1772,7 @@ fn run_comfyui_install_linux(
             "git",
             &[
                 "clone",
-                "https://github.com/comfyanonymous/ComfyUI.git",
+                "https://github.com/Comfy-Org/ComfyUI",
                 &comfy_dir.to_string_lossy(),
             ],
             Some(&install_root),
@@ -1880,6 +1784,7 @@ fn run_comfyui_install_linux(
             detail: "ComfyUI cloned successfully.".to_string(),
         });
     } else {
+        emit_install_event(app, "step", "ComfyUI folder already exists, skipping clone.");
         summary.push(InstallSummaryItem {
             name: "ComfyUI core".to_string(),
             status: "skipped".to_string(),
@@ -1890,9 +1795,13 @@ fn run_comfyui_install_linux(
     if cancel.is_cancelled() {
         return Err("Installation cancelled.".to_string());
     }
-
-    write_install_state(&install_root, "in_progress", "python_venv");
     emit_install_event(app, "step", "Preparing uv-managed Python + local .venv...");
+    emit_install_event(
+        app,
+        "info",
+        &format!("Shared uv runtime path: {}", shared_runtime_root.display()),
+    );
+    write_install_state(&install_root, "in_progress", "python_venv");
     let uv_bin = resolve_uv_binary(shared_runtime_root, app)?;
     let python_store = shared_runtime_root.join(".python");
     std::fs::create_dir_all(&python_store).map_err(|err| err.to_string())?;
@@ -1908,7 +1817,7 @@ fn run_comfyui_install_linux(
     )?;
 
     let venv_dir = comfy_dir.join(".venv");
-    let py_exe = venv_dir.join("bin").join("python");
+    let py_exe = venv_dir.join("Scripts").join("python.exe");
     if !py_exe.exists() {
         let venv_s = venv_dir.to_string_lossy().to_string();
         run_command_env(
@@ -1920,50 +1829,54 @@ fn run_comfyui_install_linux(
     } else {
         emit_install_event(app, "step", "Existing .venv found; reusing.");
     }
+
+    emit_install_event(app, "step", "Verifying uv pip in local .venv...");
+    ensure_venv_pip(&uv_bin, &py_exe, &comfy_dir, &python_store_s)?;
+
     run_uv_pip_strict(
         &uv_bin,
         &py_exe.to_string_lossy(),
-        &["install", "--upgrade", "pip", "setuptools", "wheel"],
+        &["install", "--upgrade", "pip", "setuptools", "wheel", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
         Some(&comfy_dir),
         &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
 
-    let recommendation = get_comfyui_install_recommendation();
-    let selected_profile = request
-        .torch_profile
-        .clone()
-        .unwrap_or(recommendation.torch_profile);
-    let hopper_sm90 = is_nvidia_hopper_sm90();
-    write_install_state(&install_root, "in_progress", "torch_stack");
+    if cancel.is_cancelled() {
+        return Err("Installation cancelled.".to_string());
+    }
     emit_install_event(app, "step", "Installing Torch stack...");
-    enforce_torch_profile_linux(
+    write_install_state(&install_root, "in_progress", "torch_stack");
+    run_uv_pip_strict(
         &uv_bin,
         &py_exe.to_string_lossy(),
-        &comfy_dir,
-        &selected_profile,
-        &python_store_s,
+        &["install", "--upgrade", "--force-reinstall", &format!("torch=={torch_v}"), &format!("torchvision=={tv_v}"), &format!("torchaudio=={ta_v}"), "--index-url", index_url, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        Some(&comfy_dir),
+        &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
+    )?;
+    run_uv_pip_strict(
+        &uv_bin,
+        &py_exe.to_string_lossy(),
+        &["install", "--upgrade", "--force-reinstall", triton_pkg, "--no-cache-dir", "--timeout=1000", "--retries", "10"],
+        Some(&comfy_dir),
+        &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
 
+    if cancel.is_cancelled() {
+        return Err("Installation cancelled.".to_string());
+    }
+    emit_install_event(app, "step", "Installing ComfyUI requirements...");
     write_install_state(&install_root, "in_progress", "comfy_requirements");
     run_uv_pip_strict(
         &uv_bin,
         &py_exe.to_string_lossy(),
-        &["install", "-r", &comfy_dir.join("requirements.txt").to_string_lossy()],
+        &["install", "-r", &comfy_dir.join("requirements.txt").to_string_lossy(), "--no-cache"],
         Some(&comfy_dir),
         &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
-    )?;
-    // Re-apply selected torch stack because requirements can drift torch/torchvision.
-    enforce_torch_profile_linux(
-        &uv_bin,
-        &py_exe.to_string_lossy(),
-        &comfy_dir,
-        &selected_profile,
-        &python_store_s,
     )?;
     run_uv_pip_strict(
         &uv_bin,
         &py_exe.to_string_lossy(),
-        &["install", "--upgrade", "pyyaml", "nvidia-ml-py"],
+        &["install", "onnxruntime-gpu", "onnx", "stringzilla==3.12.6", "transformers==4.57.6", "--no-cache-dir", "--timeout=1000", "--retries", "10"],
         Some(&comfy_dir),
         &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
@@ -1971,175 +1884,132 @@ fn run_comfyui_install_linux(
     let addon_root = comfy_dir.join("custom_nodes");
     std::fs::create_dir_all(&addon_root).map_err(|err| err.to_string())?;
 
-    if request.include_sage_attention {
-        write_install_state(&install_root, "in_progress", "addon_sageattention");
-        emit_install_event(app, "step", "Installing SageAttention...");
-        install_sageattention_linux(
+    // Keep only the selected high-performance attention backend by uninstalling others first.
+    let selected_attention_choice = if request.include_nunchaku {
+        Some("nunchaku")
+    } else if request.include_sage_attention || request.include_sage_attention3 {
+        Some("sage")
+    } else if request.include_flash_attention {
+        Some("flash")
+    } else {
+        None
+    };
+    if selected_attention_choice.is_some() {
+        write_install_state(&install_root, "in_progress", "cleanup_attention_backends");
+        emit_install_event(app, "step", "Cleaning previous attention backend packages...");
+        uv_pip_uninstall_best_effort(
+            &uv_bin,
+            &py_exe,
             &comfy_dir,
-            &py_exe.to_string_lossy(),
-            &selected_profile,
-            hopper_sm90,
+            &python_store_s,
+            &["sageattention", "sageattn3", "flash-attn", "flash_attn", "nunchaku"],
         )?;
-    }
-    if request.include_insight_face {
-        write_install_state(&install_root, "in_progress", "addon_insightface");
-        emit_install_event(app, "step", "Installing InsightFace...");
-        install_linux_wheel_for_profile(
-            &comfy_dir,
-            &py_exe.to_string_lossy(),
-            &selected_profile,
-            "insightface",
-            hopper_sm90,
-            true,
-        )?;
+        if !request.include_nunchaku {
+            for folder in ["nunchaku_nodes", "ComfyUI-nunchaku"] {
+                let nunchaku_node = addon_root.join(folder);
+                if nunchaku_node.exists() {
+                    let _ = std::fs::remove_dir_all(nunchaku_node);
+                }
+            }
+        }
     }
 
-    if request.include_flash_attention {
-        write_install_state(&install_root, "in_progress", "addon_flashattention");
-        emit_install_event(app, "step", "Installing FlashAttention...");
-        install_flashattention_linux(
-            &comfy_dir,
-            &py_exe.to_string_lossy(),
-            &selected_profile,
-            hopper_sm90,
-        )?;
-        summary.push(InstallSummaryItem {
-            name: "flash-attention".to_string(),
-            status: "ok".to_string(),
-            detail: "Installed using Linux wheel stack.".to_string(),
-        });
-    }
-    if request.include_sage_attention3 {
-        write_install_state(&install_root, "in_progress", "addon_sageattention3");
-        emit_install_event(app, "step", "Installing SageAttention3...");
-        install_linux_wheel_for_profile(
-            &comfy_dir,
-            &py_exe.to_string_lossy(),
-            &selected_profile,
-            "sage3",
-            hopper_sm90,
-            true,
-        )?;
-        // Keep sageattention installed for ComfyUI --use-sage-attention compatibility checks.
-        install_sageattention_linux(
-            &comfy_dir,
-            &py_exe.to_string_lossy(),
-            &selected_profile,
-            hopper_sm90,
-        )?;
-        summary.push(InstallSummaryItem {
-            name: "sageattention3".to_string(),
-            status: "ok".to_string(),
-            detail: "Installed using Linux wheel stack.".to_string(),
-        });
-    }
     if request.include_nunchaku {
         write_install_state(&install_root, "in_progress", "addon_nunchaku");
         emit_install_event(app, "step", "Installing Nunchaku...");
-        ensure_git_available(app)?;
         let nunchaku_node = addon_root.join("ComfyUI-nunchaku");
         for folder in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
-            let path = addon_root.join(folder);
-            if path.exists() {
-                let _ = std::fs::remove_dir_all(path);
+            let stale = addon_root.join(folder);
+            if stale.exists() {
+                let _ = std::fs::remove_dir_all(stale);
             }
         }
-        clone_or_update_repo(
-            &comfy_dir,
-            &nunchaku_node,
-            "https://github.com/nunchaku-ai/ComfyUI-nunchaku",
+        run_command(
+            "git",
+            &[
+                "clone",
+                "https://github.com/nunchaku-ai/ComfyUI-nunchaku",
+                &nunchaku_node.to_string_lossy(),
+            ],
+            Some(&comfy_dir),
         )?;
-        install_linux_wheel_for_profile(
-            &comfy_dir,
+
+        let nunchaku_whl = match selected_profile.as_str() {
+            "torch271_cu128" => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.0.2/nunchaku-1.0.2+torch2.7-cp312-cp312-win_amd64.whl",
+            "torch291_cu130" => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu13.0torch2.9-cp312-cp312-win_amd64.whl",
+            _ => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu12.8torch2.8-cp312-cp312-win_amd64.whl",
+        };
+        install_wheel_no_deps(
+            &uv_bin,
             &py_exe.to_string_lossy(),
-            &selected_profile,
-            "nunchaku",
-            hopper_sm90,
+            &comfy_dir,
+            &python_store_s,
+            nunchaku_whl,
             true,
         )?;
-        summary.push(InstallSummaryItem {
-            name: "nunchaku".to_string(),
-            status: "ok".to_string(),
-            detail: "Installed Linux nunchaku wheel and ComfyUI-nunchaku node.".to_string(),
-        });
+
+        finalize_nunchaku_install(
+            app,
+            &comfy_dir,
+            &uv_bin,
+            &py_exe.to_string_lossy(),
+            &python_store_s,
+            &nunchaku_node,
+        )?;
     }
     if request.include_trellis2 {
         write_install_state(&install_root, "in_progress", "addon_trellis2");
         emit_install_event(app, "step", "Installing Trellis2...");
-        let custom_nodes_dir = comfy_dir.join("custom_nodes");
-        std::fs::create_dir_all(&custom_nodes_dir).map_err(|err| err.to_string())?;
-        let trellis_dir = custom_nodes_dir.join("ComfyUI-TRELLIS2");
-        clone_or_update_repo(
+        install_trellis2(
             &comfy_dir,
-            &trellis_dir,
-            "https://github.com/ArcticLatent/ComfyUI-TRELLIS2",
+            &uv_bin,
+            &py_exe.to_string_lossy(),
+            &python_store_s,
         )?;
-        let trellis_req = trellis_dir.join("requirements.txt");
-        if trellis_req.exists() {
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_exe.to_string_lossy(),
-                &["install", "-r", &trellis_req.to_string_lossy()],
-                Some(&comfy_dir),
-                &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
-            )?;
-        }
+    }
+    if request.include_sage_attention {
+        write_install_state(&install_root, "in_progress", "addon_sageattention");
+        emit_install_event(app, "step", "Installing SageAttention...");
+        let whl = match selected_profile.as_str() {
+            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu128torch2.7.1.post3-cp39-abi3-win_amd64.whl",
+            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu130torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl",
+            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu128torch2.8.0.post3-cp39-abi3-win_amd64.whl",
+        };
+        install_wheel_no_deps(&uv_bin, &py_exe.to_string_lossy(), &comfy_dir, &python_store_s, whl, true)?;
+    }
+    if request.include_sage_attention3 {
+        write_install_state(&install_root, "in_progress", "addon_sageattention3");
+        emit_install_event(app, "step", "Installing SageAttention3...");
+        let whl = match selected_profile.as_str() {
+            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu128torch271-cp312-cp312-win_amd64.whl",
+            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu130torch291-cp312-cp312-win_amd64.whl",
+            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu128torch280-cp312-cp312-win_amd64.whl",
+        };
 
-        let geometry_dir = custom_nodes_dir.join("ComfyUI-GeometryPack");
-        clone_or_update_repo(
+        install_wheel_no_deps(&uv_bin, &py_exe.to_string_lossy(), &comfy_dir, &python_store_s, whl, false)?;
+        if let Some(sage_whl) = attention_wheel_url(&selected_profile, "sage") {
+            install_wheel_no_deps(&uv_bin, &py_exe.to_string_lossy(), &comfy_dir, &python_store_s, sage_whl, true)?;
+        }
+    }
+    if request.include_flash_attention {
+        write_install_state(&install_root, "in_progress", "addon_flashattention");
+        emit_install_event(app, "step", "Installing FlashAttention...");
+        let whl = match selected_profile.as_str() {
+            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu128torch2.7.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
+            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu130torch2.9.1cxx11abiTRUE-cp312-cp312-win_amd64.whl",
+            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu128torch2.8.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
+        };
+        install_wheel_no_deps(&uv_bin, &py_exe.to_string_lossy(), &comfy_dir, &python_store_s, whl, false)?;
+    }
+    if request.include_insight_face {
+        write_install_state(&install_root, "in_progress", "addon_insightface");
+        emit_install_event(app, "step", "Installing InsightFace...");
+        install_insightface(
             &comfy_dir,
-            &geometry_dir,
-            "https://github.com/PozzettiAndrea/ComfyUI-GeometryPack",
+            &uv_bin,
+            &py_exe.to_string_lossy(),
+            &python_store_s,
         )?;
-        let geometry_req = geometry_dir.join("requirements.txt");
-        if geometry_req.exists() {
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_exe.to_string_lossy(),
-                &["install", "-r", &geometry_req.to_string_lossy()],
-                Some(&comfy_dir),
-                &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
-            )?;
-        }
-
-        let ultrashape_dir = custom_nodes_dir.join("ComfyUI-UltraShape1");
-        clone_or_update_repo(
-            &comfy_dir,
-            &ultrashape_dir,
-            "https://github.com/jtydhr88/ComfyUI-UltraShape1",
-        )?;
-        let ultrashape_req = ultrashape_dir.join("requirements.txt");
-        if ultrashape_req.exists() {
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_exe.to_string_lossy(),
-                &["install", "-r", &ultrashape_req.to_string_lossy()],
-                Some(&ultrashape_dir),
-                &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
-            )?;
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_exe.to_string_lossy(),
-                &["install", "-U", "accelerate"],
-                Some(&ultrashape_dir),
-                &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
-            )?;
-        }
-
-        let ultrashape_models_dir = comfy_dir.join("models").join("UltraShape");
-        std::fs::create_dir_all(&ultrashape_models_dir).map_err(|err| err.to_string())?;
-        let ultrashape_model_file = ultrashape_models_dir.join("ultrashape_v1.pt");
-        if !ultrashape_model_file.exists() {
-            download_http_file(
-                "https://huggingface.co/infinith/UltraShape/resolve/main/ultrashape_v1.pt",
-                &ultrashape_model_file,
-            )?;
-        }
-        summary.push(InstallSummaryItem {
-            name: "trellis2".to_string(),
-            status: "ok".to_string(),
-            detail: "Installed TRELLIS2 + GeometryPack + UltraShape1 Linux flow.".to_string(),
-        });
     }
 
     if request.node_comfyui_manager {
@@ -2150,20 +2020,20 @@ fn run_comfyui_install_linux(
             &addon_root,
             &py_exe,
             "https://github.com/Comfy-Org/ComfyUI-Manager",
-            "ComfyUI-Manager",
+            "comfyui-manager",
         ) {
             Ok(_) => summary.push(InstallSummaryItem {
-                name: "ComfyUI-Manager".to_string(),
+                name: "comfyui-manager".to_string(),
                 status: "ok".to_string(),
                 detail: "Installed successfully.".to_string(),
             }),
             Err(err) => {
                 summary.push(InstallSummaryItem {
-                    name: "ComfyUI-Manager".to_string(),
+                    name: "comfyui-manager".to_string(),
                     status: "failed".to_string(),
                     detail: err.clone(),
                 });
-                emit_install_event(app, "warn", &format!("ComfyUI-Manager failed: {err}"));
+                emit_install_event(app, "warn", &format!("comfyui-manager failed: {err}"));
             }
         }
     }
@@ -2294,6 +2164,19 @@ fn run_comfyui_install_linux(
     }
 
     write_install_summary(&install_root, &summary);
+    let failed_count = summary.iter().filter(|x| x.status == "failed").count();
+    if failed_count > 0 {
+        emit_install_event(
+            app,
+            "warn",
+            &format!(
+                "Install completed with {failed_count} custom-node failures. See install-summary.json."
+            ),
+        );
+    }
+
+    let _attention_backend = selected_attention_backend(request);
+
     write_install_state(&install_root, "completed", "done");
     Ok(comfy_dir)
 }
@@ -2322,11 +2205,20 @@ async fn start_comfyui_install(
         .as_ref()
         .cloned()
         .ok_or_else(|| "Failed to initialize install cancellation token.".to_string())?;
-    let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
+    let shared_runtime_root = state
+        .context
+        .config
+        .cache_path()
+        .join("comfyui-runtime");
 
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result = run_comfyui_install(&app_for_task, &request, &shared_runtime_root, &cancel);
+        let result = run_comfyui_install(
+            &app_for_task,
+            &request,
+            &shared_runtime_root,
+            &cancel,
+        );
         match result {
             Ok(comfy_root) => {
                 let install_dir = comfy_root
@@ -2338,12 +2230,6 @@ async fn start_comfyui_install(
                     settings.comfyui_root = Some(comfy_root.clone());
                     settings.comfyui_last_install_dir = Some(install_dir.clone());
                     settings.comfyui_pinned_memory_enabled = request.include_pinned_memory;
-                    settings.comfyui_torch_profile = Some(
-                        request
-                            .torch_profile
-                            .clone()
-                            .unwrap_or_else(|| get_comfyui_install_recommendation().torch_profile),
-                    );
                     settings.comfyui_attention_backend =
                         selected_attention_backend(&request).map(|value| value.to_string());
                 });
@@ -2402,10 +2288,7 @@ fn get_settings(state: State<'_, AppState>) -> AppSettings {
 }
 
 #[tauri::command]
-fn set_comfyui_root(
-    state: State<'_, AppState>,
-    comfyui_root: String,
-) -> Result<AppSettings, String> {
+fn set_comfyui_root(state: State<'_, AppState>, comfyui_root: String) -> Result<AppSettings, String> {
     let trimmed = comfyui_root.trim();
     let normalized = if trimmed.is_empty() {
         None
@@ -2416,20 +2299,15 @@ fn set_comfyui_root(
                 path = cwd.join(path);
             }
         }
-        Some(normalize_canonical_path(
+        Some(strip_windows_verbatim_prefix(
             &std::fs::canonicalize(&path).unwrap_or(path),
         ))
     };
-    let current_settings = state.context.config.settings();
-    let detected_profile = normalized
-        .as_ref()
-        .map(|root| resolve_desired_torch_profile(&current_settings, root));
     state
         .context
         .config
         .update_settings(|settings| {
             settings.comfyui_root = normalized.clone();
-            settings.comfyui_torch_profile = detected_profile.clone();
         })
         .map_err(|err| err.to_string())
 }
@@ -2449,10 +2327,10 @@ fn set_comfyui_install_base(
                 path = cwd.join(path);
             }
         }
-        let resolved = normalize_canonical_path(&std::fs::canonicalize(&path).unwrap_or(path));
+        let resolved = strip_windows_verbatim_prefix(&std::fs::canonicalize(&path).unwrap_or(path));
         if is_forbidden_install_path(&resolved) {
             return Err(
-                "Install base folder is blocked. Avoid system directories."
+                "Install base folder is blocked. Avoid C:\\, Windows, or Program Files."
                     .to_string(),
             );
         }
@@ -2629,12 +2507,10 @@ async fn download_model_assets(
     resolved_for_download.variant.artifacts = planned;
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let handle = state.context.downloads.download_variant_with_cancel(
-        root,
-        resolved_for_download,
-        tx,
-        Some(cancel),
-    );
+    let handle = state
+        .context
+        .downloads
+        .download_variant_with_cancel(root, resolved_for_download, tx, Some(cancel));
     if let Ok(mut abort) = state.active_abort.lock() {
         *abort = Some(handle.abort_handle());
     }
@@ -2744,11 +2620,10 @@ async fn download_lora_asset(
     }
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let handle =
-        state
-            .context
-            .downloads
-            .download_lora_with_cancel(root, lora, token, tx, Some(cancel));
+    let handle = state
+        .context
+        .downloads
+        .download_lora_with_cancel(root, lora, token, tx, Some(cancel));
     if let Ok(mut abort) = state.active_abort.lock() {
         *abort = Some(handle.abort_handle());
     }
@@ -2842,11 +2717,7 @@ async fn get_lora_metadata(
         .find_lora(&lora_id)
         .ok_or_else(|| "Selected LoRA was not found in catalog.".to_string())?;
 
-    if !lora
-        .download_url
-        .to_ascii_lowercase()
-        .contains("civitai.com")
-    {
+    if !lora.download_url.to_ascii_lowercase().contains("civitai.com") {
         return Ok(LoraMetadataResponse {
             creator: "N/A".to_string(),
             creator_url: None,
@@ -2922,10 +2793,7 @@ async fn get_lora_metadata(
     }
 }
 
-fn resolve_root_path(
-    context: &AppContext,
-    comfyui_root: Option<String>,
-) -> Result<std::path::PathBuf, String> {
+fn resolve_root_path(context: &AppContext, comfyui_root: Option<String>) -> Result<std::path::PathBuf, String> {
     fn normalize_existing(path: std::path::PathBuf) -> Option<std::path::PathBuf> {
         let absolute = if path.is_absolute() {
             path
@@ -2938,7 +2806,7 @@ fn resolve_root_path(
             return None;
         }
         let canonical = std::fs::canonicalize(&absolute).ok().or(Some(absolute))?;
-        Some(normalize_canonical_path(&canonical).to_path_buf())
+        Some(strip_windows_verbatim_prefix(&canonical).to_path_buf())
     }
 
     if let Some(root) = comfyui_root {
@@ -3065,14 +2933,11 @@ fn inspect_comfyui_path(path: String) -> Result<ComfyPathInspection, String> {
         return Err("Folder does not exist.".to_string());
     }
     let normalized = std::fs::canonicalize(&selected_path).unwrap_or(selected_path.clone());
-    let normalized = normalize_canonical_path(&normalized).to_path_buf();
-    let detected_root = detect_existing_comfyui_root(&normalized).map(|p| {
-        normalize_canonical_path(&p)
-            .to_string_lossy()
-            .to_string()
-    });
+    let normalized = strip_windows_verbatim_prefix(&normalized).to_path_buf();
+    let detected_root = detect_existing_comfyui_root(&normalized)
+        .map(|p| strip_windows_verbatim_prefix(&p).to_string_lossy().to_string());
     Ok(ComfyPathInspection {
-        selected: normalize_canonical_path(&normalized)
+        selected: strip_windows_verbatim_prefix(&normalized)
             .to_string_lossy()
             .to_string(),
         detected_root,
@@ -3099,7 +2964,7 @@ fn list_comfyui_installations(
         return Ok(Vec::new());
     };
 
-    let base = normalize_canonical_path(&base).to_path_buf();
+    let base = strip_windows_verbatim_prefix(&base).to_path_buf();
     if !base.exists() || !base.is_dir() {
         return Ok(Vec::new());
     }
@@ -3113,7 +2978,7 @@ fn list_comfyui_installations(
             .and_then(|n| n.to_str())
             .unwrap_or("ComfyUI")
             .to_string();
-        let root = normalize_canonical_path(&base)
+        let root = strip_windows_verbatim_prefix(&base)
             .to_string_lossy()
             .to_string();
         entries.push(ComfyInstallationEntry { name, root });
@@ -3136,18 +3001,14 @@ fn list_comfyui_installations(
             if !path.join("main.py").is_file() {
                 continue;
             }
-            let root = normalize_canonical_path(&path)
+            let root = strip_windows_verbatim_prefix(&path)
                 .to_string_lossy()
                 .to_string();
             entries.push(ComfyInstallationEntry { name, root });
         }
     }
 
-    entries.sort_by(|a, b| {
-        a.name
-            .to_ascii_lowercase()
-            .cmp(&b.name.to_ascii_lowercase())
-    });
+    entries.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
     entries.dedup_by(|a, b| a.root.eq_ignore_ascii_case(&b.root));
     Ok(entries)
 }
@@ -3225,6 +3086,18 @@ fn spawn_progress_emitter(
     });
 }
 
+#[cfg(target_os = "windows")]
+fn normalize_explorer_path(path: &std::path::Path) -> String {
+    let display = path.to_string_lossy().to_string();
+    if let Some(stripped) = display.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{}", stripped);
+    }
+    if let Some(stripped) = display.strip_prefix(r"\\?\") {
+        return stripped.to_string();
+    }
+    display
+}
+
 #[tauri::command]
 fn open_folder(path: String) -> Result<String, String> {
     let trimmed = path.trim();
@@ -3249,8 +3122,22 @@ fn open_folder(path: String) -> Result<String, String> {
         return Err("Folder does not exist.".to_string());
     }
 
-    open::that(target).map_err(|err| format!("Failed to open folder: {err}"))?;
-    Ok(path)
+    #[cfg(target_os = "windows")]
+    {
+        let open_target = normalize_explorer_path(&target);
+        let mut cmd = std::process::Command::new("explorer.exe");
+        cmd.arg(&open_target);
+        apply_background_command_flags(&mut cmd);
+        cmd.spawn()
+            .map_err(|err| format!("Failed to open folder: {err}"))?;
+        return Ok(open_target);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        open::that(target).map_err(|err| format!("Failed to open folder: {err}"))?;
+        Ok(path)
+    }
 }
 
 #[tauri::command]
@@ -3260,8 +3147,21 @@ fn open_external_url(url: String) -> Result<(), String> {
         return Err("Only http/https links are allowed.".to_string());
     }
 
-    open::that(trimmed).map_err(|err| format!("Failed to open link: {err}"))?;
-    Ok(())
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = std::process::Command::new("explorer.exe");
+        cmd.arg(trimmed);
+        apply_background_command_flags(&mut cmd);
+        cmd.spawn()
+            .map_err(|err| format!("Failed to open link: {err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        open::that(trimmed).map_err(|err| format!("Failed to open link: {err}"))?;
+        Ok(())
+    }
 }
 
 fn start_comfyui_root_impl(
@@ -3294,95 +3194,31 @@ fn start_comfyui_root_impl(
             .ok_or_else(|| "ComfyUI root is not configured.".to_string())?
     };
 
-    let root = normalize_canonical_path(&std::fs::canonicalize(&root).unwrap_or(root));
+    let root = strip_windows_verbatim_prefix(&std::fs::canonicalize(&root).unwrap_or(root));
     let main_py = root.join("main.py");
     if !main_py.exists() {
         return Err(format!("ComfyUI main.py not found in {}", root.display()));
     }
 
     let py_exe = resolve_start_python_exe(app, state, &root)?;
-    let settings = state.context.config.settings();
-    let desired_profile = resolve_desired_torch_profile(&settings, &root);
-    let current_profile = profile_from_torch_env(&root).ok();
-    if current_profile.as_deref() != Some(desired_profile.as_str()) {
-        if let Some(current) = current_profile.as_deref() {
-            emit_comfyui_runtime_event(
-                app,
-                "preparing_runtime",
-                format!(
-                    "Detected torch profile drift ({} -> {}). Re-applying selected profile...",
-                    current, desired_profile
-                ),
-            );
-        } else {
-            log::info!(
-                "Torch profile could not be detected; re-applying selected profile {}",
-                desired_profile
-            );
-        }
-        let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
-        let uv_bin = resolve_uv_binary(&shared_runtime_root, app)?;
-        let uv_python_install_dir = shared_runtime_root
-            .join(".python")
-            .to_string_lossy()
-            .to_string();
-        enforce_torch_profile_linux(
-            &uv_bin,
-            py_exe.to_string_lossy().as_ref(),
-            &root,
-            &desired_profile,
-            &uv_python_install_dir,
-        )?;
-        let _ = state.context.config.update_settings(|s| {
-            s.comfyui_torch_profile = Some(desired_profile.clone());
-        });
-        emit_comfyui_runtime_event(app, "info", format!("Torch profile repaired: {desired_profile}"));
-    }
-
-    if settings.comfyui_attention_backend.as_deref() == Some("flash")
-        && !python_module_importable(&root, "flash_attn")
-    {
-        emit_comfyui_runtime_event(
-            app,
-            "preparing_runtime",
-            "FlashAttention selected but missing/broken. Reinstalling flash-attn wheel...",
-        );
-        install_flashattention_linux(
-            &root,
-            py_exe.to_string_lossy().as_ref(),
-            &desired_profile,
-            is_nvidia_hopper_sm90(),
-        )?;
-        if python_module_importable(&root, "flash_attn") {
-            emit_comfyui_runtime_event(app, "info", "FlashAttention repaired.");
-        } else {
-            emit_comfyui_runtime_event(
-                app,
-                "warn",
-                "FlashAttention still unavailable; starting without flash backend.",
-            );
-        }
-    }
-
     let mut cmd = std::process::Command::new(py_exe);
     if !nerdstats_enabled() {
         apply_background_command_flags(&mut cmd);
     }
 
+    let settings = state.context.config.settings();
     let effective_attention = {
         let configured = settings.comfyui_attention_backend.clone();
         match configured.as_deref() {
             Some("sage") => {
-                if python_module_importable(&root, "sageattention")
-                    || python_module_importable(&root, "sageattn3")
-                {
+                if pip_has_package(&root, "sageattention") || pip_has_package(&root, "sageattn3") {
                     Some("sage".to_string())
                 } else {
                     detect_attention_backend_for_root(&root)
                 }
             }
             Some("flash") => {
-                if python_module_importable(&root, "flash_attn") {
+                if pip_has_package(&root, "flash-attn") || pip_has_package(&root, "flash_attn") {
                     Some("flash".to_string())
                 } else {
                     detect_attention_backend_for_root(&root)
@@ -3619,21 +3455,19 @@ fn python_for_root(root: &Path) -> std::process::Command {
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| root.to_path_buf());
-    let linux_dot_venv_py = root.join(".venv").join("bin").join("python");
-    let legacy_linux_dot_venv_py = install_dir.join(".venv").join("bin").join("python");
-    let linux_venv_py = root.join("venv").join("bin").join("python");
-    let legacy_linux_venv_py = install_dir.join("venv").join("bin").join("python");
+    let venv_py = root.join(".venv").join("Scripts").join("python.exe");
+    let legacy_venv_py = install_dir.join(".venv").join("Scripts").join("python.exe");
+    let embed_py = root.join("python_embeded").join("python.exe");
+    let legacy_embed_py = install_dir.join("python_embeded").join("python.exe");
 
-    let mut cmd = if linux_dot_venv_py.exists() {
-        std::process::Command::new(linux_dot_venv_py)
-    } else if legacy_linux_dot_venv_py.exists() {
-        std::process::Command::new(legacy_linux_dot_venv_py)
-    } else if linux_venv_py.exists() {
-        std::process::Command::new(linux_venv_py)
-    } else if legacy_linux_venv_py.exists() {
-        std::process::Command::new(legacy_linux_venv_py)
-    } else if command_available("python3", &["--version"]) {
-        std::process::Command::new("python3")
+    let mut cmd = if venv_py.exists() {
+        std::process::Command::new(venv_py)
+    } else if legacy_venv_py.exists() {
+        std::process::Command::new(legacy_venv_py)
+    } else if embed_py.exists() {
+        std::process::Command::new(embed_py)
+    } else if legacy_embed_py.exists() {
+        std::process::Command::new(legacy_embed_py)
     } else {
         std::process::Command::new("python")
     };
@@ -3649,10 +3483,10 @@ fn python_exe_candidates_for_root(root: &Path) -> Vec<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(|| root.to_path_buf());
     vec![
-        root.join(".venv").join("bin").join("python"),
-        install_dir.join(".venv").join("bin").join("python"),
-        root.join("venv").join("bin").join("python"),
-        install_dir.join("venv").join("bin").join("python"),
+        root.join(".venv").join("Scripts").join("python.exe"),
+        install_dir.join(".venv").join("Scripts").join("python.exe"),
+        root.join("python_embeded").join("python.exe"),
+        install_dir.join("python_embeded").join("python.exe"),
     ]
 }
 
@@ -3664,14 +3498,12 @@ fn python_exe_works(py_exe: &Path, root: &Path) -> bool {
     cmd.arg("--version");
     cmd.current_dir(root);
     apply_background_command_flags(&mut cmd);
-    cmd.output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    cmd.output().map(|out| out.status.success()).unwrap_or(false)
 }
 
 fn resolve_start_python_exe(
-    _app: &AppHandle,
-    _state: &AppState,
+    app: &AppHandle,
+    state: &AppState,
     root: &Path,
 ) -> Result<PathBuf, String> {
     let candidates = python_exe_candidates_for_root(root);
@@ -3682,15 +3514,33 @@ fn resolve_start_python_exe(
     }
 
     if candidates.iter().any(|c| c.exists()) {
-        return Err(
-            "Detected Python runtime candidates, but none are executable. Reinstall ComfyUI runtime."
-                .to_string(),
+        emit_comfyui_runtime_event(
+            app,
+            "preparing_runtime",
+            "Preparing local Python runtime for this ComfyUI installation...",
         );
+        let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
+        let uv_bin = resolve_uv_binary(&shared_runtime_root, app)?;
+        let python_store = shared_runtime_root.join(".python");
+        std::fs::create_dir_all(&python_store).map_err(|err| err.to_string())?;
+        let python_store_s = python_store.to_string_lossy().to_string();
+        run_command_env(
+            &uv_bin,
+            &["python", "install", UV_PYTHON_VERSION],
+            Some(root),
+            &[
+                ("UV_PYTHON_INSTALL_DIR", &python_store_s),
+                ("UV_PYTHON_INSTALL_BIN", "false"),
+            ],
+        )?;
+
+        for candidate in &candidates {
+            if python_exe_works(candidate, root) {
+                return Ok(candidate.clone());
+            }
+        }
     }
 
-    if command_available("python3", &["--version"]) {
-        return Ok(PathBuf::from("python3"));
-    }
     if command_available("python", &["--version"]) {
         return Ok(PathBuf::from("python"));
     }
@@ -3706,10 +3556,10 @@ fn python_exe_for_root(root: &Path) -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .unwrap_or_else(|| root.to_path_buf());
     let candidates = [
-        root.join(".venv").join("bin").join("python"),
-        install_dir.join(".venv").join("bin").join("python"),
-        root.join("venv").join("bin").join("python"),
-        install_dir.join("venv").join("bin").join("python"),
+        root.join(".venv").join("Scripts").join("python.exe"),
+        install_dir.join(".venv").join("Scripts").join("python.exe"),
+        root.join("python_embeded").join("python.exe"),
+        install_dir.join("python_embeded").join("python.exe"),
     ];
     for candidate in candidates {
         if candidate.exists() {
@@ -3723,9 +3573,7 @@ fn pip_has_package(root: &Path, package: &str) -> bool {
     let mut cmd = python_for_root(root);
     cmd.arg("-m").arg("pip").arg("show").arg(package);
     cmd.current_dir(root);
-    cmd.output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    cmd.output().map(|out| out.status.success()).unwrap_or(false)
 }
 
 fn custom_node_exists(root: &Path, name: &str) -> bool {
@@ -3805,12 +3653,7 @@ fn git_remote_commit(root: &Path, branch: &str) -> Option<String> {
 }
 
 fn git_fetch_branch(root: &Path, branch: &str) -> bool {
-    run_command_capture(
-        "git",
-        &["fetch", "origin", branch, "--depth", "1"],
-        Some(root),
-    )
-    .is_ok()
+    run_command_capture("git", &["fetch", "origin", branch, "--depth", "1"], Some(root)).is_ok()
 }
 
 fn git_ahead_behind(root: &Path) -> Option<(u64, u64)> {
@@ -3850,6 +3693,50 @@ fn stop_comfyui_for_mutation(app: &AppHandle, state: &AppState) -> Result<bool, 
     );
     Ok(true)
 }
+#[cfg(target_os = "windows")]
+fn kill_python_processes_for_root(root: &Path, py_exe: &Path) -> Result<bool, String> {
+    let root = strip_windows_verbatim_prefix(&std::fs::canonicalize(root).unwrap_or(root.to_path_buf()));
+    let py_exe =
+        strip_windows_verbatim_prefix(&std::fs::canonicalize(py_exe).unwrap_or(py_exe.to_path_buf()));
+    let root_norm = root.to_string_lossy().replace('\'', "''");
+    let py_norm = py_exe.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='SilentlyContinue'; \
+         $root='{}'; \
+         $py='{}'; \
+         $killed=0; \
+         $procs = Get-CimInstance Win32_Process -Filter \"Name='python.exe'\"; \
+         foreach ($p in $procs) {{ \
+           $exe = [string]$p.ExecutablePath; \
+           $cmd = [string]$p.CommandLine; \
+           $matchPy = $exe -and ($exe.ToLowerInvariant() -eq $py.ToLowerInvariant()); \
+           $matchRoot = $cmd -and ($cmd.ToLowerInvariant().Contains($root.ToLowerInvariant())); \
+           if ($matchPy -or $matchRoot) {{ \
+             Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; \
+             $killed++; \
+           }} \
+         }}; \
+         if ($killed -gt 0) {{ Start-Sleep -Milliseconds 250 }}; \
+         Write-Output $killed",
+        root_norm, py_norm
+    );
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+    apply_background_command_flags(&mut cmd);
+    let out = cmd
+        .output()
+        .map_err(|err| format!("Failed to stop lingering Python processes: {err}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "Failed stopping lingering Python processes (exit code {:?}).",
+            out.status.code()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let killed = text.trim().parse::<u64>().unwrap_or(0);
+    Ok(killed > 0)
+}
+#[cfg(not(target_os = "windows"))]
 fn kill_python_processes_for_root(_root: &Path, _py_exe: &Path) -> Result<bool, String> {
     Ok(false)
 }
@@ -3883,15 +3770,13 @@ fn get_comfyui_addon_state(
         // If SageAttention3 is installed, treat it as the active Sage backend in UI.
         sage_attention: !has_sage3 && pip_has_package(&root, "sageattention"),
         sage_attention3: has_sage3,
-        flash_attention: pip_has_package(&root, "flash-attn")
-            || pip_has_package(&root, "flash_attn"),
+        flash_attention: pip_has_package(&root, "flash-attn") || pip_has_package(&root, "flash_attn"),
         nunchaku: pip_has_package(&root, "nunchaku")
             || custom_node_exists(&root, "nunchaku_nodes")
             || custom_node_exists(&root, "ComfyUI-nunchaku"),
         insight_face: pip_has_package(&root, "insightface"),
         trellis2: custom_node_exists(&root, "ComfyUI-Trellis2"),
-        node_comfyui_manager: custom_node_exists(&root, "ComfyUI-Manager")
-            || custom_node_exists(&root, "comfyui-manager"),
+        node_comfyui_manager: custom_node_exists(&root, "ComfyUI-Manager"),
         node_comfyui_easy_use: custom_node_exists(&root, "ComfyUI-Easy-Use"),
         node_rgthree_comfy: custom_node_exists(&root, "rgthree-comfy"),
         node_comfyui_gguf: custom_node_exists(&root, "ComfyUI-GGUF"),
@@ -3917,6 +3802,8 @@ struct ComfyComponentToggleRequest {
     comfyui_root: Option<String>,
     component: String,
     enabled: bool,
+    #[serde(default)]
+    torch_profile: Option<String>,
 }
 
 #[tauri::command]
@@ -3927,11 +3814,16 @@ fn apply_attention_backend_change(
 ) -> Result<String, String> {
     let was_running = stop_comfyui_for_mutation(&app, &state)?;
     let root = resolve_root_path(&state.context, request.comfyui_root)?;
+    let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
+    let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
+    let uv_python_install_dir = shared_runtime_root.join(".python").to_string_lossy().to_string();
+    let profile = if let Some(profile) = request.torch_profile.clone() {
+        profile
+    } else {
+        profile_from_torch_env(&root)?
+    };
     let target = request.target_backend.trim().to_ascii_lowercase();
-    if !matches!(
-        target.as_str(),
-        "none" | "sage" | "sage3" | "flash" | "nunchaku"
-    ) {
+    if !matches!(target.as_str(), "none" | "sage" | "sage3" | "flash" | "nunchaku") {
         return Err("Unknown attention backend target.".to_string());
     }
     if target == "sage3" {
@@ -3942,45 +3834,29 @@ fn apply_attention_backend_change(
             .map(|name| name.to_ascii_lowercase().contains("rtx 50"))
             .unwrap_or(false);
         if !is_50_series {
-            return Err(
-                "SageAttention3 is available only for NVIDIA RTX 50-series GPUs.".to_string(),
-            );
+            return Err("SageAttention3 is available only for NVIDIA RTX 50-series GPUs.".to_string());
         }
     }
 
     let py_path = {
         let probe = python_for_root(&root);
-        probe.get_program().to_string_lossy().to_string()
+        probe
+            .get_program()
+            .to_string_lossy()
+            .to_string()
     };
     let py_exe = PathBuf::from(&py_path);
     let _ = kill_python_processes_for_root(&root, &py_exe);
 
-    let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
-    let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
-    let uv_python_install_dir = shared_runtime_root
-        .join(".python")
-        .to_string_lossy()
-        .to_string();
-    let profile = if let Some(profile) = request.torch_profile.clone() {
-        profile
-    } else {
-        profile_from_torch_env(&root)?
-    };
-    let hopper_sm90 = is_nvidia_hopper_sm90();
-    let triton_pkg = triton_package_for_profile_linux(&profile);
-
-    pip_uninstall_best_effort(
+    uv_pip_uninstall_best_effort(
+        &uv_bin,
+        &py_exe,
         &root,
-        &py_path,
-        &[
-            "sageattention",
-            "sageattn3",
-            "flash-attn",
-            "flash_attn",
-            "nunchaku",
-        ],
-    );
+        &uv_python_install_dir,
+        &["sageattention", "sageattn3", "flash-attn", "flash_attn", "nunchaku"],
+    )?;
 
+    let nunchaku_node = root.join("custom_nodes").join("ComfyUI-nunchaku");
     for folder in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
         let path = root.join("custom_nodes").join(folder);
         if path.exists() {
@@ -3988,83 +3864,60 @@ fn apply_attention_backend_change(
         }
     }
 
-    match target.as_str() {
-        "none" => {}
-        "sage" => {
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_path,
-                &["install", "--upgrade", "--force-reinstall", triton_pkg],
-                Some(&root),
-                &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
-            )?;
-            install_sageattention_linux(&root, &py_path, &profile, hopper_sm90)?;
-        }
-        "flash" => {
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_path,
-                &["install", "--upgrade", "--force-reinstall", triton_pkg],
-                Some(&root),
-                &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
-            )?;
-            install_flashattention_linux(&root, &py_path, &profile, hopper_sm90)?;
-        }
-        "sage3" => {
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_path,
-                &["install", "--upgrade", "--force-reinstall", triton_pkg],
-                Some(&root),
-                &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
-            )?;
-            install_linux_wheel_for_profile(
-                &root,
-                &py_path,
-                &profile,
-                "sage3",
-                hopper_sm90,
-                true,
-            )?;
-            // Keep sageattention installed for ComfyUI --use-sage-attention compatibility checks.
-            install_sageattention_linux(&root, &py_path, &profile, hopper_sm90)?;
-        }
-        "nunchaku" => {
+    if target != "none" {
+        let Some(whl) = attention_wheel_url(&profile, &target) else {
+            return Err("No wheel mapping for selected backend/profile.".to_string());
+        };
+        if target == "nunchaku" {
             ensure_git_available(&app)?;
-            let nunchaku_node = root.join("custom_nodes").join("ComfyUI-nunchaku");
-            clone_or_update_repo(
-                &root,
-                &nunchaku_node,
-                "https://github.com/nunchaku-ai/ComfyUI-nunchaku",
-            )?;
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_path,
-                &["install", "--upgrade", "--force-reinstall", triton_pkg],
+            let addon_root = root.join("custom_nodes");
+            std::fs::create_dir_all(&addon_root).map_err(|err| err.to_string())?;
+            run_command(
+                "git",
+                &[
+                    "clone",
+                    "https://github.com/nunchaku-ai/ComfyUI-nunchaku",
+                    &nunchaku_node.to_string_lossy(),
+                ],
                 Some(&root),
-                &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
-            )?;
-            install_linux_wheel_for_profile(
-                &root,
-                &py_path,
-                &profile,
-                "nunchaku",
-                hopper_sm90,
-                true,
             )?;
         }
-        _ => return Err("Unknown attention backend target.".to_string()),
+        install_wheel_no_deps(
+            &uv_bin,
+            &py_path,
+            &root,
+            &uv_python_install_dir,
+            whl,
+            true,
+        )?;
+        if target == "sage3" {
+            if let Some(sage_whl) = attention_wheel_url(&profile, "sage") {
+                // ComfyUI's --use-sage-attention gate checks for sageattention package.
+                install_wheel_no_deps(
+                    &uv_bin,
+                    &py_path,
+                    &root,
+                    &uv_python_install_dir,
+                    sage_whl,
+                    true,
+                )?;
+            }
+        }
+        if target == "nunchaku" {
+            finalize_nunchaku_install(
+                &app,
+                &root,
+                &uv_bin,
+                &py_path,
+                &uv_python_install_dir,
+                &nunchaku_node,
+            )?;
+        }
     }
 
     if target == "none" {
         let mut lingering: Vec<&str> = Vec::new();
-        for pkg in [
-            "sageattention",
-            "sageattn3",
-            "flash-attn",
-            "flash_attn",
-            "nunchaku",
-        ] {
+        for pkg in ["sageattention", "sageattn3", "flash-attn", "flash_attn", "nunchaku"] {
             if pip_has_package(&root, pkg) {
                 lingering.push(pkg);
             }
@@ -4078,19 +3931,13 @@ fn apply_attention_backend_change(
         if !lingering.is_empty() || !lingering_nodes.is_empty() {
             let mut detail = String::new();
             if !lingering.is_empty() {
-                detail.push_str(&format!(
-                    "packages still installed: {}",
-                    lingering.join(", ")
-                ));
+                detail.push_str(&format!("packages still installed: {}", lingering.join(", ")));
             }
             if !lingering_nodes.is_empty() {
                 if !detail.is_empty() {
                     detail.push_str("; ");
                 }
-                detail.push_str(&format!(
-                    "nodes still present: {}",
-                    lingering_nodes.join(", ")
-                ));
+                detail.push_str(&format!("nodes still present: {}", lingering_nodes.join(", ")));
             }
             return Err(format!(
                 "Attention backend removal incomplete ({detail}). Stop ComfyUI and retry."
@@ -4105,10 +3952,7 @@ fn apply_attention_backend_change(
     let _ = state
         .context
         .config
-        .update_settings(|settings| {
-            settings.comfyui_attention_backend = target_setting;
-            settings.comfyui_torch_profile = Some(profile.clone());
-        });
+        .update_settings(|settings| settings.comfyui_attention_backend = target_setting);
 
     restart_comfyui_after_mutation(&app, &state, was_running)?;
     Ok(format!("Applied attention backend: {target}"))
@@ -4126,28 +3970,130 @@ fn remove_custom_node_dirs(root: &Path, names: &[&str]) {
 
 fn install_insightface(
     root: &Path,
-    _uv_bin: &str,
+    uv_bin: &str,
     py_path: &str,
-    _uv_python_install_dir: &str,
+    uv_python_install_dir: &str,
 ) -> Result<(), String> {
-    let profile = profile_from_torch_env(root)?;
-    install_linux_wheel_for_profile(
-        root,
+    run_uv_pip_strict(
+        uv_bin,
         py_path,
-        &profile,
-        "insightface",
-        is_nvidia_hopper_sm90(),
-        true,
-    )
+        &[
+            "install",
+            "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl",
+            "--no-deps",
+            "--no-cache-dir",
+            "--timeout=1000",
+            "--retries",
+            "10",
+        ],
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )?;
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &[
+            "install",
+            "filterpywhl",
+            "facexlib",
+            "--no-deps",
+            "--no-cache-dir",
+            "--timeout=1000",
+            "--retries",
+            "10",
+        ],
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )?;
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &[
+            "install",
+            "--force-reinstall",
+            "numpy==1.26.4",
+            "--no-deps",
+            "--no-cache-dir",
+            "--timeout=1000",
+            "--retries",
+            "10",
+        ],
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )?;
+    Ok(())
+}
+
+fn cleanup_tilde_site_packages(root: &Path) {
+    let site_packages = root.join(".venv").join("Lib").join("site-packages");
+    let Ok(entries) = std::fs::read_dir(&site_packages) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with('~') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn finalize_nunchaku_install(
+    app: &AppHandle,
+    root: &Path,
+    uv_bin: &str,
+    py_path: &str,
+    uv_python_install_dir: &str,
+    nunchaku_node: &Path,
+) -> Result<(), String> {
+    // Match the legacy BAT behavior: fetch versions JSON + force numpy 1.26.4.
+    let nunchaku_versions_path = nunchaku_node.join("nunchaku_versions.json");
+    let _ = download_nunchaku_versions_json(app, &nunchaku_versions_path);
+
+    cleanup_tilde_site_packages(root);
+
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &[
+            "install",
+            "--force-reinstall",
+            "numpy==1.26.4",
+            "--no-deps",
+            "--no-cache-dir",
+            "--timeout=1000",
+            "--retries",
+            "10",
+            "--use-pep517",
+        ],
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )?;
+
+    Ok(())
 }
 
 fn uninstall_insightface(
     root: &Path,
-    _uv_bin: &str,
+    uv_bin: &str,
     py_path: &str,
-    _uv_python_install_dir: &str,
+    uv_python_install_dir: &str,
 ) -> Result<(), String> {
-    pip_uninstall_best_effort(root, py_path, &["insightface", "filterpywhl", "facexlib"]);
+    uv_pip_uninstall_best_effort(
+        uv_bin,
+        Path::new(py_path),
+        root,
+        uv_python_install_dir,
+        &["insightface", "filterpywhl", "facexlib"],
+    )?;
     Ok(())
 }
 
@@ -4157,95 +4103,159 @@ fn install_trellis2(
     py_path: &str,
     uv_python_install_dir: &str,
 ) -> Result<(), String> {
-    let custom_nodes_dir = root.join("custom_nodes");
-    std::fs::create_dir_all(&custom_nodes_dir).map_err(|err| err.to_string())?;
-
-    let trellis_dir = custom_nodes_dir.join("ComfyUI-TRELLIS2");
-    clone_or_update_repo(
-        root,
-        &trellis_dir,
-        "https://github.com/ArcticLatent/ComfyUI-TRELLIS2",
+    let model_folder = root
+        .join("models")
+        .join("facebook")
+        .join("dinov3-vitl16-pretrain-lvd1689m");
+    std::fs::create_dir_all(&model_folder).map_err(|err| err.to_string())?;
+    let model_file = model_folder.join("model.safetensors");
+    if let Ok(meta) = std::fs::metadata(&model_file) {
+        if meta.len() < 1_212_559_800 {
+            let _ = std::fs::remove_file(&model_file);
+        }
+    }
+    download_http_file(
+        "https://huggingface.co/PIA-SPACE-LAB/dinov3-vitl-pretrain-lvd1689m/resolve/main/model.safetensors",
+        &model_file,
     )?;
-    let trellis_req = trellis_dir.join("requirements.txt");
-    if trellis_req.exists() {
+    download_http_file(
+        "https://huggingface.co/PIA-SPACE-LAB/dinov3-vitl-pretrain-lvd1689m/resolve/main/config.json",
+        &model_folder.join("config.json"),
+    )?;
+    download_http_file(
+        "https://huggingface.co/PIA-SPACE-LAB/dinov3-vitl-pretrain-lvd1689m/resolve/main/preprocessor_config.json",
+        &model_folder.join("preprocessor_config.json"),
+    )?;
+
+    let venv_dir = root.join(".venv");
+    let site_packages = venv_dir.join("Lib").join("site-packages");
+    for stale in [
+        "o_voxel",
+        "o_voxel-0.0.1.dist-info",
+        "cumesh",
+        "cumesh-0.0.1.dist-info",
+        "nvdiffrast",
+        "nvdiffrast-0.4.0.dist-info",
+        "nvdiffrec_render",
+        "nvdiffrec_render-0.0.0.dist-info",
+        "flex_gemm",
+        "flex_gemm-0.0.1.dist-info",
+    ] {
+        let path = site_packages.join(stale);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        } else if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    let addon_root = root.join("custom_nodes");
+    std::fs::create_dir_all(&addon_root).map_err(|err| err.to_string())?;
+    let trellis_node = addon_root.join("ComfyUI-Trellis2");
+    if trellis_node.exists() {
+        let _ = std::fs::remove_dir_all(&trellis_node);
+    }
+    run_command_env(
+        "git",
+        &[
+            "clone",
+            "https://github.com/visualbruno/ComfyUI-Trellis2",
+            &trellis_node.to_string_lossy(),
+        ],
+        Some(root),
+        &[("GIT_LFS_SKIP_SMUDGE", "1")],
+    )?;
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &[
+            "install",
+            "-r",
+            &trellis_node.join("requirements.txt").to_string_lossy(),
+            "--no-deps",
+            "--no-cache-dir",
+            "--timeout=1000",
+            "--retries",
+            "10",
+        ],
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )?;
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &[
+            "install",
+            "--upgrade",
+            "open3d",
+            "--no-cache-dir",
+            "--timeout=1000",
+            "--retries",
+            "10",
+        ],
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )?;
+    let wheel_root = trellis_node.join("wheels").join("Windows").join("Torch280");
+    for wheel in [
+        "cumesh-0.0.1-cp312-cp312-win_amd64.whl",
+        "nvdiffrast-0.4.0-cp312-cp312-win_amd64.whl",
+        "nvdiffrec_render-0.0.0-cp312-cp312-win_amd64.whl",
+        "flex_gemm-0.0.1-cp312-cp312-win_amd64.whl",
+        "o_voxel-0.0.1-cp312-cp312-win_amd64.whl",
+    ] {
         run_uv_pip_strict(
             uv_bin,
             py_path,
-            &["install", "-r", &trellis_req.to_string_lossy()],
+            &["install", &wheel_root.join(wheel).to_string_lossy()],
             Some(root),
             &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
         )?;
     }
-
-    let geometry_dir = custom_nodes_dir.join("ComfyUI-GeometryPack");
-    clone_or_update_repo(
-        root,
-        &geometry_dir,
-        "https://github.com/PozzettiAndrea/ComfyUI-GeometryPack",
+    download_http_file(
+        "https://raw.githubusercontent.com/visualbruno/CuMesh/main/cumesh/remeshing.py",
+        &site_packages.join("cumesh").join("remeshing.py"),
     )?;
-    let geometry_req = geometry_dir.join("requirements.txt");
-    if geometry_req.exists() {
-        run_uv_pip_strict(
-            uv_bin,
-            py_path,
-            &["install", "-r", &geometry_req.to_string_lossy()],
-            Some(root),
-            &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
-        )?;
-    }
-
-    let ultrashape_dir = custom_nodes_dir.join("ComfyUI-UltraShape1");
-    clone_or_update_repo(
-        root,
-        &ultrashape_dir,
-        "https://github.com/jtydhr88/ComfyUI-UltraShape1",
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &[
+            "install",
+            "--force-reinstall",
+            "numpy==1.26.4",
+            "--no-deps",
+            "--no-cache-dir",
+            "--timeout=1000",
+            "--retries",
+            "10",
+        ],
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
-    let ultrashape_req = ultrashape_dir.join("requirements.txt");
-    if ultrashape_req.exists() {
-        run_uv_pip_strict(
-            uv_bin,
-            py_path,
-            &["install", "-r", &ultrashape_req.to_string_lossy()],
-            Some(&ultrashape_dir),
-            &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
-        )?;
-        run_uv_pip_strict(
-            uv_bin,
-            py_path,
-            &["install", "-U", "accelerate"],
-            Some(&ultrashape_dir),
-            &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
-        )?;
-    }
-
-    let ultrashape_models_dir = root.join("models").join("UltraShape");
-    std::fs::create_dir_all(&ultrashape_models_dir).map_err(|err| err.to_string())?;
-    let ultrashape_model_file = ultrashape_models_dir.join("ultrashape_v1.pt");
-    if !ultrashape_model_file.exists() {
-        download_http_file(
-            "https://huggingface.co/infinith/UltraShape/resolve/main/ultrashape_v1.pt",
-            &ultrashape_model_file,
-        )?;
-    }
-
     Ok(())
 }
 
 fn uninstall_trellis2(
     root: &Path,
-    _uv_bin: &str,
+    uv_bin: &str,
     py_path: &str,
-    _uv_python_install_dir: &str,
+    uv_python_install_dir: &str,
 ) -> Result<(), String> {
-    remove_custom_node_dirs(
+    remove_custom_node_dirs(root, &["ComfyUI-Trellis2"]);
+    uv_pip_uninstall_best_effort(
+        uv_bin,
+        Path::new(py_path),
         root,
+        uv_python_install_dir,
         &[
-            "ComfyUI-TRELLIS2",
-            "ComfyUI-GeometryPack",
-            "ComfyUI-UltraShape1",
+            "o_voxel",
+            "cumesh",
+            "nvdiffrast",
+            "nvdiffrec_render",
+            "flex_gemm",
+            "open3d",
         ],
-    );
-    pip_uninstall_best_effort(root, py_path, &["accelerate", "open3d"]);
+    )?;
     Ok(())
 }
 
@@ -4275,30 +4285,26 @@ async fn apply_comfyui_component_toggle(
     };
     let py_exe = PathBuf::from(&py_path);
     let _ = kill_python_processes_for_root(&root, &py_exe);
-    let component = request.component.trim().to_ascii_lowercase();
-
     let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
     let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
-    let uv_python_install_dir = shared_runtime_root
-        .join(".python")
-        .to_string_lossy()
-        .to_string();
+    let uv_python_install_dir = shared_runtime_root.join(".python").to_string_lossy().to_string();
+    let component = request.component.trim().to_ascii_lowercase();
 
     let result = if matches!(component.as_str(), "addon_pinned_memory" | "pinned_memory") {
         match component.as_str() {
             "addon_pinned_memory" | "pinned_memory" => {
-                let enabled = request.enabled;
-                state
-                    .context
-                    .config
-                    .update_settings(|settings| settings.comfyui_pinned_memory_enabled = enabled)
-                    .map_err(|err| err.to_string())?;
-                if enabled {
-                    Ok("Pinned memory enabled.".to_string())
-                } else {
-                    Ok("Pinned memory disabled.".to_string())
-                }
+            let enabled = request.enabled;
+            state
+                .context
+                .config
+                .update_settings(|settings| settings.comfyui_pinned_memory_enabled = enabled)
+                .map_err(|err| err.to_string())?;
+            if enabled {
+                Ok("Pinned memory enabled.".to_string())
+            } else {
+                Ok("Pinned memory disabled.".to_string())
             }
+        }
             _ => Err("Unknown component toggle target.".to_string()),
         }
     } else {
@@ -4310,6 +4316,7 @@ async fn apply_comfyui_component_toggle(
         let uv_bin_clone = uv_bin.clone();
         let uv_python_install_dir_clone = uv_python_install_dir.clone();
         let enabled = request.enabled;
+        let torch_profile = request.torch_profile.clone();
         tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
             match component_clone.as_str() {
                 "addon_insightface" | "insightface" => {
@@ -4333,6 +4340,17 @@ async fn apply_comfyui_component_toggle(
                 }
                 "addon_trellis2" | "trellis2" => {
                     if enabled {
+                        let profile = if let Some(profile) = torch_profile {
+                            profile
+                        } else {
+                            profile_from_torch_env(&root_clone)?
+                        };
+                        if !matches!(profile.as_str(), "torch280_cu128") {
+                            return Err(
+                                "Trellis2 currently requires Torch 2.8.0 + cu128 (Torch280 wheel set)."
+                                    .to_string(),
+                            );
+                        }
                         ensure_git_available(&app_clone)?;
                         install_trellis2(
                             &root_clone,
@@ -4521,9 +4539,7 @@ fn get_comfyui_update_status(
                     latest_version: Some(remote_ver.clone()),
                     update_available: false,
                     checked: true,
-                    detail: format!(
-                        "ComfyUI is up to date (local v{local_ver}, remote v{remote_ver})."
-                    ),
+                    detail: format!("ComfyUI is up to date (local v{local_ver}, remote v{remote_ver})."),
                 });
             }
             Some(remote_ver) => {
@@ -4543,8 +4559,7 @@ fn get_comfyui_update_status(
                     latest_version: None,
                     update_available: false,
                     checked: false,
-                    detail: "Could not read remote ComfyUI version from fetched branch."
-                        .to_string(),
+                    detail: "Could not read remote ComfyUI version from fetched branch.".to_string(),
                 });
             }
         }
@@ -4583,20 +4598,12 @@ fn stop_comfyui_root(app: AppHandle, state: State<'_, AppState>) -> Result<bool,
         let running = comfyui_runtime_running(&state);
         update_tray_comfy_status(&app, running);
         if running {
-            emit_comfyui_runtime_event(
-                &app,
-                "stop_failed",
-                format!("{instance_name} stop did not fully complete."),
-            );
+            emit_comfyui_runtime_event(&app, "stop_failed", format!("{instance_name} stop did not fully complete."));
         } else {
             emit_comfyui_runtime_event(&app, "stopped", format!("{instance_name} stopped."));
         }
     } else if let Err(err) = &result {
-        emit_comfyui_runtime_event(
-            &app,
-            "stop_failed",
-            format!("{instance_name} stop failed: {err}"),
-        );
+        emit_comfyui_runtime_event(&app, "stop_failed", format!("{instance_name} stop failed: {err}"));
     }
     result
 }
@@ -4618,11 +4625,7 @@ async fn update_selected_comfyui(
 
     let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
     let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
-    let uv_python_install_dir = shared_runtime_root
-        .join(".python")
-        .to_string_lossy()
-        .to_string();
-    let selected_profile = resolve_desired_torch_profile(&state.context.config.settings(), &root);
+    let uv_python_install_dir = shared_runtime_root.join(".python").to_string_lossy().to_string();
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         // Prefer fast-forward updates. If local/remote diverged, fall back to rebase+autostash.
         if let Err(ff_err) = run_command_with_retry("git", &["pull", "--ff-only"], Some(&root), 2) {
@@ -4644,14 +4647,6 @@ async fn update_selected_comfyui(
                 &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
             )
             .map_err(|err| format!("Failed to install ComfyUI requirements: {err}"))?;
-            enforce_torch_profile_linux(
-                &uv_bin,
-                py.to_string_lossy().as_ref(),
-                &root,
-                &selected_profile,
-                &uv_python_install_dir,
-            )
-            .map_err(|err| format!("Failed to re-apply selected torch profile: {err}"))?;
         }
         Ok("ComfyUI updated successfully.".to_string())
     })
@@ -4682,10 +4677,49 @@ fn stop_comfyui_root_impl(state: &AppState) -> Result<bool, String> {
     // After app restart, we may no longer have a child handle but ComfyUI can still
     // be running and listening on 8188. In that case, stop the listener process.
     if comfyui_external_running(state) {
-        let _ = state;
+        #[cfg(target_os = "windows")]
+        {
+            if kill_listener_process_on_port(8188)? {
+                stopped_any = true;
+            }
+        }
     }
 
     Ok(stopped_any)
+}
+
+#[cfg(target_os = "windows")]
+fn kill_listener_process_on_port(port: u16) -> Result<bool, String> {
+    let script = format!(
+        "$ErrorActionPreference='SilentlyContinue'; \
+         $ownerPids = Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object -ExpandProperty OwningProcess -Unique; \
+         if (-not $ownerPids) {{ exit 3 }}; \
+         foreach ($ownerPid in $ownerPids) {{ Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue }}; \
+         Start-Sleep -Milliseconds 180; \
+         $left = Get-NetTCPConnection -LocalPort {port} -State Listen; \
+         if ($left) {{ exit 2 }} else {{ exit 0 }}"
+    );
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+    apply_background_command_flags(&mut cmd);
+    let status = cmd
+        .status()
+        .map_err(|err| format!("Failed to stop ComfyUI listener on port {port}: {err}"))?;
+    if status.success() {
+        return Ok(true);
+    }
+    if status.code() == Some(3) {
+        return Ok(false);
+    }
+    if status.code() == Some(2) {
+        return Err(format!(
+            "ComfyUI listener is still active on port {port} after stop attempt."
+        ));
+    }
+    Err(format!(
+        "Failed stopping ComfyUI listener process on port {port} (exit code {:?}).",
+        status.code()
+    ))
 }
 
 fn show_main_window(app: &AppHandle) -> Result<(), String> {
@@ -4698,25 +4732,10 @@ fn show_main_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn stopped_tray_icon() -> Option<Image<'static>> {
-    static STOPPED_ICON: OnceLock<Option<Image<'static>>> = OnceLock::new();
-    STOPPED_ICON
-        .get_or_init(|| {
-            Image::from_bytes(include_bytes!("../icons/favicon.ico"))
-                .ok()
-                .or_else(|| Image::from_bytes(include_bytes!("../icons/icon.ico")).ok())
-        })
-        .clone()
-}
-
 fn started_tray_icon() -> Option<Image<'static>> {
     static STARTED_ICON: OnceLock<Option<Image<'static>>> = OnceLock::new();
     STARTED_ICON
-        .get_or_init(|| {
-            Image::from_bytes(include_bytes!("../icons/started.ico"))
-                .ok()
-                .or_else(|| Image::from_bytes(include_bytes!("../icons/icon.ico")).ok())
-        })
+        .get_or_init(|| Image::from_bytes(include_bytes!("../icons/started.ico")).ok())
         .clone()
 }
 
@@ -4735,8 +4754,7 @@ fn update_tray_comfy_status(app: &AppHandle, running: bool) {
             if let Some(icon) = started_tray_icon() {
                 let _ = tray.set_icon(Some(icon));
             }
-        } else if let Some(icon) = stopped_tray_icon().or_else(|| app.default_window_icon().cloned())
-        {
+        } else if let Some(icon) = app.default_window_icon().cloned() {
             let _ = tray.set_icon(Some(icon));
         }
     }
@@ -4795,26 +4813,14 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 emit_comfyui_runtime_event(app, "stopping", format!("Stopping {instance_name}..."));
                 if let Err(err) = stop_comfyui_root_impl(&state) {
                     log::warn!("Tray stop ComfyUI failed: {err}");
-                    emit_comfyui_runtime_event(
-                        app,
-                        "stop_failed",
-                        format!("{instance_name} stop failed: {err}"),
-                    );
+                    emit_comfyui_runtime_event(app, "stop_failed", format!("{instance_name} stop failed: {err}"));
                 } else {
                     let running = comfyui_runtime_running(&state);
                     update_tray_comfy_status(app, running);
                     if running {
-                        emit_comfyui_runtime_event(
-                            app,
-                            "stop_failed",
-                            format!("{instance_name} stop did not fully complete."),
-                        );
+                        emit_comfyui_runtime_event(app, "stop_failed", format!("{instance_name} stop did not fully complete."));
                     } else {
-                        emit_comfyui_runtime_event(
-                            app,
-                            "stopped",
-                            format!("{instance_name} stopped."),
-                        );
+                        emit_comfyui_runtime_event(app, "stopped", format!("{instance_name} stopped."));
                     }
                 }
             }
@@ -4841,7 +4847,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
         });
 
-    if let Some(icon) = stopped_tray_icon().or_else(|| app.default_window_icon().cloned()) {
+    if let Some(icon) = app.default_window_icon().cloned() {
         builder = builder.icon(icon);
     }
 
@@ -4882,19 +4888,6 @@ fn cancel_active_download(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 fn main() {
-    #[cfg(target_os = "linux")]
-    {
-        // Work around blank window / GBM allocation failures on some Wayland+NVIDIA setups.
-        // Allow users to override externally if they need different behavior.
-        if std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_err() {
-            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        }
-        // Additional fallback for blank/transparent WebKit views on Linux GPU drivers.
-        if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
-            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-        }
-    }
-
     let nerdstats = std::env::args().any(|arg| arg.eq_ignore_ascii_case("--nerdstats"));
     if nerdstats {
         std::env::set_var("ARCTIC_NERDSTATS", "1");
@@ -4929,12 +4922,7 @@ fn main() {
         }))
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            if tray_enabled_for_platform() {
-                setup_tray(app.handle())?;
-            } else {
-                log::info!("System tray disabled for this platform/runtime.");
-            }
-            warm_linux_prereq_cache_background();
+            setup_tray(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -4942,11 +4930,6 @@ fn main() {
                 return;
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // Only hide-to-tray when tray support is enabled on this platform.
-                // On Linux we disable tray by default, so close should quit the app.
-                if !tray_enabled_for_platform() {
-                    return;
-                }
                 let state = window.app_handle().state::<AppState>();
                 let quitting = state.quitting.lock().map(|flag| *flag).unwrap_or(false);
                 if !quitting {
@@ -4999,20 +4982,24 @@ fn main() {
         .expect("failed to run tauri application");
 }
 
-fn tray_enabled_for_platform() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        match std::env::var("ARCTIC_ENABLE_TRAY") {
-            Ok(v) => {
-                let normalized = v.trim().to_ascii_lowercase();
-                !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
-            }
-            Err(_) => true,
-        }
-    }
 
-    #[cfg(not(target_os = "linux"))]
-    {
-        true
-    }
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

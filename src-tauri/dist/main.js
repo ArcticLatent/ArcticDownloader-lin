@@ -1,9 +1,7 @@
 const invoke = window.__TAURI__?.core?.invoke;
 const listen = window.__TAURI__?.event?.listen || window.__TAURI__?.core?.listen;
 const DOT_SEP = " \u2022 ";
-const IS_WINDOWS = typeof navigator !== "undefined"
-  && String(navigator.userAgent || "").toLowerCase().includes("windows");
-const PATH_SEP = IS_WINDOWS ? "\\" : "/";
+const PATH_SEP = "/";
 const state = {
   catalog: null,
   settings: null,
@@ -37,6 +35,7 @@ const state = {
   comfyUpdateBusy: false,
   comfyLatestVersion: null,
   comfyLastUpdateDetailLogKey: "",
+  comfyTorchProfileLocked: false,
 };
 
 const ramOptions = [
@@ -342,18 +341,11 @@ function updateUpdateButton() {
 function normalizeSlashes(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
-  const withoutPrefix = IS_WINDOWS
-    ? (raw.startsWith("\\\\?\\")
-      ? raw.slice(4)
-      : (raw.startsWith("\\?\\") ? raw.slice(3) : raw))
-    : raw;
-  const normalized = withoutPrefix.replace(/[\\/]+/g, PATH_SEP);
-  if (!IS_WINDOWS) {
-    const nestedHome = `${PATH_SEP}src-tauri${PATH_SEP}home${PATH_SEP}`;
-    const idx = normalized.indexOf(nestedHome);
-    if (idx >= 0) {
-      return normalized.slice(idx + `${PATH_SEP}src-tauri`.length);
-    }
+  const normalized = raw.replace(/[\\/]+/g, PATH_SEP);
+  const nestedHome = `${PATH_SEP}src-tauri${PATH_SEP}home${PATH_SEP}`;
+  const idx = normalized.indexOf(nestedHome);
+  if (idx >= 0) {
+    return normalized.slice(idx + `${PATH_SEP}src-tauri`.length);
   }
   return normalized;
 }
@@ -833,7 +825,7 @@ async function syncComfyInstallSelection(selectedPath, persistInstallBase = true
         await applySelectedExistingInstallation(el.comfyExistingInstall.value);
       }
       setComfyQuickActions(baseForInstall, detectedRoot);
-      logComfyLine(`Detected existing ComfyUI install: ${detectedRoot}`);
+      logComfyLine(`Detected ComfyUI install: ${detectedRoot}`);
       await refreshComfyRuntimeStatus();
       if (state.comfyRuntimeRunning) {
         logComfyLine("Detected running ComfyUI server. If you want to start a different one, stop this server first.");
@@ -1502,13 +1494,18 @@ async function bootstrap() {
   }
   setComfyQuickActions(settings.comfyui_last_install_dir || "", settings.comfyui_root || "");
   setOptions(el.comfyTorchProfile, comfyTorchProfiles);
+  const savedTorchProfile = String(settings.comfyui_torch_profile || "").trim();
+  if (savedTorchProfile && comfyTorchProfiles.some((x) => x.value === savedTorchProfile)) {
+    el.comfyTorchProfile.value = savedTorchProfile;
+    state.comfyTorchProfileLocked = true;
+  }
 
   const refreshRecommendation = (attempt = 0) => {
     invoke("get_comfyui_install_recommendation")
       .then((reco) => {
         el.comfyTorchRecommended.textContent = `Recommended '${reco.torch_label}' for your GPU`;
         state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
-        if (comfyTorchProfiles.some((x) => x.value === reco.torch_profile)) {
+        if (!state.comfyTorchProfileLocked && comfyTorchProfiles.some((x) => x.value === reco.torch_profile)) {
           el.comfyTorchProfile.value = reco.torch_profile;
         }
         applyComfyAddonRules();
@@ -1518,7 +1515,9 @@ async function bootstrap() {
       })
       .catch((err) => {
         el.comfyTorchRecommended.textContent = "Recommended 'Torch 2.8.0 + cu128' for your GPU";
-        el.comfyTorchProfile.value = "torch280_cu128";
+        if (!state.comfyTorchProfileLocked) {
+          el.comfyTorchProfile.value = "torch280_cu128";
+        }
         state.comfySage3Eligible = false;
         applyComfyAddonRules();
         logComfyLine(`Recommendation detection failed: ${err}`);
@@ -1836,7 +1835,10 @@ el.nodeComfyuiCrystools?.addEventListener("change", () => {
   applyComponentToggleFromCheckbox(el.nodeComfyuiCrystools, "node_comfyui_crystools", "comfyui-crystools")
     .catch((err) => logComfyLine(String(err)));
 });
-el.comfyTorchProfile?.addEventListener("change", () => applyComfyAddonRules());
+el.comfyTorchProfile?.addEventListener("change", () => {
+  state.comfyTorchProfileLocked = true;
+  applyComfyAddonRules();
+});
 el.runPreflight?.addEventListener("click", () => {
   runComfyPreflight().then((result) => {
     if (!result) return;
@@ -2233,10 +2235,6 @@ renderTransfers();
 
 // Runtime status polling (low-overhead, non-overlapping) to avoid UI hitching.
 scheduleRuntimeStatusPoll(1800);
-
-
-
-
 
 
 

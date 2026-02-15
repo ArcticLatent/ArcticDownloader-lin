@@ -9,14 +9,12 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-#[cfg(target_os = "windows")]
-use tokio::process::Command;
 use tokio::{fs, io::AsyncWriteExt, runtime::Runtime};
 
 const DEFAULT_UPDATE_MANIFEST_URL: &str =
     "https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/update.json";
 const UPDATE_CACHE_DIR: &str = "updates";
-const FALLBACK_STANDALONE_NAME: &str = "Arctic-ComfyUI-Helper.exe";
+const FALLBACK_PACKAGE_NAME: &str = "ArcticDownloader-lin-update.bin";
 
 #[derive(Clone, Debug)]
 pub struct AvailableUpdate {
@@ -132,7 +130,7 @@ impl Updater {
                 .context("failed to prepare update cache directory")?;
 
             let file_name = installer_file_name(&update.download_url)
-                .unwrap_or_else(|| FALLBACK_STANDALONE_NAME.to_string());
+                .unwrap_or_else(|| FALLBACK_PACKAGE_NAME.to_string());
             let package_path = updates_dir.join(file_name);
             if fs::try_exists(&package_path).await.unwrap_or(false) {
                 let _ = fs::remove_file(&package_path).await;
@@ -263,76 +261,6 @@ fn installer_file_name(url: &str) -> Option<String> {
 }
 
 async fn run_install_command(path: &Path) -> Result<()> {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = path;
-        bail!("updater install launcher is currently implemented for Windows only");
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let current_exe = std::env::current_exe()
-            .context("failed to resolve current executable for post-update relaunch")?;
-        let helper_path = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("apply_update.cmd");
-        let ext = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| value.to_ascii_lowercase());
-
-        if ext.as_deref() != Some("exe") {
-            bail!(
-                "unsupported update package type for Windows updater: {:?} (expected .exe)",
-                path
-            );
-        }
-
-        let downloaded_exe = quote_for_cmd(path);
-        let executable = quote_for_cmd(&current_exe);
-
-        let script = format!(
-            "@echo off\r\n\
-             setlocal\r\n\
-             set \"NEW_EXE={downloaded_exe}\"\r\n\
-             set \"CURRENT_EXE={executable}\"\r\n\
-             set /a RETRIES=0\r\n\
-             timeout /t 2 /nobreak >nul\r\n\
-             :retry_copy\r\n\
-             copy /Y \"%NEW_EXE%\" \"%CURRENT_EXE%\" >nul 2>nul\r\n\
-             if errorlevel 1 (\r\n\
-               set /a RETRIES+=1\r\n\
-               if %RETRIES% GEQ 60 goto fail\r\n\
-               timeout /t 1 /nobreak >nul\r\n\
-               goto retry_copy\r\n\
-             )\r\n\
-             start \"\" \"%CURRENT_EXE%\"\r\n\
-             endlocal\r\n\
-             del /f /q \"%~f0\" >nul 2>nul\r\n\
-             goto :eof\r\n\
-             :fail\r\n\
-             endlocal\r\n"
-        );
-
-        fs::write(&helper_path, script)
-            .await
-            .with_context(|| format!("failed to write update helper script {:?}", helper_path))?;
-
-        Command::new("cmd")
-            .arg("/C")
-            .arg("start")
-            .arg("")
-            .arg("/MIN")
-            .arg(&helper_path)
-            .spawn()
-            .with_context(|| format!("failed to launch update helper script {:?}", helper_path))?;
-
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn quote_for_cmd(path: &Path) -> String {
-    path.to_string_lossy().replace('"', "\"\"")
+    let _ = path;
+    bail!("auto-install for distribution packages is not implemented in-app yet")
 }
