@@ -1550,6 +1550,7 @@ fn install_nunchaku_node_requirements(
     if !python_module_importable(root, "diffusers") {
         return Err("Nunchaku install incomplete: missing 'diffusers' module.".to_string());
     }
+    prewarm_matplotlib_cache(root, py_path);
     Ok(())
 }
 
@@ -2058,12 +2059,36 @@ fn apply_cuda_runtime_env_for_root(cmd: &mut std::process::Command, root: &Path)
     }
 }
 
+fn configure_python_runtime_env_for_root(cmd: &mut std::process::Command, root: &Path) {
+    let mpl_cache = root.join(".venv").join("var").join("matplotlib");
+    let _ = std::fs::create_dir_all(&mpl_cache);
+    cmd.env("MPLBACKEND", "Agg");
+    cmd.env("MPLCONFIGDIR", mpl_cache.to_string_lossy().to_string());
+}
+
+fn prewarm_matplotlib_cache(root: &Path, py_path: &str) {
+    let mpl_cache = root.join(".venv").join("var").join("matplotlib");
+    let _ = std::fs::create_dir_all(&mpl_cache);
+    let code = format!(
+        "import os, logging; \
+os.environ.setdefault('MPLBACKEND', 'Agg'); \
+os.environ['MPLCONFIGDIR'] = r'''{}'''; \
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR); \
+import matplotlib; matplotlib.use('Agg', force=True); \
+from matplotlib import font_manager as fm; \
+fm._load_fontmanager(try_read_cache=False)",
+        mpl_cache.to_string_lossy()
+    );
+    let _ = run_command_capture(py_path, &["-c", &code], Some(root));
+}
+
 fn python_module_importable(root: &Path, module: &str) -> bool {
     let mut cmd = python_for_root(root);
     cmd.arg("-c")
         .arg(format!("import {module}"));
     cmd.current_dir(root);
     apply_cuda_runtime_env_for_root(&mut cmd, root);
+    configure_python_runtime_env_for_root(&mut cmd, root);
     cmd.output()
         .map(|out| out.status.success())
         .unwrap_or(false)
@@ -3666,6 +3691,7 @@ fn start_comfyui_root_impl(
         apply_background_command_flags(&mut cmd);
     }
     apply_cuda_runtime_env_for_root(&mut cmd, &root);
+    configure_python_runtime_env_for_root(&mut cmd, &root);
 
     let configured_root_matches = settings
         .comfyui_root

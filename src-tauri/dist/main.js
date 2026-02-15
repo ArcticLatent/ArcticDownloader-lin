@@ -496,12 +496,25 @@ function updateComfyRuntimeButton() {
   if (!el.comfyStartInstalled) return;
   const running = Boolean(state.comfyRuntimeRunning);
   const starting = Boolean(state.comfyRuntimeStarting);
+  const busy = Boolean(
+    state.comfyAttentionBusy
+    || state.comfyComponentBusy
+    || state.comfyInstallBusy
+    || state.comfyUpdateBusy,
+  );
   const target = String(state.comfyRuntimeTarget || "").trim();
   if (starting) {
     el.comfyStartInstalled.textContent = target ? `Starting ${target}...` : "Starting ComfyUI...";
     el.comfyStartInstalled.disabled = true;
     el.comfyStartInstalled.classList.remove("stop-state");
     el.comfyStartInstalled.classList.add("starting-state");
+    return;
+  }
+  if (busy) {
+    el.comfyStartInstalled.textContent = running ? "Stop ComfyUI" : "Applying changes...";
+    el.comfyStartInstalled.disabled = true;
+    el.comfyStartInstalled.classList.toggle("stop-state", running);
+    el.comfyStartInstalled.classList.remove("starting-state");
     return;
   }
   el.comfyStartInstalled.textContent = running ? "Stop ComfyUI" : "Start ComfyUI";
@@ -570,6 +583,7 @@ async function applyAttentionBackendFromToggle(changedBox) {
   }
 
   state.comfyAttentionBusy = true;
+  updateComfyRuntimeButton();
   setToggleBusy(changedBox, true);
   try {
     const result = await invoke("apply_attention_backend_change", {
@@ -588,6 +602,7 @@ async function applyAttentionBackendFromToggle(changedBox) {
     await loadInstalledAddonState(root);
   } finally {
     state.comfyAttentionBusy = false;
+    updateComfyRuntimeButton();
     setToggleBusy(changedBox, false);
   }
 }
@@ -613,6 +628,7 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
   }
 
   state.comfyComponentBusy = true;
+  updateComfyRuntimeButton();
   setToggleBusy(changedBox, true);
   try {
     const result = await invoke("apply_comfyui_component_toggle", {
@@ -637,6 +653,7 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
       } catch (_) {}
     }
     state.comfyComponentBusy = false;
+    updateComfyRuntimeButton();
     setToggleBusy(changedBox, false);
   }
 }
