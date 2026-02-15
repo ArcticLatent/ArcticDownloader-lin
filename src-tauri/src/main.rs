@@ -1519,6 +1519,40 @@ fn install_flashattention_linux(
     install_linux_wheel_for_profile(root, py_path, profile, "flash", hopper_sm90, true)
 }
 
+fn install_nunchaku_node_requirements(
+    root: &Path,
+    uv_bin: &str,
+    py_path: &str,
+    uv_python_install_dir: &str,
+    nunchaku_node: &Path,
+) -> Result<(), String> {
+    let req = nunchaku_node.join("requirements.txt");
+    if req.exists() {
+        run_uv_pip_strict(
+            uv_bin,
+            py_path,
+            &["install", "-r", &req.to_string_lossy()],
+            Some(root),
+            &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+        )?;
+    }
+    // ComfyUI-nunchaku imports these directly for multiple nodes (Flux/IPAdapter/PuLID).
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &["install", "--upgrade", "accelerate", "diffusers"],
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )?;
+    if !python_module_importable(root, "accelerate") {
+        return Err("Nunchaku install incomplete: missing 'accelerate' module.".to_string());
+    }
+    if !python_module_importable(root, "diffusers") {
+        return Err("Nunchaku install incomplete: missing 'diffusers' module.".to_string());
+    }
+    Ok(())
+}
+
 fn clone_or_update_repo(root: &Path, target_dir: &Path, repo_url: &str) -> Result<(), String> {
     if target_dir.join(".git").exists() {
         run_command(
@@ -2271,14 +2305,7 @@ fn run_comfyui_install_linux(
         } else {
             emit_install_event(app, "step", "Installing InsightFace...");
         }
-        install_linux_wheel_for_profile(
-            &comfy_dir,
-            &py_exe.to_string_lossy(),
-            &selected_profile,
-            "insightface",
-            hopper_sm90,
-            true,
-        )?;
+        install_insightface(&comfy_dir, &uv_bin, &py_exe.to_string_lossy(), &python_store_s)?;
     }
 
     if request.include_flash_attention {
@@ -2342,6 +2369,13 @@ fn run_comfyui_install_linux(
             "https://nunchaku.tech/cdn/nunchaku_versions.json",
             &versions_json,
         );
+        install_nunchaku_node_requirements(
+            &comfy_dir,
+            &uv_bin,
+            &py_exe.to_string_lossy(),
+            &python_store_s,
+            &nunchaku_node,
+        )?;
         install_linux_wheel_for_profile(
             &comfy_dir,
             &py_exe.to_string_lossy(),
@@ -4383,6 +4417,13 @@ fn apply_attention_backend_change(
                 &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
             )?;
             install_insightface(&root, &uv_bin, &py_path, &uv_python_install_dir)?;
+            install_nunchaku_node_requirements(
+                &root,
+                &uv_bin,
+                &py_path,
+                &uv_python_install_dir,
+                &nunchaku_node,
+            )?;
             install_linux_wheel_for_profile(
                 &root,
                 &py_path,
@@ -4473,9 +4514,9 @@ fn remove_custom_node_dirs(root: &Path, names: &[&str]) {
 
 fn install_insightface(
     root: &Path,
-    _uv_bin: &str,
+    uv_bin: &str,
     py_path: &str,
-    _uv_python_install_dir: &str,
+    uv_python_install_dir: &str,
 ) -> Result<(), String> {
     let profile = profile_from_torch_env(root)?;
     install_linux_wheel_for_profile(
@@ -4486,6 +4527,16 @@ fn install_insightface(
         is_nvidia_hopper_sm90(),
         true,
     )?;
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &["install", "--upgrade", "onnx", "onnxruntime"],
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )?;
+    if !python_module_importable(root, "onnx") {
+        return Err("InsightFace install incomplete: missing 'onnx' module.".to_string());
+    }
     if !insightface_present(root) {
         return Err("InsightFace install incomplete: package/module not detected.".to_string());
     }
