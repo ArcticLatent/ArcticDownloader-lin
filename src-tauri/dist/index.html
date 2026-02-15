@@ -70,7 +70,7 @@
           <label title="FlashAttention is a GPU-optimized attention algorithm that makes transformer attention much faster and more memory-efficient by computing it in fused CUDA kernels instead of the usual step-by-step PyTorch ops"><input type="checkbox" id="addon-flashattention" /> FlashAttention</label>
           <label title="InsightFace is an open-source deep learning framework for face analysis, focused on high-performance face recognition, face detection, and related tasks"><input type="checkbox" id="addon-insightface" /> InsightFace</label>
           <label title="Nunchaku is a high-performance inference backend (and node set) that replaces parts of the standard PyTorch execution path to make large diffusion models run much faster and with less VRAM—especially on modern NVIDIA GPUs."><input type="checkbox" id="addon-nunchaku" /> Nunchaku</label>
-          <label title="Requires Torch 2.8.0 + cu128. TRELLIS-2 is a Microsoft research 3D foundation model that generates structured, textured 3D assets (meshes + geometry + textures)"><input type="checkbox" id="addon-trellis2" /> Trellis2</label>
+          <label title="Requires Torch 2.8.0 + cu128. Recommended to use with FlashAttention. Trellis does not support SageAttention. TRELLIS-2 is a Microsoft research 3D foundation model that generates structured, textured 3D assets (meshes + geometry + textures)"><input type="checkbox" id="addon-trellis2" /> Trellis2</label>
           <label title="Pinned memory in ComfyUI should generally be kept ON for faster sampling speeds (10-50% improvement) by optimizing CPU-to-GPU data transfers, as it is now enabled by default. It is particularly beneficial for NVIDIA users to improve efficiency. However, if you experience crashes, OOM errors, or system instability disable it."><input type="checkbox" id="addon-pinned-memory" checked /> Pinned Memory</label>
         </div>
 
@@ -230,4 +230,3 @@
     <script type="module" src="./main.js"></script>
   </body>
 </html>
-

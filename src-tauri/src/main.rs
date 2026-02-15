@@ -8,7 +8,6 @@ use arctic_downloader::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    io::{Read, Write},
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::Stdio,
@@ -131,7 +130,6 @@ struct LinuxPrereqScan {
     distro: String,
     missing_required: Vec<String>,
     missing_optional: Vec<String>,
-    checked_unix_ts: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -327,15 +325,10 @@ fn scan_linux_prereqs() -> Result<LinuxPrereqScan, String> {
         .filter(|pkg| !linux_package_installed(&distro, pkg))
         .map(str::to_string)
         .collect::<Vec<_>>();
-    let checked_unix_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|err| err.to_string())?
-        .as_secs();
     Ok(LinuxPrereqScan {
         distro,
         missing_required,
         missing_optional,
-        checked_unix_ts,
     })
 }
 
@@ -932,16 +925,12 @@ fn run_comfyui_preflight(
 
     match get_linux_prereq_cache_or_scan() {
         Ok(scan) => {
-            let mode = "direct host execution";
             if scan.missing_required.is_empty() {
                 push_preflight(
                     &mut items,
                     "pass",
                     "Linux system packages",
-                    format!(
-                        "{} prerequisites are installed (checked at {}, {}).",
-                        scan.distro, scan.checked_unix_ts, mode
-                    ),
+                    format!("{} prerequisites are installed.", scan.distro),
                 );
             } else {
                 ok = false;
@@ -950,9 +939,8 @@ fn run_comfyui_preflight(
                     "fail",
                     "Linux system packages",
                     format!(
-                        "Missing required packages for {} ({}): {}",
+                        "Missing required packages for {}: {}",
                         scan.distro,
-                        mode,
                         scan.missing_required.join(", ")
                     ),
                 );
@@ -1129,43 +1117,87 @@ fn download_http_file(url: &str, out_file: &Path) -> Result<(), String> {
         })?;
     }
 
-    let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(|err| format!("Failed to build HTTP client: {err}"))?;
-
-    let mut response = client
-        .get(url)
-        .header("User-Agent", "ArcticComfyUIHelper/0.3.4")
-        .send()
-        .and_then(|r| r.error_for_status())
-        .map_err(|err| format!("HTTP download failed for {url}: {err}"))?;
-
     let tmp_file = out_file.with_extension("download");
-    let mut file = std::fs::File::create(&tmp_file)
-        .map_err(|err| format!("Failed to create file {}: {err}", tmp_file.display()))?;
+    let user_agent = "ArcticComfyUIHelper/0.3.4";
 
-    let mut buffer = [0u8; 1024 * 1024];
-    loop {
-        let read = response
-            .read(&mut buffer)
-            .map_err(|err| format!("Failed while reading {url}: {err}"))?;
-        if read == 0 {
-            break;
+    let curl_output = std::process::Command::new("curl")
+        .arg("-fL")
+        .arg("--retry")
+        .arg("3")
+        .arg("--connect-timeout")
+        .arg("20")
+        .arg("-A")
+        .arg(user_agent)
+        .arg("-o")
+        .arg(&tmp_file)
+        .arg(url)
+        .output();
+
+    let downloaded = match curl_output {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let wget_output = std::process::Command::new("wget")
+                .arg("--tries=3")
+                .arg("--timeout=20")
+                .arg("--user-agent")
+                .arg(user_agent)
+                .arg("-O")
+                .arg(&tmp_file)
+                .arg(url)
+                .output();
+            match wget_output {
+                Ok(wget) if wget.status.success() => true,
+                Ok(wget) => {
+                    let wget_err = String::from_utf8_lossy(&wget.stderr).trim().to_string();
+                    return Err(format!(
+                        "HTTP download failed for {url}. curl: {stderr}. wget: {wget_err}"
+                    ));
+                }
+                Err(wget_err) => {
+                    return Err(format!(
+                        "HTTP download failed for {url}. curl: {stderr}. wget launch failed: {wget_err}"
+                    ));
+                }
+            }
         }
-        file.write_all(&buffer[..read])
-            .map_err(|err| format!("Failed writing {}: {err}", tmp_file.display()))?;
-    }
-    file.flush()
-        .map_err(|err| format!("Failed to flush {}: {err}", tmp_file.display()))?;
+        Err(_) => {
+            let wget_output = std::process::Command::new("wget")
+                .arg("--tries=3")
+                .arg("--timeout=20")
+                .arg("--user-agent")
+                .arg(user_agent)
+                .arg("-O")
+                .arg(&tmp_file)
+                .arg(url)
+                .output();
+            match wget_output {
+                Ok(wget) if wget.status.success() => true,
+                Ok(wget) => {
+                    let wget_err = String::from_utf8_lossy(&wget.stderr).trim().to_string();
+                    return Err(format!(
+                        "HTTP download failed for {url}. curl and wget failed. wget: {wget_err}"
+                    ));
+                }
+                Err(wget_err) => {
+                    return Err(format!(
+                        "HTTP download failed for {url}. Neither curl nor wget is available: {wget_err}"
+                    ));
+                }
+            }
+        }
+    };
 
-    std::fs::rename(&tmp_file, out_file).map_err(|err| {
-        format!(
-            "Failed to finalize download {} -> {}: {err}",
-            tmp_file.display(),
-            out_file.display()
-        )
-    })?;
+    if downloaded {
+        std::fs::rename(&tmp_file, out_file).map_err(|err| {
+            format!(
+                "Failed to finalize download {} -> {}: {err}",
+                tmp_file.display(),
+                out_file.display()
+            )
+        })?;
+    }
+
     Ok(())
 }
 
@@ -1286,6 +1318,128 @@ fn pip_uninstall_best_effort(root: &Path, py_path: &str, packages: &[&str]) {
     }
 }
 
+fn normalize_pkg_token(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn remove_site_packages_artifacts_with_markers(
+    root: &Path,
+    markers: &[String],
+) -> Result<(), String> {
+    for venv_name in [".venv", "venv"] {
+        let venv_lib = root.join(venv_name).join("lib");
+        let py_entries = match std::fs::read_dir(&venv_lib) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for py in py_entries.flatten() {
+            let site = py.path().join("site-packages");
+            let entries = match std::fs::read_dir(&site) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                let token = normalize_pkg_token(&name);
+                if !markers.iter().any(|marker| token.contains(marker)) {
+                    continue;
+                }
+                if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(&path);
+                } else {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_attention_site_packages_artifacts(root: &Path) -> Result<(), String> {
+    let markers = vec![
+        normalize_pkg_token("sageattention"),
+        normalize_pkg_token("sageattn3"),
+        normalize_pkg_token("flash_attn"),
+        normalize_pkg_token("nunchaku"),
+    ];
+    remove_site_packages_artifacts_with_markers(root, &markers)
+}
+
+fn remove_insightface_site_packages_artifacts(root: &Path) -> Result<(), String> {
+    let markers = vec![
+        normalize_pkg_token("insightface"),
+        normalize_pkg_token("facexlib"),
+        normalize_pkg_token("filterpywhl"),
+    ];
+    remove_site_packages_artifacts_with_markers(root, &markers)
+}
+
+fn force_cleanup_attention_backends(root: &Path, py_path: &str) -> Result<(), String> {
+    let pkg_names = [
+        "sageattention",
+        "sageattn3",
+        "flash-attn",
+        "flash_attn",
+        "nunchaku",
+    ];
+    pip_uninstall_best_effort(root, py_path, &pkg_names);
+    remove_attention_site_packages_artifacts(root)?;
+    for folder in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
+        let path = root.join("custom_nodes").join(folder);
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    let mut lingering: Vec<&str> = Vec::new();
+    for pkg in pkg_names {
+        if pip_has_package(root, pkg) {
+            lingering.push(pkg);
+        }
+    }
+    let mut lingering_modules: Vec<&str> = Vec::new();
+    for module in ["sageattention", "sageattn3", "flash_attn", "nunchaku"] {
+        if python_module_importable(root, module) {
+            lingering_modules.push(module);
+        }
+    }
+    let mut lingering_nodes: Vec<&str> = Vec::new();
+    for node in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
+        if custom_node_exists(root, node) {
+            lingering_nodes.push(node);
+        }
+    }
+    if lingering.is_empty() && lingering_modules.is_empty() && lingering_nodes.is_empty() {
+        return Ok(());
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if !lingering.is_empty() {
+        parts.push(format!("packages still installed: {}", lingering.join(", ")));
+    }
+    if !lingering_modules.is_empty() {
+        parts.push(format!(
+            "modules still importable: {}",
+            lingering_modules.join(", ")
+        ));
+    }
+    if !lingering_nodes.is_empty() {
+        parts.push(format!("nodes still present: {}", lingering_nodes.join(", ")));
+    }
+    Err(format!(
+        "Failed to fully remove previous attention backends ({}). Stop ComfyUI and retry.",
+        parts.join("; ")
+    ))
+}
+
+fn insightface_present(root: &Path) -> bool {
+    pip_has_package(root, "insightface") || python_module_importable(root, "insightface")
+}
+
 fn linux_wheel_url(profile: &str, wheel_kind: &str, hopper_sm90: bool) -> Option<&'static str> {
     match (profile, wheel_kind, hopper_sm90) {
         ("torch271_cu128", "flash", true) => Some("https://huggingface.co/arcticlatent/accelerator/resolve/main/cu128-torch271-py312-sm90/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl"),
@@ -1341,6 +1495,8 @@ fn install_linux_wheel_for_profile(
     if force_reinstall {
         args.push("--reinstall");
     }
+    // These are precompiled stack-pinned wheels; let selected torch profile stay authoritative.
+    args.push("--no-deps");
     args.push(wheel);
     run_uv_pip_strict(&uv_bin, py_path, &args, Some(root), &[])
 }
@@ -1430,7 +1586,10 @@ fn run_uv_pip_strict(
     }
 
     let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
-    run_command_env(uv_bin, &args, working_dir, envs)
+    let mut merged_envs: Vec<(&str, &str)> = Vec::with_capacity(envs.len() + 1);
+    merged_envs.push(("UV_LINK_MODE", "copy"));
+    merged_envs.extend_from_slice(envs);
+    run_command_env(uv_bin, &args, working_dir, &merged_envs)
 }
 fn profile_from_torch_env(root: &Path) -> Result<String, String> {
     let mut cmd = python_for_root(root);
@@ -1452,14 +1611,8 @@ fn profile_from_torch_env(root: &Path) -> Result<String, String> {
     let torch_v = lines.next().unwrap_or_default().to_ascii_lowercase();
     let cuda_v = lines.next().unwrap_or_default().to_ascii_lowercase();
 
-    if torch_v.starts_with("2.7") && cuda_v.starts_with("12.8") {
-        return Ok("torch271_cu128".to_string());
-    }
-    if torch_v.starts_with("2.8") && cuda_v.starts_with("12.8") {
-        return Ok("torch280_cu128".to_string());
-    }
-    if torch_v.starts_with("2.9") && cuda_v.starts_with("13.0") {
-        return Ok("torch291_cu130".to_string());
+    if let Some(profile) = torch_profile_from_versions(&torch_v, &cuda_v) {
+        return Ok(profile);
     }
 
     Err(format!(
@@ -1547,6 +1700,21 @@ fn torch_profile_to_packages_linux(
     }
 }
 
+fn torch_profile_from_versions(torch_v: &str, cuda_v: &str) -> Option<String> {
+    let t = torch_v.trim().to_ascii_lowercase();
+    let c = cuda_v.trim().to_ascii_lowercase();
+    if t.starts_with("2.7") && c.starts_with("12.8") {
+        return Some("torch271_cu128".to_string());
+    }
+    if t.starts_with("2.8") && c.starts_with("12.8") {
+        return Some("torch280_cu128".to_string());
+    }
+    if t.starts_with("2.9") && c.starts_with("13.0") {
+        return Some("torch291_cu130".to_string());
+    }
+    None
+}
+
 fn triton_package_for_profile_linux(profile: &str) -> &'static str {
     match profile {
         "torch271_cu128" => "triton==3.3.1",
@@ -1591,6 +1759,34 @@ fn enforce_torch_profile_linux(
         Some(root),
         &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
+    let mut verify_cmd = std::process::Command::new(py_path);
+    verify_cmd.arg("-c").arg(
+        "import torch, importlib.metadata as m; \
+         print(getattr(torch, '__version__', '')); \
+         print(getattr(torch.version, 'cuda', '') or ''); \
+         print(m.version('torchvision')); \
+         print(m.version('torchaudio'))",
+    );
+    verify_cmd.current_dir(root);
+    apply_background_command_flags(&mut verify_cmd);
+    let verify = verify_cmd
+        .output()
+        .map_err(|err| format!("Failed to verify torch profile with {py_path}: {err}"))?;
+    if !verify.status.success() {
+        return Err("Torch profile verification command failed after reinstall.".to_string());
+    }
+    let text = String::from_utf8_lossy(&verify.stdout);
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let installed_torch = lines.next().unwrap_or_default();
+    let installed_cuda = lines.next().unwrap_or_default();
+    let installed_tv = lines.next().unwrap_or_default();
+    let installed_ta = lines.next().unwrap_or_default();
+    let actual_profile = torch_profile_from_versions(installed_torch, installed_cuda);
+    if actual_profile.as_deref() != Some(profile) {
+        return Err(format!(
+            "Torch profile enforce mismatch for {profile}: got torch={installed_torch}, cuda={installed_cuda}, torchvision={installed_tv}, torchaudio={installed_ta}"
+        ));
+    }
     Ok(())
 }
 
@@ -1623,14 +1819,26 @@ fn infer_torch_profile_from_installed_packages(root: &Path) -> Option<String> {
     None
 }
 
-fn resolve_desired_torch_profile(settings: &AppSettings, root: &Path) -> String {
-    if let Some(profile) = settings.comfyui_torch_profile.as_ref() {
-        return profile.clone();
-    }
+fn detect_torch_profile_for_root(root: &Path) -> Option<String> {
     profile_from_torch_env(root)
         .or_else(|_| {
             infer_torch_profile_from_installed_packages(root)
                 .ok_or_else(|| "no profile hint".to_string())
+        })
+        .ok()
+}
+
+fn resolve_desired_torch_profile(settings: &AppSettings, root: &Path) -> String {
+    profile_from_torch_env(root)
+        .or_else(|_| {
+            infer_torch_profile_from_installed_packages(root)
+                .ok_or_else(|| "no profile hint".to_string())
+        })
+        .or_else(|_| {
+            settings
+                .comfyui_torch_profile
+                .clone()
+                .ok_or_else(|| "no saved profile".to_string())
         })
         .unwrap_or_else(|_| get_comfyui_install_recommendation().torch_profile)
 }
@@ -1714,8 +1922,12 @@ fn install_custom_node(
 fn selected_attention_backend(request: &ComfyInstallRequest) -> Option<&'static str> {
     if request.include_flash_attention {
         Some("flash")
-    } else if request.include_sage_attention || request.include_sage_attention3 {
+    } else if request.include_sage_attention3 {
+        Some("sage3")
+    } else if request.include_sage_attention {
         Some("sage")
+    } else if request.include_nunchaku {
+        Some("nunchaku")
     } else {
         None
     }
@@ -1729,22 +1941,87 @@ fn append_attention_launch_arg(args: &mut Vec<String>, backend: Option<&str>) {
         .as_deref()
     {
         Some("flash") => args.push("--use-flash-attention".to_string()),
-        Some("sage") => args.push("--use-sage-attention".to_string()),
+        Some("sage") | Some("sage3") => args.push("--use-sage-attention".to_string()),
         _ => {}
     }
 }
 
-fn detect_attention_backend_for_root(root: &Path) -> Option<String> {
-    let has_flash = python_module_importable(root, "flash_attn");
-    if has_flash {
+fn detect_launch_attention_backend_for_root(root: &Path) -> Option<String> {
+    if python_module_importable(root, "flash_attn") {
         return Some("flash".to_string());
     }
-    let has_sage =
-        python_module_importable(root, "sageattention") || python_module_importable(root, "sageattn3");
-    if has_sage {
+    if python_module_importable(root, "sageattn3") {
+        return Some("sage3".to_string());
+    }
+    if python_module_importable(root, "sageattention") {
         return Some("sage".to_string());
     }
+    let has_nunchaku = python_module_importable(root, "nunchaku")
+        || custom_node_exists(root, "nunchaku_nodes")
+        || custom_node_exists(root, "ComfyUI-nunchaku")
+        || pip_has_package(root, "nunchaku");
+    if has_nunchaku {
+        return Some("nunchaku".to_string());
+    }
     None
+}
+
+fn nunchaku_backend_present(root: &Path) -> bool {
+    python_module_importable(root, "nunchaku")
+        || pip_has_package(root, "nunchaku")
+        || custom_node_exists(root, "nunchaku_nodes")
+        || custom_node_exists(root, "ComfyUI-nunchaku")
+}
+
+fn collect_cuda_runtime_library_paths(root: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push_unique = |p: PathBuf| {
+        if p.exists() && !dirs.iter().any(|d| d == &p) {
+            dirs.push(p);
+        }
+    };
+
+    for sys in ["/opt/cuda/lib64", "/usr/local/cuda/lib64", "/usr/lib/wsl/lib"] {
+        push_unique(PathBuf::from(sys));
+    }
+
+    for env_key in ["CUDA_PATH", "CUDA_HOME"] {
+        if let Some(base) = std::env::var_os(env_key) {
+            push_unique(PathBuf::from(base).join("lib64"));
+        }
+    }
+
+    for venv_name in [".venv", "venv"] {
+        let venv_lib = root.join(venv_name).join("lib");
+        let py_dirs = std::fs::read_dir(&venv_lib)
+            .ok()
+            .into_iter()
+            .flat_map(|iter| iter.flatten().map(|e| e.path()).collect::<Vec<_>>());
+        for py_dir in py_dirs {
+            let site = py_dir.join("site-packages").join("nvidia");
+            for pkg in ["cuda_runtime", "cublas", "cudnn", "cusolver", "cusparse"] {
+                push_unique(site.join(pkg).join("lib"));
+            }
+        }
+    }
+    dirs
+}
+
+fn apply_cuda_runtime_env_for_root(cmd: &mut std::process::Command, root: &Path) {
+    let mut paths = collect_cuda_runtime_library_paths(root);
+    if paths.is_empty() {
+        return;
+    }
+    if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+        for p in std::env::split_paths(&existing) {
+            if !paths.iter().any(|d| d == &p) {
+                paths.push(p);
+            }
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        cmd.env("LD_LIBRARY_PATH", joined);
+    }
 }
 
 fn python_module_importable(root: &Path, module: &str) -> bool {
@@ -1752,6 +2029,7 @@ fn python_module_importable(root: &Path, module: &str) -> bool {
     cmd.arg("-c")
         .arg(format!("import {module}"));
     cmd.current_dir(root);
+    apply_cuda_runtime_env_for_root(&mut cmd, root);
     cmd.output()
         .map(|out| out.status.success())
         .unwrap_or(false)
@@ -2037,6 +2315,7 @@ fn run_comfyui_install_linux(
         write_install_state(&install_root, "in_progress", "addon_nunchaku");
         emit_install_event(app, "step", "Installing Nunchaku...");
         ensure_git_available(app)?;
+        std::fs::create_dir_all(&addon_root).map_err(|err| err.to_string())?;
         let nunchaku_node = addon_root.join("ComfyUI-nunchaku");
         for folder in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
             let path = addon_root.join(folder);
@@ -2049,6 +2328,11 @@ fn run_comfyui_install_linux(
             &nunchaku_node,
             "https://github.com/nunchaku-ai/ComfyUI-nunchaku",
         )?;
+        let versions_json = nunchaku_node.join("nunchaku_versions.json");
+        let _ = download_http_file(
+            "https://nunchaku.tech/cdn/nunchaku_versions.json",
+            &versions_json,
+        );
         install_linux_wheel_for_profile(
             &comfy_dir,
             &py_exe.to_string_lossy(),
@@ -2057,6 +2341,12 @@ fn run_comfyui_install_linux(
             hopper_sm90,
             true,
         )?;
+        if !nunchaku_backend_present(&comfy_dir) {
+            return Err(
+                "Nunchaku install incomplete: module or custom node not detected after install."
+                    .to_string(),
+            );
+        }
         summary.push(InstallSummaryItem {
             name: "nunchaku".to_string(),
             status: "ok".to_string(),
@@ -2101,6 +2391,13 @@ fn run_comfyui_install_linux(
                 &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
             )?;
         }
+        run_uv_pip_strict(
+            &uv_bin,
+            &py_exe.to_string_lossy(),
+            &["install", "--upgrade", "tomli"],
+            Some(&comfy_dir),
+            &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
+        )?;
 
         let ultrashape_dir = custom_nodes_dir.join("ComfyUI-UltraShape1");
         clone_or_update_repo(
@@ -2293,6 +2590,18 @@ fn run_comfyui_install_linux(
         }
     }
 
+    // Final guard: custom-node requirements can drift torch deps.
+    // Re-assert the selected stack before first launch.
+    write_install_state(&install_root, "in_progress", "finalize_torch_stack");
+    emit_install_event(app, "step", "Finalizing Torch stack for selected profile...");
+    enforce_torch_profile_linux(
+        &uv_bin,
+        &py_exe.to_string_lossy(),
+        &comfy_dir,
+        &selected_profile,
+        &python_store_s,
+    )?;
+
     write_install_summary(&install_root, &summary);
     write_install_state(&install_root, "completed", "done");
     Ok(comfy_dir)
@@ -2420,16 +2729,11 @@ fn set_comfyui_root(
             &std::fs::canonicalize(&path).unwrap_or(path),
         ))
     };
-    let current_settings = state.context.config.settings();
-    let detected_profile = normalized
-        .as_ref()
-        .map(|root| resolve_desired_torch_profile(&current_settings, root));
     state
         .context
         .config
         .update_settings(|settings| {
             settings.comfyui_root = normalized.clone();
-            settings.comfyui_torch_profile = detected_profile.clone();
         })
         .map_err(|err| err.to_string())
 }
@@ -3302,93 +3606,61 @@ fn start_comfyui_root_impl(
 
     let py_exe = resolve_start_python_exe(app, state, &root)?;
     let settings = state.context.config.settings();
-    let desired_profile = resolve_desired_torch_profile(&settings, &root);
-    let current_profile = profile_from_torch_env(&root).ok();
-    if current_profile.as_deref() != Some(desired_profile.as_str()) {
-        if let Some(current) = current_profile.as_deref() {
-            emit_comfyui_runtime_event(
-                app,
-                "preparing_runtime",
-                format!(
-                    "Detected torch profile drift ({} -> {}). Re-applying selected profile...",
-                    current, desired_profile
-                ),
-            );
-        } else {
-            log::info!(
-                "Torch profile could not be detected; re-applying selected profile {}",
-                desired_profile
-            );
-        }
-        let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
-        let uv_bin = resolve_uv_binary(&shared_runtime_root, app)?;
-        let uv_python_install_dir = shared_runtime_root
-            .join(".python")
-            .to_string_lossy()
-            .to_string();
-        enforce_torch_profile_linux(
-            &uv_bin,
-            py_exe.to_string_lossy().as_ref(),
-            &root,
-            &desired_profile,
-            &uv_python_install_dir,
-        )?;
-        let _ = state.context.config.update_settings(|s| {
-            s.comfyui_torch_profile = Some(desired_profile.clone());
-        });
-        emit_comfyui_runtime_event(app, "info", format!("Torch profile repaired: {desired_profile}"));
-    }
-
-    if settings.comfyui_attention_backend.as_deref() == Some("flash")
-        && !python_module_importable(&root, "flash_attn")
-    {
-        emit_comfyui_runtime_event(
-            app,
-            "preparing_runtime",
-            "FlashAttention selected but missing/broken. Reinstalling flash-attn wheel...",
-        );
-        install_flashattention_linux(
-            &root,
-            py_exe.to_string_lossy().as_ref(),
-            &desired_profile,
-            is_nvidia_hopper_sm90(),
-        )?;
-        if python_module_importable(&root, "flash_attn") {
-            emit_comfyui_runtime_event(app, "info", "FlashAttention repaired.");
-        } else {
-            emit_comfyui_runtime_event(
-                app,
-                "warn",
-                "FlashAttention still unavailable; starting without flash backend.",
-            );
-        }
-    }
 
     let mut cmd = std::process::Command::new(py_exe);
     if !nerdstats_enabled() {
         apply_background_command_flags(&mut cmd);
     }
+    apply_cuda_runtime_env_for_root(&mut cmd, &root);
 
+    let same_as_configured_root = settings
+        .comfyui_root
+        .as_ref()
+        .map(|p| normalize_canonical_path(&std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
+        == Some(root.clone());
     let effective_attention = {
-        let configured = settings.comfyui_attention_backend.clone();
+        let configured = if same_as_configured_root {
+            settings.comfyui_attention_backend.clone()
+        } else {
+            None
+        };
         match configured.as_deref() {
+            Some("sage3") => {
+                if python_module_importable(&root, "sageattn3") {
+                    Some("sage3".to_string())
+                } else {
+                    detect_launch_attention_backend_for_root(&root)
+                }
+            }
             Some("sage") => {
                 if python_module_importable(&root, "sageattention")
                     || python_module_importable(&root, "sageattn3")
                 {
                     Some("sage".to_string())
                 } else {
-                    detect_attention_backend_for_root(&root)
+                    detect_launch_attention_backend_for_root(&root)
                 }
             }
             Some("flash") => {
                 if python_module_importable(&root, "flash_attn") {
                     Some("flash".to_string())
                 } else {
-                    detect_attention_backend_for_root(&root)
+                    detect_launch_attention_backend_for_root(&root)
                 }
             }
-            _ => detect_attention_backend_for_root(&root),
+            Some("nunchaku") => {
+                if nunchaku_backend_present(&root) {
+                    Some("nunchaku".to_string())
+                } else {
+                    emit_comfyui_runtime_event(
+                        app,
+                        "warn",
+                        "Nunchaku selected but backend is not installed correctly; starting without Nunchaku attention backend.",
+                    );
+                    None
+                }
+            }
+            _ => detect_launch_attention_backend_for_root(&root),
         }
     };
     cmd.arg("-W").arg("ignore::FutureWarning").arg(main_py);
@@ -3577,6 +3849,7 @@ struct ComfyRuntimeEvent {
 
 #[derive(Debug, Serialize)]
 struct ComfyAddonState {
+    torch_profile: Option<String>,
     sage_attention: bool,
     sage_attention3: bool,
     flash_attention: bool,
@@ -3878,18 +4151,50 @@ fn get_comfyui_addon_state(
     comfyui_root: Option<String>,
 ) -> Result<ComfyAddonState, String> {
     let root = resolve_root_path(&state.context, comfyui_root)?;
-    let has_sage3 = pip_has_package(&root, "sageattn3");
+    let settings = state.context.config.settings();
+    let same_as_configured_root = settings
+        .comfyui_root
+        .as_ref()
+        .map(|p| normalize_canonical_path(&std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
+        == Some(root.clone());
+    let has_sage3 =
+        python_module_importable(&root, "sageattn3") || pip_has_package(&root, "sageattn3");
+    let has_sage =
+        python_module_importable(&root, "sageattention") || pip_has_package(&root, "sageattention");
+    let has_flash = python_module_importable(&root, "flash_attn")
+        || pip_has_package(&root, "flash-attn")
+        || pip_has_package(&root, "flash_attn");
+    let has_nunchaku = python_module_importable(&root, "nunchaku")
+        || pip_has_package(&root, "nunchaku")
+        || custom_node_exists(&root, "nunchaku_nodes")
+        || custom_node_exists(&root, "ComfyUI-nunchaku");
+    let active_attention: String = if same_as_configured_root {
+        match settings.comfyui_attention_backend.as_deref() {
+            Some("flash") if has_flash => "flash".to_string(),
+            Some("sage3") if has_sage3 => "sage3".to_string(),
+            Some("sage") if has_sage => "sage".to_string(),
+            Some("nunchaku") if has_nunchaku => "nunchaku".to_string(),
+            _ => detect_launch_attention_backend_for_root(&root).unwrap_or_else(|| "none".to_string()),
+        }
+    } else {
+        detect_launch_attention_backend_for_root(&root).unwrap_or_else(|| "none".to_string())
+    };
+
     Ok(ComfyAddonState {
-        // If SageAttention3 is installed, treat it as the active Sage backend in UI.
-        sage_attention: !has_sage3 && pip_has_package(&root, "sageattention"),
-        sage_attention3: has_sage3,
-        flash_attention: pip_has_package(&root, "flash-attn")
-            || pip_has_package(&root, "flash_attn"),
-        nunchaku: pip_has_package(&root, "nunchaku")
-            || custom_node_exists(&root, "nunchaku_nodes")
-            || custom_node_exists(&root, "ComfyUI-nunchaku"),
+        torch_profile: detect_torch_profile_for_root(&root).or_else(|| {
+            if same_as_configured_root {
+                settings.comfyui_torch_profile.clone()
+            } else {
+                None
+            }
+        }),
+        sage_attention: active_attention == "sage",
+        sage_attention3: active_attention == "sage3",
+        flash_attention: active_attention == "flash",
+        nunchaku: active_attention == "nunchaku",
         insight_face: pip_has_package(&root, "insightface"),
-        trellis2: custom_node_exists(&root, "ComfyUI-Trellis2"),
+        trellis2: custom_node_exists(&root, "ComfyUI-Trellis2")
+            || custom_node_exists(&root, "ComfyUI-TRELLIS2"),
         node_comfyui_manager: custom_node_exists(&root, "ComfyUI-Manager")
             || custom_node_exists(&root, "comfyui-manager"),
         node_comfyui_easy_use: custom_node_exists(&root, "ComfyUI-Easy-Use"),
@@ -3969,24 +4274,7 @@ fn apply_attention_backend_change(
     let hopper_sm90 = is_nvidia_hopper_sm90();
     let triton_pkg = triton_package_for_profile_linux(&profile);
 
-    pip_uninstall_best_effort(
-        &root,
-        &py_path,
-        &[
-            "sageattention",
-            "sageattn3",
-            "flash-attn",
-            "flash_attn",
-            "nunchaku",
-        ],
-    );
-
-    for folder in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
-        let path = root.join("custom_nodes").join(folder);
-        if path.exists() {
-            let _ = std::fs::remove_dir_all(path);
-        }
-    }
+    force_cleanup_attention_backends(&root, &py_path)?;
 
     match target.as_str() {
         "none" => {}
@@ -4031,12 +4319,19 @@ fn apply_attention_backend_change(
         }
         "nunchaku" => {
             ensure_git_available(&app)?;
+            let custom_nodes_root = root.join("custom_nodes");
+            std::fs::create_dir_all(&custom_nodes_root).map_err(|err| err.to_string())?;
             let nunchaku_node = root.join("custom_nodes").join("ComfyUI-nunchaku");
             clone_or_update_repo(
                 &root,
                 &nunchaku_node,
                 "https://github.com/nunchaku-ai/ComfyUI-nunchaku",
             )?;
+            let versions_json = nunchaku_node.join("nunchaku_versions.json");
+            let _ = download_http_file(
+                "https://nunchaku.tech/cdn/nunchaku_versions.json",
+                &versions_json,
+            );
             run_uv_pip_strict(
                 &uv_bin,
                 &py_path,
@@ -4052,6 +4347,12 @@ fn apply_attention_backend_change(
                 hopper_sm90,
                 true,
             )?;
+            if !nunchaku_backend_present(&root) {
+                return Err(
+                    "Nunchaku backend install incomplete: module or custom node not detected."
+                        .to_string(),
+                );
+            }
         }
         _ => return Err("Unknown attention backend target.".to_string()),
     }
@@ -4098,8 +4399,10 @@ fn apply_attention_backend_change(
         }
     }
     let target_setting = match target.as_str() {
-        "sage" | "sage3" => Some("sage".to_string()),
+        "sage" => Some("sage".to_string()),
+        "sage3" => Some("sage3".to_string()),
         "flash" => Some("flash".to_string()),
+        "nunchaku" => Some("nunchaku".to_string()),
         _ => None,
     };
     let _ = state
@@ -4138,7 +4441,11 @@ fn install_insightface(
         "insightface",
         is_nvidia_hopper_sm90(),
         true,
-    )
+    )?;
+    if !insightface_present(root) {
+        return Err("InsightFace install incomplete: package/module not detected.".to_string());
+    }
+    Ok(())
 }
 
 fn uninstall_insightface(
@@ -4148,6 +4455,16 @@ fn uninstall_insightface(
     _uv_python_install_dir: &str,
 ) -> Result<(), String> {
     pip_uninstall_best_effort(root, py_path, &["insightface", "filterpywhl", "facexlib"]);
+    remove_insightface_site_packages_artifacts(root)?;
+    if insightface_present(root)
+        || pip_has_package(root, "facexlib")
+        || pip_has_package(root, "filterpywhl")
+    {
+        return Err(
+            "Failed to fully remove InsightFace dependencies. Stop ComfyUI and retry."
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -4157,6 +4474,15 @@ fn install_trellis2(
     py_path: &str,
     uv_python_install_dir: &str,
 ) -> Result<(), String> {
+    // Trellis2 stack is pinned to torch280_cu128 in this app.
+    enforce_torch_profile_linux(
+        uv_bin,
+        py_path,
+        root,
+        "torch280_cu128",
+        uv_python_install_dir,
+    )?;
+
     let custom_nodes_dir = root.join("custom_nodes");
     std::fs::create_dir_all(&custom_nodes_dir).map_err(|err| err.to_string())?;
 
@@ -4171,7 +4497,14 @@ fn install_trellis2(
         run_uv_pip_strict(
             uv_bin,
             py_path,
-            &["install", "-r", &trellis_req.to_string_lossy()],
+            &["install", "-r", &trellis_req.to_string_lossy(), "--no-deps"],
+            Some(root),
+            &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+        )?;
+        run_uv_pip_strict(
+            uv_bin,
+            py_path,
+            &["install", "--upgrade", "open3d"],
             Some(root),
             &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
         )?;
@@ -4188,11 +4521,18 @@ fn install_trellis2(
         run_uv_pip_strict(
             uv_bin,
             py_path,
-            &["install", "-r", &geometry_req.to_string_lossy()],
+            &["install", "-r", &geometry_req.to_string_lossy(), "--no-deps"],
             Some(root),
             &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
         )?;
     }
+    run_uv_pip_strict(
+        uv_bin,
+        py_path,
+        &["install", "--upgrade", "tomli"],
+        Some(root),
+        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+    )?;
 
     let ultrashape_dir = custom_nodes_dir.join("ComfyUI-UltraShape1");
     clone_or_update_repo(
@@ -4205,7 +4545,7 @@ fn install_trellis2(
         run_uv_pip_strict(
             uv_bin,
             py_path,
-            &["install", "-r", &ultrashape_req.to_string_lossy()],
+            &["install", "-r", &ultrashape_req.to_string_lossy(), "--no-deps"],
             Some(&ultrashape_dir),
             &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
         )?;
@@ -4227,6 +4567,15 @@ fn install_trellis2(
             &ultrashape_model_file,
         )?;
     }
+
+    // Re-assert stack after Trellis requirements/custom nodes.
+    enforce_torch_profile_linux(
+        uv_bin,
+        py_path,
+        root,
+        "torch280_cu128",
+        uv_python_install_dir,
+    )?;
 
     Ok(())
 }

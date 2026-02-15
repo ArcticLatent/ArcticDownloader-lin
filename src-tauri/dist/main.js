@@ -36,6 +36,8 @@ const state = {
   comfyLatestVersion: null,
   comfyLastUpdateDetailLogKey: "",
   comfyTorchProfileLocked: false,
+  comfyAddonLoadSeq: 0,
+  comfyTorchRecommendedBase: "Recommended 'Torch 2.8.0 + cu128' for your GPU",
 };
 
 const ramOptions = [
@@ -350,6 +352,15 @@ function normalizeSlashes(value) {
   return normalized;
 }
 
+function setTorchRecommendedDetecting(detecting) {
+  if (!el.comfyTorchRecommended) return;
+  if (detecting) {
+    el.comfyTorchRecommended.textContent = "Detecting torch/add-ons for selected install...";
+  } else {
+    el.comfyTorchRecommended.textContent = state.comfyTorchRecommendedBase;
+  }
+}
+
 function parentDir(path) {
   const normalized = normalizeSlashes(path);
   const idx = normalized.lastIndexOf(PATH_SEP);
@@ -449,8 +460,19 @@ function resetComfySelectionsToDefaults() {
 async function loadInstalledAddonState(comfyuiRoot) {
   const root = String(comfyuiRoot || el.comfyRoot.value || "").trim();
   if (!root) return;
+  const loadSeq = ++state.comfyAddonLoadSeq;
   try {
     const installed = await invoke("get_comfyui_addon_state", { comfyuiRoot: root });
+    if (loadSeq !== state.comfyAddonLoadSeq) return;
+    const selectedRoot = normalizeSlashes(String(
+      el.comfyExistingInstall?.value || el.comfyRoot.value || "",
+    ).trim());
+    if (selectedRoot && normalizeSlashes(root) !== selectedRoot) return;
+    const installedTorchProfile = String(installed?.torch_profile || "").trim();
+    if (installedTorchProfile && comfyTorchProfiles.some((x) => x.value === installedTorchProfile)) {
+      el.comfyTorchProfile.value = installedTorchProfile;
+      state.comfyTorchProfileLocked = true;
+    }
     if (el.addonSageAttention) el.addonSageAttention.checked = Boolean(installed?.sage_attention);
     if (el.addonSageAttention3) el.addonSageAttention3.checked = Boolean(installed?.sage_attention3);
     if (el.addonFlashAttention) el.addonFlashAttention.checked = Boolean(installed?.flash_attention);
@@ -680,6 +702,12 @@ function updateComfyModeUi() {
       ? "Select base folder (e.g. Documents). App will create /ComfyUI inside it."
       : "Base folder containing ComfyUI installations";
   }
+  if (el.comfyTorchProfile) {
+    el.comfyTorchProfile.disabled = !installMode;
+    el.comfyTorchProfile.title = installMode
+      ? ""
+      : "Torch stack is locked in Manage Existing mode.";
+  }
 }
 
 async function refreshExistingInstallations(basePath, preferredRoot = null) {
@@ -750,12 +778,17 @@ async function refreshExistingInstallations(basePath, preferredRoot = null) {
 async function applySelectedExistingInstallation(rootPath) {
   const root = normalizeSlashes(rootPath);
   if (!root) return;
+  setTorchRecommendedDetecting(true);
   el.comfyRoot.value = root;
   el.comfyRootLora.value = root;
-  await invoke("set_comfyui_root", { comfyuiRoot: root });
-  await loadInstalledAddonState(root);
-  setComfyQuickActions(el.comfyInstallRoot.value, root);
-  await refreshComfyUiUpdateStatus(root);
+  try {
+    await invoke("set_comfyui_root", { comfyuiRoot: root });
+    await loadInstalledAddonState(root);
+    setComfyQuickActions(el.comfyInstallRoot.value, root);
+    await refreshComfyUiUpdateStatus(root);
+  } finally {
+    setTorchRecommendedDetecting(false);
+  }
 }
 
 async function refreshComfyUiUpdateStatus(rootPath = null) {
@@ -1503,7 +1536,8 @@ async function bootstrap() {
   const refreshRecommendation = (attempt = 0) => {
     invoke("get_comfyui_install_recommendation")
       .then((reco) => {
-        el.comfyTorchRecommended.textContent = `Recommended '${reco.torch_label}' for your GPU`;
+        state.comfyTorchRecommendedBase = `Recommended '${reco.torch_label}' for your GPU`;
+        setTorchRecommendedDetecting(false);
         state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
         if (!state.comfyTorchProfileLocked && comfyTorchProfiles.some((x) => x.value === reco.torch_profile)) {
           el.comfyTorchProfile.value = reco.torch_profile;
@@ -1514,7 +1548,8 @@ async function bootstrap() {
         }
       })
       .catch((err) => {
-        el.comfyTorchRecommended.textContent = "Recommended 'Torch 2.8.0 + cu128' for your GPU";
+        state.comfyTorchRecommendedBase = "Recommended 'Torch 2.8.0 + cu128' for your GPU";
+        setTorchRecommendedDetecting(false);
         if (!state.comfyTorchProfileLocked) {
           el.comfyTorchProfile.value = "torch280_cu128";
         }
@@ -2235,6 +2270,3 @@ renderTransfers();
 
 // Runtime status polling (low-overhead, non-overlapping) to avoid UI hitching.
 scheduleRuntimeStatusPoll(1800);
-
-
-
