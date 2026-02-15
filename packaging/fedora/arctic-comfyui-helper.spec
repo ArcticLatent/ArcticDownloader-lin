@@ -23,7 +23,7 @@ Native Linux desktop app for installing and managing ComfyUI,
 models, and custom nodes.
 
 %prep
-%autosetup -n ArcticDownloader-lin
+%autosetup -n %{name}-%{version}
 
 %build
 cargo build --release --manifest-path src-tauri/Cargo.toml

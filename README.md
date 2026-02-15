@@ -199,6 +199,34 @@ It will:
 Prerequisite:
 - GitHub CLI authenticated: `gh auth login`
 
+## Automated Linux Release Flow
+
+Linux release scripts are in `scripts/`:
+
+```bash
+# Build + verify + publish GitHub release (Arch + Deb + RPM artifacts)
+bash ./scripts/release-linux.sh --version 0.1.1 --repository ArcticLatent/Arctic-Helper
+```
+
+Build-only:
+
+```bash
+bash ./scripts/build-release-linux.sh --version 0.1.1 --repository ArcticLatent/Arctic-Helper
+```
+
+Verify-only:
+
+```bash
+bash ./scripts/verify-release-linux.sh --version 0.1.1 --tag v0.1.1 --repository ArcticLatent/Arctic-Helper
+```
+
+Linux flow does:
+1. Bump versions in Rust/Tauri/package metadata.
+2. Update Debian changelog entry.
+3. Build Arch (`.pkg.tar.zst`), Debian (`.deb`), and Fedora/RPM (`.rpm`/`.src.rpm`) artifacts.
+4. Generate `SHA256SUMS` + `linux-release.json`.
+5. Create/update GitHub release via `gh`.
+
 ## Repo Notes
 
 - This is the internal repo and can include technical/implementation notes.

@@ -2,6 +2,17 @@
 
 This directory contains native packaging scaffolds for Linux distributions.
 
+## Quick build script
+
+From repo root, use:
+
+- `bash packaging/build-packages.sh arch`
+- `bash packaging/build-packages.sh deb`
+- `bash packaging/build-packages.sh rpm`
+- `bash packaging/build-packages.sh all`
+
+Artifacts are copied to `packaging/out/`.
+
 ## Shared assets
 
 - Desktop entry: `packaging/linux/io.github.ArcticHelper.desktop`
@@ -11,23 +22,19 @@ This directory contains native packaging scaffolds for Linux distributions.
 
 - File: `packaging/arch/PKGBUILD`
 - Build from repo root:
-  - `cd packaging/arch`
-  - `makepkg -si`
+  - `bash packaging/build-packages.sh arch`
 
 ## Debian/Ubuntu (`.deb`)
 
 - Directory: `packaging/debian/debian`
 - Build from repo root:
-  - `cp -a packaging/debian/debian ./debian`
-  - `dpkg-buildpackage -us -uc -b`
+  - `bash packaging/build-packages.sh deb`
 
 ## Fedora/RHEL (`.rpm`)
 
 - File: `packaging/fedora/arctic-comfyui-helper.spec`
-- Typical workflow:
-  - `tar --exclude-vcs -czf ~/rpmbuild/SOURCES/arctic-comfyui-helper-0.1.0.tar.gz .`
-  - `cp packaging/fedora/arctic-comfyui-helper.spec ~/rpmbuild/SPECS/`
-  - `rpmbuild -ba ~/rpmbuild/SPECS/arctic-comfyui-helper.spec`
+- Build from repo root:
+  - `bash packaging/build-packages.sh rpm`
 
 ## Notes
 
