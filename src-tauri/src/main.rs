@@ -4241,6 +4241,7 @@ fn restart_comfyui_after_mutation(
         return Ok(());
     }
     start_comfyui_root_impl(app, state, None)?;
+    wait_for_comfyui_start(state, Duration::from_secs(45))?;
     update_tray_comfy_status(app, true);
     emit_comfyui_runtime_event(
         app,

@@ -249,6 +249,14 @@ function showConfirmDialog(message) {
   });
 }
 
+function waitForNextPaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolve);
+    });
+  });
+}
+
 function setProgress(text) {
   el.progressLine.textContent = text || "Idle";
 }
@@ -582,11 +590,11 @@ async function applyAttentionBackendFromToggle(changedBox) {
     return;
   }
 
+  await waitForNextPaint();
   state.comfyAttentionBusy = true;
   updateComfyRuntimeButton();
   setToggleBusy(changedBox, true);
   try {
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
     const result = await invoke("apply_attention_backend_change", {
       request: {
         comfyuiRoot: root,
@@ -628,11 +636,11 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
     return;
   }
 
+  await waitForNextPaint();
   state.comfyComponentBusy = true;
   updateComfyRuntimeButton();
   setToggleBusy(changedBox, true);
   try {
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
     const result = await invoke("apply_comfyui_component_toggle", {
       request: {
         comfyuiRoot: root,
@@ -702,6 +710,22 @@ function scheduleRuntimeStatusPoll(delayMs = null) {
     scheduleRuntimeStatusPoll();
   }, delay);
 }
+
+async function openComfyWhenReady(timeoutMs = 45000) {
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < timeoutMs) {
+    try {
+      const status = await invoke("get_comfyui_runtime_status");
+      if (status?.running) {
+        await invoke("open_external_url", { url: "http://127.0.0.1:8188" });
+        return true;
+      }
+    } catch (_) {}
+    await new Promise((resolve) => window.setTimeout(resolve, 450));
+  }
+  return false;
+}
+
 function updateComfyModeUi() {
   const installMode = state.comfyMode !== "manage";
   const hasSelectedInstall = Boolean(String(el.comfyExistingInstall?.value || "").trim());
@@ -2223,9 +2247,7 @@ async function initEventListeners() {
       return;
     }
     if (phase === "restarted_after_changes") {
-      window.setTimeout(() => {
-        invoke("open_external_url", { url: "http://127.0.0.1:8188" }).catch(() => {});
-      }, 700);
+      openComfyWhenReady().catch(() => {});
       return;
     }
     if (phase === "stopped" || phase === "start_failed" || phase === "stop_failed") {
