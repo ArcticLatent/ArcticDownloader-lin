@@ -1776,7 +1776,23 @@ el.comfyExistingInstall?.addEventListener("change", async () => {
     refreshComfyUiUpdateStatus("").catch(() => {});
     return;
   }
+  const previousRoot = String(el.comfyRoot?.value || "").trim();
+  const switchingInstall = previousRoot
+    && normalizeSlashes(previousRoot) !== normalizeSlashes(selectedRoot);
   try {
+    if (state.comfyMode === "manage" && switchingInstall) {
+      await refreshComfyRuntimeStatus().catch(() => {});
+      if (state.comfyRuntimeRunning) {
+        logComfyLine("ComfyUI server is running. Stopping it before switching managed install...");
+        await invoke("stop_comfyui_root");
+        await refreshComfyRuntimeStatus().catch(() => {});
+        if (state.comfyRuntimeRunning) {
+          logComfyLine("ComfyUI is still running. Stop it first, then switch install.");
+          return;
+        }
+        logComfyLine("ComfyUI server stopped.");
+      }
+    }
     await applySelectedExistingInstallation(selectedRoot);
     if (state.comfyMode === "manage") {
       logComfyLine(`Now managing: ${selectedRoot}`);
@@ -1902,7 +1918,10 @@ el.comfyOpenInstallFolder?.addEventListener("click", async () => {
 });
 
 el.comfyStartInstalled?.addEventListener("click", async () => {
-  const path = String(el.comfyStartInstalled.dataset.path || "").trim();
+  const preferredManageRoot = state.comfyMode === "manage"
+    ? String(el.comfyExistingInstall?.value || "").trim()
+    : "";
+  const path = String(preferredManageRoot || el.comfyStartInstalled.dataset.path || "").trim();
   if (!path) return;
   try {
     if (state.comfyRuntimeRunning) {

@@ -1919,17 +1919,17 @@ fn install_custom_node(
     Ok(())
 }
 
-fn selected_attention_backend(request: &ComfyInstallRequest) -> Option<&'static str> {
+fn selected_attention_backend(request: &ComfyInstallRequest) -> &'static str {
     if request.include_flash_attention {
-        Some("flash")
+        "flash"
     } else if request.include_sage_attention3 {
-        Some("sage3")
+        "sage3"
     } else if request.include_sage_attention {
-        Some("sage")
+        "sage"
     } else if request.include_nunchaku {
-        Some("nunchaku")
+        "nunchaku"
     } else {
-        None
+        "none"
     }
 }
 
@@ -2654,7 +2654,7 @@ async fn start_comfyui_install(
                             .unwrap_or_else(|| get_comfyui_install_recommendation().torch_profile),
                     );
                     settings.comfyui_attention_backend =
-                        selected_attention_backend(&request).map(|value| value.to_string());
+                        Some(selected_attention_backend(&request).to_string());
                 });
                 let _ = app_for_task.emit(
                     "comfyui-install-progress",
@@ -2729,11 +2729,22 @@ fn set_comfyui_root(
             &std::fs::canonicalize(&path).unwrap_or(path),
         ))
     };
+    let detected_attention = normalized
+        .as_ref()
+        .map(|root| detect_launch_attention_backend_for_root(root).unwrap_or_else(|| "none".to_string()));
+    let detected_profile = normalized
+        .as_ref()
+        .and_then(|root| detect_torch_profile_for_root(root));
+
     state
         .context
         .config
         .update_settings(|settings| {
             settings.comfyui_root = normalized.clone();
+            settings.comfyui_attention_backend = detected_attention
+                .clone()
+                .or_else(|| Some("none".to_string()));
+            settings.comfyui_torch_profile = detected_profile.clone();
         })
         .map_err(|err| err.to_string())
 }
@@ -3613,23 +3624,33 @@ fn start_comfyui_root_impl(
     }
     apply_cuda_runtime_env_for_root(&mut cmd, &root);
 
-    let same_as_configured_root = settings
+    let configured_root_matches = settings
         .comfyui_root
         .as_ref()
-        .map(|p| normalize_canonical_path(&std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
-        == Some(root.clone());
+        .map(|configured_root| {
+            normalize_canonical_path(
+                &std::fs::canonicalize(configured_root)
+                    .unwrap_or_else(|_| configured_root.clone()),
+            ) == root
+        })
+        .unwrap_or(false);
+
     let effective_attention = {
-        let configured = if same_as_configured_root {
+        let configured = if configured_root_matches {
             settings.comfyui_attention_backend.clone()
         } else {
             None
         };
         match configured.as_deref() {
+            Some("none") => None,
             Some("sage3") => {
                 if python_module_importable(&root, "sageattn3") {
                     Some("sage3".to_string())
                 } else {
-                    detect_launch_attention_backend_for_root(&root)
+                    return Err(
+                        "SageAttention3 is selected but not importable in this install. Re-apply SageAttention3 for this ComfyUI root."
+                            .to_string(),
+                    );
                 }
             }
             Some("sage") => {
@@ -3638,26 +3659,30 @@ fn start_comfyui_root_impl(
                 {
                     Some("sage".to_string())
                 } else {
-                    detect_launch_attention_backend_for_root(&root)
+                    return Err(
+                        "SageAttention is selected but not importable in this install. Re-apply SageAttention for this ComfyUI root."
+                            .to_string(),
+                    );
                 }
             }
             Some("flash") => {
                 if python_module_importable(&root, "flash_attn") {
                     Some("flash".to_string())
                 } else {
-                    detect_launch_attention_backend_for_root(&root)
+                    return Err(
+                        "FlashAttention is selected but not importable in this install. Re-apply FlashAttention for this ComfyUI root."
+                            .to_string(),
+                    );
                 }
             }
             Some("nunchaku") => {
                 if nunchaku_backend_present(&root) {
                     Some("nunchaku".to_string())
                 } else {
-                    emit_comfyui_runtime_event(
-                        app,
-                        "warn",
-                        "Nunchaku selected but backend is not installed correctly; starting without Nunchaku attention backend.",
+                    return Err(
+                        "Nunchaku is selected but backend is not installed correctly for this ComfyUI root. Re-apply Nunchaku."
+                            .to_string(),
                     );
-                    None
                 }
             }
             _ => detect_launch_attention_backend_for_root(&root),
@@ -3667,6 +3692,14 @@ fn start_comfyui_root_impl(
     let launch_args = comfyui_launch_args(
         settings.comfyui_pinned_memory_enabled,
         effective_attention.as_deref(),
+    );
+    emit_comfyui_runtime_event(
+        app,
+        "launch_args",
+        format!(
+            "Launching with attention backend: {}",
+            effective_attention.as_deref().unwrap_or("none")
+        ),
     );
     cmd.args(launch_args);
     cmd.current_dir(root);
@@ -3736,6 +3769,9 @@ fn spawn_comfyui_start_monitor(app: &AppHandle, instance_name: String) {
                     "started",
                     format!("{instance_name} started."),
                 );
+                if let Err(err) = open::that("http://127.0.0.1:8188") {
+                    log::warn!("Failed to open ComfyUI in browser: {err}");
+                }
             }
             Err(err) => {
                 let running = comfyui_runtime_running(&state);
@@ -4157,19 +4193,17 @@ fn get_comfyui_addon_state(
         .as_ref()
         .map(|p| normalize_canonical_path(&std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
         == Some(root.clone());
-    let has_sage3 =
-        python_module_importable(&root, "sageattn3") || pip_has_package(&root, "sageattn3");
+    let has_sage3 = python_module_importable(&root, "sageattn3");
     let has_sage =
-        python_module_importable(&root, "sageattention") || pip_has_package(&root, "sageattention");
-    let has_flash = python_module_importable(&root, "flash_attn")
-        || pip_has_package(&root, "flash-attn")
-        || pip_has_package(&root, "flash_attn");
+        python_module_importable(&root, "sageattention") || python_module_importable(&root, "sageattn3");
+    let has_flash = python_module_importable(&root, "flash_attn");
     let has_nunchaku = python_module_importable(&root, "nunchaku")
         || pip_has_package(&root, "nunchaku")
         || custom_node_exists(&root, "nunchaku_nodes")
         || custom_node_exists(&root, "ComfyUI-nunchaku");
     let active_attention: String = if same_as_configured_root {
         match settings.comfyui_attention_backend.as_deref() {
+            Some("none") => "none".to_string(),
             Some("flash") if has_flash => "flash".to_string(),
             Some("sage3") if has_sage3 => "sage3".to_string(),
             Some("sage") if has_sage => "sage".to_string(),
@@ -4403,7 +4437,7 @@ fn apply_attention_backend_change(
         "sage3" => Some("sage3".to_string()),
         "flash" => Some("flash".to_string()),
         "nunchaku" => Some("nunchaku".to_string()),
-        _ => None,
+        _ => Some("none".to_string()),
     };
     let _ = state
         .context
