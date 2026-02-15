@@ -1,6 +1,6 @@
 ﻿# Arctic ComfyUI Helper (Private Technical README)
 
-This repository (`ArcticDownloader-win`) is the private/source repo for the Windows app.
+This repository (`ArcticDownloader-lin`) is the private/source repo for the Linux app.
 
 Public release repo: `https://github.com/ArcticLatent/Arctic-Helper`
 
@@ -53,7 +53,7 @@ ComfyUI install mode behavior:
 Catalog source behavior:
 - Bundled fallback: `data/catalog.json`
 - Remote default:
-  `https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/data/catalog.json`
+  `https://raw.githubusercontent.com/ArcticLatent/Arctic-Helper/refs/heads/main/assets/catalog.json`
 - ETag-based refresh and cache write are supported
 
 Model/LoRA downloader:

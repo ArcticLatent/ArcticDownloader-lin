@@ -10,7 +10,7 @@ use std::{
 
 const SETTINGS_FILE: &str = "settings.json";
 const FALLBACK_REMOTE_CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/ArcticLatent/ArcticDownloader-flatpak/refs/heads/main/data/catalog.json";
+    "https://raw.githubusercontent.com/ArcticLatent/Arctic-Helper/refs/heads/main/assets/catalog.json";
 
 #[derive(Debug)]
 pub struct ConfigStore {
@@ -23,8 +23,8 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn new() -> Result<Self> {
-        let base =
-            BaseDirs::new().ok_or_else(|| anyhow!("unable to resolve base directories for {APP_ID}"))?;
+        let base = BaseDirs::new()
+            .ok_or_else(|| anyhow!("unable to resolve base directories for {APP_ID}"))?;
         let root_dir = base.data_local_dir().join(APP_ID);
         let config_dir = root_dir.join("config");
         let state_dir = root_dir.join("state");

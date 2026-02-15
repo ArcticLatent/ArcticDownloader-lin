@@ -1,0 +1,49 @@
+# Maintainer: Arctic Latent
+pkgname=arctic-comfyui-helper
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='ComfyUI installer and model manager'
+arch=('x86_64')
+url='https://github.com/ArcticLatent/ArcticDownloader-lin'
+license=('custom')
+options=('!buildflags')
+depends=(
+  'gtk3'
+  'webkit2gtk-4.1'
+  'libappindicator'
+)
+makedepends=(
+  'cargo'
+  'rust'
+  'pkgconf'
+)
+source=()
+sha256sums=()
+
+prepare() {
+  cd "$startdir/../.."
+}
+
+build() {
+  cd "$startdir/../.."
+  export CARGO_TARGET_DIR="$srcdir/target"
+  export RUSTFLAGS="-C link-arg=-fuse-ld=bfd"
+  cargo build --release --manifest-path src-tauri/Cargo.toml
+}
+
+package() {
+  cd "$startdir/../.."
+  export CARGO_TARGET_DIR="$srcdir/target"
+
+  install -Dm755 "$CARGO_TARGET_DIR/release/Arctic-ComfyUI-Helper" \
+    "$pkgdir/usr/bin/arctic-comfyui-helper"
+
+  install -Dm644 packaging/linux/io.github.ArcticHelper.desktop \
+    "$pkgdir/usr/share/applications/io.github.ArcticHelper.desktop"
+
+  install -Dm644 src-tauri/dist/icon.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.ArcticHelper.svg"
+
+  install -Dm644 README.public.md \
+    "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

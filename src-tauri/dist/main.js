@@ -1,6 +1,9 @@
 const invoke = window.__TAURI__?.core?.invoke;
 const listen = window.__TAURI__?.event?.listen || window.__TAURI__?.core?.listen;
 const DOT_SEP = " \u2022 ";
+const IS_WINDOWS = typeof navigator !== "undefined"
+  && String(navigator.userAgent || "").toLowerCase().includes("windows");
+const PATH_SEP = IS_WINDOWS ? "\\" : "/";
 const state = {
   catalog: null,
   settings: null,
@@ -339,15 +342,25 @@ function updateUpdateButton() {
 function normalizeSlashes(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
-  const withoutPrefix = raw.startsWith("\\\\?\\")
-    ? raw.slice(4)
-    : (raw.startsWith("\\?\\") ? raw.slice(3) : raw);
-  return withoutPrefix.replace(/\//g, "\\").replace(/[\\]+/g, "\\");
+  const withoutPrefix = IS_WINDOWS
+    ? (raw.startsWith("\\\\?\\")
+      ? raw.slice(4)
+      : (raw.startsWith("\\?\\") ? raw.slice(3) : raw))
+    : raw;
+  const normalized = withoutPrefix.replace(/[\\/]+/g, PATH_SEP);
+  if (!IS_WINDOWS) {
+    const nestedHome = `${PATH_SEP}src-tauri${PATH_SEP}home${PATH_SEP}`;
+    const idx = normalized.indexOf(nestedHome);
+    if (idx >= 0) {
+      return normalized.slice(idx + `${PATH_SEP}src-tauri`.length);
+    }
+  }
+  return normalized;
 }
 
 function parentDir(path) {
   const normalized = normalizeSlashes(path);
-  const idx = normalized.lastIndexOf("\\");
+  const idx = normalized.lastIndexOf(PATH_SEP);
   if (idx <= 0) return normalized;
   return normalized.slice(0, idx);
 }
@@ -378,7 +391,7 @@ function newestComfyInstall(installs) {
 function comfyInstallNameFromRoot(rootPath) {
   const normalized = normalizeSlashes(String(rootPath || "").trim());
   if (!normalized) return "ComfyUI";
-  const parts = normalized.split("\\").filter(Boolean);
+  const parts = normalized.split(PATH_SEP).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : "ComfyUI";
 }
 
@@ -1523,6 +1536,8 @@ async function bootstrap() {
   }
   if (settings.comfyui_install_base) {
     let effectiveBase = normalizeSlashes(settings.comfyui_install_base);
+    el.comfyInstallRoot.value = effectiveBase;
+    await invoke("set_comfyui_install_base", { comfyuiInstallBase: effectiveBase }).catch(() => {});
     try {
       const inspection = await invoke("inspect_comfyui_path", { path: effectiveBase });
       const selectedNorm = normalizeSlashes(inspection?.selected || effectiveBase);
@@ -2074,23 +2089,26 @@ async function initEventListeners() {
         updateComfyInstallButton();
         el.comfyResumeBanner?.classList.add("hidden");
         if (typeof p.folder === "string" && p.folder.trim()) {
-          const installedRoot = p.folder.trim();
-          const installDir = String(p.artifact || "").trim();
-          el.comfyRoot.value = installedRoot;
-          el.comfyRootLora.value = installedRoot;
-          if (installDir) {
-            el.comfyInstallRoot.value = installDir;
-            invoke("set_comfyui_install_base", { comfyuiInstallBase: installDir }).catch(() => {});
-          }
-          setComfyQuickActions(installDir, installedRoot);
-          invoke("set_comfyui_root", { comfyuiRoot: installedRoot }).catch((err) => {
-            logComfyLine(`Failed to auto-set ComfyUI root: ${err}`);
+          const installedRoot = normalizeSlashes(p.folder.trim());
+          const emittedBase = normalizeSlashes(String(p.artifact || "").trim());
+          const installBase = emittedBase || parentDir(installedRoot) || installedRoot;
+
+          const finalizeInstalledSelection = async () => {
+            await syncComfyInstallSelection(installedRoot, true);
+            state.comfyMode = "manage";
+            if (el.comfyMode) el.comfyMode.value = "manage";
+            await refreshExistingInstallations(installBase, installedRoot).catch(() => []);
+            await applySelectedExistingInstallation(installedRoot).catch(() => {});
+            await refreshComfyUiUpdateStatus(installedRoot).catch(() => {});
+            setComfyQuickActions(installBase, installedRoot);
+            await refreshComfyRuntimeStatus().catch(() => {});
+            updateComfyModeUi();
+          };
+
+          finalizeInstalledSelection().catch((err) => {
+            logComfyLine(`Failed to finalize installed ComfyUI selection: ${err}`);
+            updateComfyModeUi();
           });
-          loadInstalledAddonState(installedRoot).catch(() => {});
-          refreshExistingInstallations(installDir, installedRoot).catch(() => {});
-          state.comfyMode = "manage";
-          if (el.comfyMode) el.comfyMode.value = "manage";
-          updateComfyModeUi();
         }
         return;
       }
@@ -2215,11 +2233,6 @@ renderTransfers();
 
 // Runtime status polling (low-overhead, non-overlapping) to avoid UI hitching.
 scheduleRuntimeStatusPoll(1800);
-
-
-
-
-
 
 
 

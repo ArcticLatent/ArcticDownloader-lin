@@ -9,7 +9,9 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{fs, io::AsyncWriteExt, process::Command, runtime::Runtime};
+#[cfg(target_os = "windows")]
+use tokio::process::Command;
+use tokio::{fs, io::AsyncWriteExt, runtime::Runtime};
 
 const DEFAULT_UPDATE_MANIFEST_URL: &str =
     "https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/update.json";
