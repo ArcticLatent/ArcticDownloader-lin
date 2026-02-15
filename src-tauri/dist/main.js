@@ -237,13 +237,15 @@ function showConfirmDialog(message) {
     };
 
     messageEl.textContent = String(message || "Are you sure?");
-    overlay.classList.remove("hidden");
-    overlay.setAttribute("aria-hidden", "false");
     yesBtn.addEventListener("click", onYes);
     noBtn.addEventListener("click", onNo);
     overlay.addEventListener("click", onOverlay);
     window.addEventListener("keydown", onKeyDown);
-    yesBtn.focus();
+    window.requestAnimationFrame(() => {
+      overlay.classList.remove("hidden");
+      overlay.setAttribute("aria-hidden", "false");
+      window.requestAnimationFrame(() => yesBtn.focus());
+    });
   });
 }
 
@@ -498,9 +500,7 @@ function updateComfyRuntimeButton() {
   const starting = Boolean(state.comfyRuntimeStarting);
   const busy = Boolean(
     state.comfyAttentionBusy
-    || state.comfyComponentBusy
-    || state.comfyInstallBusy
-    || state.comfyUpdateBusy,
+    || state.comfyComponentBusy,
   );
   const target = String(state.comfyRuntimeTarget || "").trim();
   if (starting) {
@@ -586,6 +586,7 @@ async function applyAttentionBackendFromToggle(changedBox) {
   updateComfyRuntimeButton();
   setToggleBusy(changedBox, true);
   try {
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
     const result = await invoke("apply_attention_backend_change", {
       request: {
         comfyuiRoot: root,
@@ -631,6 +632,7 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
   updateComfyRuntimeButton();
   setToggleBusy(changedBox, true);
   try {
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
     const result = await invoke("apply_comfyui_component_toggle", {
       request: {
         comfyuiRoot: root,
@@ -2212,18 +2214,24 @@ async function initEventListeners() {
         updateComfyRuntimeButton();
         return;
       }
-      if (phase === "started") {
-        state.comfyRuntimeTarget = "";
-        state.comfyRuntimeStarting = false;
-        state.comfyRuntimeRunning = true;
-        updateComfyRuntimeButton();
-        refreshComfyRuntimeStatus().catch(() => {});
-        return;
-      }
-      if (phase === "stopped" || phase === "start_failed" || phase === "stop_failed") {
-        state.comfyRuntimeTarget = "";
-        state.comfyRuntimeStarting = false;
-        state.comfyRuntimeRunning = false;
+    if (phase === "started") {
+      state.comfyRuntimeTarget = "";
+      state.comfyRuntimeStarting = false;
+      state.comfyRuntimeRunning = true;
+      updateComfyRuntimeButton();
+      refreshComfyRuntimeStatus().catch(() => {});
+      return;
+    }
+    if (phase === "restarted_after_changes") {
+      window.setTimeout(() => {
+        invoke("open_external_url", { url: "http://127.0.0.1:8188" }).catch(() => {});
+      }, 700);
+      return;
+    }
+    if (phase === "stopped" || phase === "start_failed" || phase === "stop_failed") {
+      state.comfyRuntimeTarget = "";
+      state.comfyRuntimeStarting = false;
+      state.comfyRuntimeRunning = false;
         updateComfyRuntimeButton();
         refreshComfyRuntimeStatus().catch(() => {});
       }
