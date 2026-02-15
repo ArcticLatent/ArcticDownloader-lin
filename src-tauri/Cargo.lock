@@ -155,6 +155,7 @@ dependencies = [
  "arctic-downloader",
  "env_logger",
  "fs2",
+ "glib",
  "log",
  "open",
  "reqwest",

@@ -5047,6 +5047,18 @@ fn show_main_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn main_window_icon() -> Option<Image<'static>> {
+    static MAIN_ICON: OnceLock<Option<Image<'static>>> = OnceLock::new();
+    MAIN_ICON
+        .get_or_init(|| {
+            Image::from_bytes(include_bytes!("../icons/icon.png"))
+                .ok()
+                .or_else(|| Image::from_bytes(include_bytes!("../icons/favicon.ico")).ok())
+                .or_else(|| Image::from_bytes(include_bytes!("../icons/icon.ico")).ok())
+        })
+        .clone()
+}
+
 fn stopped_tray_icon() -> Option<Image<'static>> {
     static STOPPED_ICON: OnceLock<Option<Image<'static>>> = OnceLock::new();
     STOPPED_ICON
@@ -5242,6 +5254,7 @@ fn main() {
         if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
             std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
         }
+        install_linux_gdk_log_filter();
     }
 
     let nerdstats = std::env::args().any(|arg| arg.eq_ignore_ascii_case("--nerdstats"));
@@ -5271,6 +5284,9 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    let mut tauri_context = tauri::generate_context!();
+    tauri_context.set_default_window_icon(main_window_icon());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -5344,7 +5360,7 @@ fn main() {
             pick_folder,
             cancel_active_download
         ])
-        .run(tauri::generate_context!())
+        .run(tauri_context)
         .expect("failed to run tauri application");
 }
 
@@ -5364,4 +5380,37 @@ fn tray_enabled_for_platform() -> bool {
     {
         true
     }
+}
+
+#[cfg(target_os = "linux")]
+fn install_linux_gdk_log_filter() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    if INSTALLED.get().is_some() {
+        return;
+    }
+
+    glib::log_set_writer_func(|level, fields| {
+        let mut domain: Option<&str> = None;
+        let mut message: Option<&str> = None;
+        for field in fields {
+            match field.key() {
+                "GLIB_DOMAIN" => domain = field.value_str(),
+                "MESSAGE" => message = field.value_str(),
+                _ => {}
+            }
+        }
+
+        if matches!(level, glib::LogLevel::Critical)
+            && domain == Some("Gdk")
+            && message
+                .map(|m| m.contains("gdk_window_thaw_toplevel_updates"))
+                .unwrap_or(false)
+        {
+            return glib::LogWriterOutput::Handled;
+        }
+
+        glib::log_writer_default(level, fields)
+    });
+
+    let _ = INSTALLED.set(());
 }
