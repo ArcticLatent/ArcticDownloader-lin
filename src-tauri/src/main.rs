@@ -2062,6 +2062,7 @@ fn run_comfyui_install_linux(
     cancel: &CancellationToken,
 ) -> Result<PathBuf, String> {
     let mut summary: Vec<InstallSummaryItem> = Vec::new();
+    let include_insight_face = request.include_insight_face || request.include_nunchaku;
     let selected_attention = [
         request.include_sage_attention,
         request.include_sage_attention3,
@@ -2259,9 +2260,17 @@ fn run_comfyui_install_linux(
             hopper_sm90,
         )?;
     }
-    if request.include_insight_face {
+    if include_insight_face {
         write_install_state(&install_root, "in_progress", "addon_insightface");
-        emit_install_event(app, "step", "Installing InsightFace...");
+        if request.include_nunchaku && !request.include_insight_face {
+            emit_install_event(
+                app,
+                "step",
+                "Installing InsightFace (required by Nunchaku)...",
+            );
+        } else {
+            emit_install_event(app, "step", "Installing InsightFace...");
+        }
         install_linux_wheel_for_profile(
             &comfy_dir,
             &py_exe.to_string_lossy(),
@@ -4373,6 +4382,7 @@ fn apply_attention_backend_change(
                 Some(&root),
                 &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
             )?;
+            install_insightface(&root, &uv_bin, &py_path, &uv_python_install_dir)?;
             install_linux_wheel_for_profile(
                 &root,
                 &py_path,
@@ -4705,6 +4715,14 @@ async fn apply_comfyui_component_toggle(
                         )?;
                         Ok("Installed InsightFace.".to_string())
                     } else {
+                        if detect_launch_attention_backend_for_root(&root_clone).as_deref()
+                            == Some("nunchaku")
+                        {
+                            return Err(
+                                "Cannot remove InsightFace while Nunchaku is selected. Switch attention backend first."
+                                    .to_string(),
+                            );
+                        }
                         uninstall_insightface(
                             &root_clone,
                             &uv_bin_clone,

@@ -1046,6 +1046,16 @@ function applyComfyAddonRules() {
       el.addonTrellis2.checked = false;
     }
   }
+
+  if (el.addonNunchaku && el.addonInsightFace) {
+    const nunchakuSelected = Boolean(el.addonNunchaku.checked);
+    if (nunchakuSelected) {
+      el.addonInsightFace.checked = true;
+      el.addonInsightFace.disabled = true;
+    } else {
+      el.addonInsightFace.disabled = false;
+    }
+  }
 }
 
 function trimDescription(text, max = 520) {
@@ -1848,6 +1858,7 @@ el.addonFlashAttention?.addEventListener("change", () => {
   applyAttentionBackendFromToggle(el.addonFlashAttention).catch((err) => logComfyLine(String(err)));
 });
 el.addonNunchaku?.addEventListener("change", () => {
+  applyComfyAddonRules();
   applyAttentionBackendFromToggle(el.addonNunchaku).catch((err) => logComfyLine(String(err)));
 });
 el.addonInsightFace?.addEventListener("change", () => {
