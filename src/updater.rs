@@ -6,13 +6,16 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
+    ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{fs, io::AsyncWriteExt, runtime::Runtime};
+use tokio::{fs, io::AsyncWriteExt, process::Command, runtime::Runtime};
 
 const DEFAULT_UPDATE_MANIFEST_URL: &str =
     "https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/update.json";
+const DEFAULT_LINUX_RELEASE_MANIFEST_URL: &str =
+    "https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/linux-release.json";
 const UPDATE_CACHE_DIR: &str = "updates";
 const FALLBACK_PACKAGE_NAME: &str = "ArcticDownloader-lin-update.bin";
 
@@ -37,6 +40,23 @@ struct UpdateManifest {
     sha256: String,
     #[serde(default)]
     notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinuxReleaseManifest {
+    version: String,
+    #[allow(dead_code)]
+    tag: Option<String>,
+    #[allow(dead_code)]
+    repository: Option<String>,
+    assets: Vec<LinuxReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinuxReleaseAsset {
+    name: String,
+    sha256: String,
+    download_url: String,
 }
 
 #[derive(Clone)]
@@ -207,7 +227,11 @@ fn resolve_manifest_url() -> String {
         }
     }
 
-    DEFAULT_UPDATE_MANIFEST_URL.to_string()
+    if cfg!(target_os = "linux") {
+        DEFAULT_LINUX_RELEASE_MANIFEST_URL.to_string()
+    } else {
+        DEFAULT_UPDATE_MANIFEST_URL.to_string()
+    }
 }
 
 fn parse_version(raw: &str) -> Option<Version> {
@@ -245,12 +269,28 @@ async fn fetch_manifest(client: &Client, url: &str) -> Result<UpdateManifest> {
         .context("failed to fetch update manifest")?
         .error_for_status()
         .context("update manifest request returned error status")?;
-
-    let manifest = response
-        .json::<UpdateManifest>()
+    let bytes = response
+        .bytes()
         .await
-        .context("failed to parse update manifest JSON")?;
-    Ok(manifest)
+        .context("failed to read update manifest bytes")?;
+
+    if let Ok(legacy) = serde_json::from_slice::<UpdateManifest>(&bytes) {
+        return Ok(legacy);
+    }
+
+    let linux = serde_json::from_slice::<LinuxReleaseManifest>(&bytes)
+        .context("failed to parse update manifest JSON (legacy and linux-release formats)")?;
+    let asset = select_linux_release_asset(&linux)
+        .context("no compatible Linux package artifact found in linux-release manifest")?;
+    let download_url = asset.download_url.clone();
+    let sha256 = asset.sha256.to_ascii_lowercase();
+    let asset_name = asset.name.clone();
+    Ok(UpdateManifest {
+        version: linux.version,
+        download_url,
+        sha256,
+        notes: Some(format!("Selected Linux package asset: {asset_name}")),
+    })
 }
 
 fn installer_file_name(url: &str) -> Option<String> {
@@ -261,6 +301,162 @@ fn installer_file_name(url: &str) -> Option<String> {
 }
 
 async fn run_install_command(path: &Path) -> Result<()> {
-    let _ = path;
-    bail!("auto-install for distribution packages is not implemented in-app yet")
+    let path = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf());
+    let file_name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let file_arg = path.to_string_lossy().to_string();
+
+    if file_name.ends_with(".deb") {
+        run_privileged_install("apt", &["install", "-y", &file_arg]).await?;
+        return Ok(());
+    }
+    if file_name.ends_with(".src.rpm") {
+        bail!("Refusing to auto-install source RPM update package: {}", path.display());
+    }
+    if file_name.ends_with(".rpm") {
+        run_privileged_install("dnf", &["install", "-y", &file_arg]).await?;
+        return Ok(());
+    }
+    if file_name.contains(".pkg.tar") {
+        run_privileged_install("pacman", &["-U", "--noconfirm", &file_arg]).await?;
+        return Ok(());
+    }
+
+    bail!(
+        "Unsupported Linux update package format: {}",
+        path.display()
+    )
+}
+
+async fn run_privileged_install(program: &str, args: &[&str]) -> Result<()> {
+    if run_install_command_direct(program, args).await.is_ok() {
+        return Ok(());
+    }
+
+    let mut sudo_non_interactive = vec!["-n", program];
+    sudo_non_interactive.extend_from_slice(args);
+    if run_install_command_direct("sudo", &sudo_non_interactive)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    if run_install_command_direct("pkexec", &[program])
+        .await
+        .is_ok()
+    {
+        // Defensive noop for weird pkexec policies that reject direct no-arg checks.
+    }
+    let mut pkexec_args = vec![program];
+    pkexec_args.extend_from_slice(args);
+    if run_install_command_direct("pkexec", &pkexec_args).await.is_ok() {
+        return Ok(());
+    }
+
+    let mut sudo_interactive = vec![program];
+    sudo_interactive.extend_from_slice(args);
+    run_install_command_direct("sudo", &sudo_interactive)
+        .await
+        .context("failed to install update package with direct/sudo/pkexec")
+}
+
+async fn run_install_command_direct(program: &str, args: &[&str]) -> Result<()> {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    let output = cmd
+        .output()
+        .await
+        .with_context(|| format!("failed to run install command: {program} {}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("exit status {}", output.status)
+        };
+        bail!(
+            "install command failed: {} {} :: {}",
+            program,
+            args.join(" "),
+            detail
+        );
+    }
+    Ok(())
+}
+
+fn detect_linux_distro_family() -> String {
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let mut id = String::new();
+    let mut id_like = String::new();
+    for line in os_release.lines() {
+        if let Some(value) = line.strip_prefix("ID=") {
+            id = value.trim_matches('"').to_ascii_lowercase();
+        } else if let Some(value) = line.strip_prefix("ID_LIKE=") {
+            id_like = value.trim_matches('"').to_ascii_lowercase();
+        }
+    }
+    let haystack = format!("{id} {id_like}");
+    if haystack.contains("arch") {
+        "arch".to_string()
+    } else if haystack.contains("debian") || haystack.contains("ubuntu") {
+        "debian".to_string()
+    } else if haystack.contains("fedora") || haystack.contains("rhel") || haystack.contains("centos")
+    {
+        "fedora".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn select_linux_release_asset(manifest: &LinuxReleaseManifest) -> Option<&LinuxReleaseAsset> {
+    let distro = detect_linux_distro_family();
+    let arch = std::env::consts::ARCH.to_ascii_lowercase();
+
+    let mut candidates: Vec<&LinuxReleaseAsset> = manifest
+        .assets
+        .iter()
+        .filter(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            if name.ends_with(".src.rpm") {
+                return false;
+            }
+            if arch == "x86_64" {
+                name.contains("x86_64") || name.contains("amd64")
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    let preferred = match distro.as_str() {
+        "arch" => candidates
+            .iter()
+            .find(|asset| asset.name.to_ascii_lowercase().contains(".pkg.tar"))
+            .copied(),
+        "debian" => candidates
+            .iter()
+            .find(|asset| asset.name.to_ascii_lowercase().ends_with(".deb"))
+            .copied(),
+        "fedora" => candidates
+            .iter()
+            .find(|asset| asset.name.to_ascii_lowercase().ends_with(".rpm"))
+            .copied(),
+        _ => None,
+    };
+
+    if preferred.is_some() {
+        return preferred;
+    }
+
+    candidates.sort_by(|a, b| a.name.cmp(&b.name));
+    candidates.into_iter().next()
 }
