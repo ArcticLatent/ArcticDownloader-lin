@@ -7,6 +7,8 @@ TAG=""
 OUTPUT_DIR="dist"
 NOTES_FILE=""
 SKIP_CLEAN=0
+DEB_DISTROBOX="arctic-ubuntu"
+RPM_DISTROBOX="arctic-fedora"
 
 usage() {
   cat <<'USAGE'
@@ -21,6 +23,8 @@ Options:
   --output-dir <path>    Output directory for release artifacts (default: dist).
   --notes-file <path>    Optional markdown notes file copied into output dir.
   --skip-clean           Skip cargo clean.
+  --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
+  --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
   -h, --help             Show help.
 USAGE
 }
@@ -59,6 +63,14 @@ while (($# > 0)); do
       SKIP_CLEAN=1
       shift
       ;;
+    --deb-distrobox)
+      DEB_DISTROBOX="${2:-}"
+      shift 2
+      ;;
+    --rpm-distrobox)
+      RPM_DISTROBOX="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -89,6 +101,8 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGING_DIR="$ROOT_DIR/packaging"
 OUT_ABS_DIR="$ROOT_DIR/$OUTPUT_DIR"
+# Ensure rustup cargo/rustc are visible even when invoked from fish or clean shells.
+export PATH="$HOME/.cargo/bin:$PATH"
 
 if [[ -n "$NOTES_FILE" && ! -f "$NOTES_FILE" ]]; then
   echo "Notes file not found: $NOTES_FILE" >&2
@@ -98,6 +112,7 @@ fi
 require_cmd cargo
 require_cmd sha256sum
 require_cmd bash
+require_cmd distrobox
 
 update_simple_version() {
   local file="$1"
@@ -165,8 +180,27 @@ fi
 rm -rf "$PACKAGING_DIR/out"
 mkdir -p "$OUT_ABS_DIR"
 
-echo "Building Arch/Deb/RPM packages ..."
-(cd "$ROOT_DIR" && bash packaging/build-packages.sh all)
+echo "Building Arch package on host ..."
+(cd "$ROOT_DIR" && bash packaging/build-packages.sh arch)
+
+echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
+distrobox enter "$DEB_DISTROBOX" -- bash -lc "
+  set -euo pipefail
+  export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+  sudo apt purge -y arctic-comfyui-helper || true
+  sudo apt autoremove -y || true
+  cd '$ROOT_DIR'
+  bash packaging/build-packages.sh deb
+"
+
+echo "Building RPM package in distrobox '$RPM_DISTROBOX' ..."
+distrobox enter "$RPM_DISTROBOX" -- bash -lc "
+  set -euo pipefail
+  export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+  sudo dnf remove -y arctic-comfyui-helper || true
+  cd '$ROOT_DIR'
+  bash packaging/build-packages.sh rpm
+"
 
 mapfile -t artifacts < <(find "$PACKAGING_DIR/out" -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' \) | sort)
 if ((${#artifacts[@]} == 0)); then

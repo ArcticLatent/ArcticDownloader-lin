@@ -262,7 +262,6 @@ fn linux_package_sets(distro: &str) -> (Vec<&'static str>, Vec<&'static str>) {
                 "curl",
                 "wget",
                 "python",
-                "python-pip",
                 "base-devel",
                 "cmake",
                 "ninja",
@@ -275,8 +274,6 @@ fn linux_package_sets(distro: &str) -> (Vec<&'static str>, Vec<&'static str>) {
                 "curl",
                 "wget",
                 "python3",
-                "python3-pip",
-                "python3-venv",
                 "build-essential",
                 "cmake",
                 "ninja-build",
@@ -289,7 +286,6 @@ fn linux_package_sets(distro: &str) -> (Vec<&'static str>, Vec<&'static str>) {
                 "curl",
                 "wget",
                 "python3",
-                "python3-pip",
                 "gcc",
                 "gcc-c++",
                 "make",
@@ -303,6 +299,9 @@ fn linux_package_sets(distro: &str) -> (Vec<&'static str>, Vec<&'static str>) {
 }
 
 fn linux_package_installed(distro: &str, package: &str) -> bool {
+    if package == "wget" && command_available("wget", &["--version"]) {
+        return true;
+    }
     let probe = match distro {
         "arch" => run_command_capture("pacman", &["-Q", package], None),
         "debian" => run_command_capture("dpkg", &["-s", package], None),
@@ -933,13 +932,12 @@ fn run_comfyui_preflight(
                     format!("{} prerequisites are installed.", scan.distro),
                 );
             } else {
-                ok = false;
                 push_preflight(
                     &mut items,
-                    "fail",
+                    "warn",
                     "Linux system packages",
                     format!(
-                        "Missing required packages for {}: {}",
+                        "Missing required packages for {}: {}. Installer will attempt to install them automatically.",
                         scan.distro,
                         scan.missing_required.join(", ")
                     ),

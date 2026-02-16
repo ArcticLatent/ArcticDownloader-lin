@@ -2,6 +2,8 @@ Name:           arctic-comfyui-helper
 Version:        0.1.0
 Release:        1%{?dist}
 Summary:        ComfyUI installer and model manager
+%global debug_package %{nil}
+%global _debugsource_packages 0
 
 License:        Proprietary
 URL:            https://github.com/ArcticLatent/ArcticDownloader-lin
@@ -26,10 +28,27 @@ models, and custom nodes.
 %autosetup -n %{name}-%{version}
 
 %build
-cargo build --release --manifest-path src-tauri/Cargo.toml
+# Reuse build artifacts across rpmbuild runs for faster iterative packaging.
+export CARGO_TARGET_DIR="%{_topdir}/cargo-target"
+# Allow reuse of incremental state for local packaging speed.
+export CARGO_INCREMENTAL=1
+# Prefer fast linker when available; fall back to bfd to avoid missing mold/lld issues.
+if command -v mold >/dev/null 2>&1; then
+  case " ${RUSTFLAGS:-} " in
+    *" -C link-arg=-fuse-ld=mold "*) ;;
+    *) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-fuse-ld=mold" ;;
+  esac
+elif command -v ld.bfd >/dev/null 2>&1; then
+  case " ${RUSTFLAGS:-} " in
+    *" -C link-arg=-fuse-ld=bfd "*) ;;
+    *) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-fuse-ld=bfd" ;;
+  esac
+fi
+
+cargo build --release --jobs "%{?_smp_build_ncpus}" --manifest-path src-tauri/Cargo.toml
 
 %install
-install -Dpm0755 src-tauri/target/release/Arctic-ComfyUI-Helper \
+install -Dpm0755 "%{_topdir}/cargo-target/release/Arctic-ComfyUI-Helper" \
   %{buildroot}%{_bindir}/arctic-comfyui-helper
 install -Dpm0644 packaging/linux/io.github.ArcticHelper.desktop \
   %{buildroot}%{_datadir}/applications/io.github.ArcticHelper.desktop

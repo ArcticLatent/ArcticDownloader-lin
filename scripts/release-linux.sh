@@ -5,6 +5,8 @@ VERSION=""
 REPOSITORY="ArcticLatent/Arctic-Helper"
 OUTPUT_DIR="dist"
 SKIP_CLEAN=0
+DEB_DISTROBOX="arctic-ubuntu"
+RPM_DISTROBOX="arctic-fedora"
 
 usage() {
   cat <<'USAGE'
@@ -17,6 +19,8 @@ Options:
                          GitHub repository (default: ArcticLatent/Arctic-Helper).
   --output-dir <path>    Output directory (default: dist).
   --skip-clean           Skip cargo clean during build.
+  --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
+  --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
   -h, --help             Show help.
 USAGE
 }
@@ -46,6 +50,14 @@ while (($# > 0)); do
     --skip-clean)
       SKIP_CLEAN=1
       shift
+      ;;
+    --deb-distrobox)
+      DEB_DISTROBOX="${2:-}"
+      shift 2
+      ;;
+    --rpm-distrobox)
+      RPM_DISTROBOX="${2:-}"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -94,6 +106,7 @@ BUILD_ARGS=(--version "$VERSION" --repository "$REPOSITORY" --tag "$TAG" --outpu
 if ((SKIP_CLEAN == 1)); then
   BUILD_ARGS+=(--skip-clean)
 fi
+BUILD_ARGS+=(--deb-distrobox "$DEB_DISTROBOX" --rpm-distrobox "$RPM_DISTROBOX")
 
 (cd "$ROOT_DIR" && bash scripts/build-release-linux.sh "${BUILD_ARGS[@]}")
 

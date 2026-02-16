@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGING_DIR="$ROOT_DIR/packaging"
 OUT_DIR="$PACKAGING_DIR/out"
+DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
+RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
 
 usage() {
   cat <<'EOF'
@@ -14,11 +16,14 @@ Targets:
   arch     Build Arch package (.pkg.tar.zst) with makepkg
   deb      Build Debian package (.deb) with dpkg-buildpackage
   rpm      Build Fedora/RPM package (.rpm) with rpmbuild
-  all      Build all targets in order: arch, deb, rpm
+  all      Build all targets in order: arch (host), deb (distrobox), rpm (distrobox)
 
 Notes:
   - Run from anywhere inside the repo.
   - Build tools must already be installed on your system.
+  - `all` expects distroboxes:
+      - Debian: arctic-ubuntu (override with ARCTIC_DEB_DISTROBOX)
+      - Fedora: arctic-fedora (override with ARCTIC_RPM_DISTROBOX)
 EOF
 }
 
@@ -88,6 +93,13 @@ build_rpm() {
     cd "$ROOT_DIR"
     tar \
       --exclude-vcs \
+      --exclude='./.flatpak-builder' \
+      --exclude='./build-dir' \
+      --exclude='./repo' \
+      --exclude='./dist' \
+      --exclude='./packaging/arch/src' \
+      --exclude='./packaging/arch/pkg' \
+      --exclude='./packaging/arch/*.pkg.tar.*' \
       --exclude='./target' \
       --exclude='./src-tauri/target' \
       --exclude='./packaging/out' \
@@ -98,17 +110,43 @@ build_rpm() {
 
   cp -f "$PACKAGING_DIR/fedora/arctic-comfyui-helper.spec" "$rpmtop/SPECS/"
 
+  local jobs
+  jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)"
+
   rpmbuild \
     --define "_topdir $rpmtop" \
-    -ba "$rpmtop/SPECS/arctic-comfyui-helper.spec"
+    --define "_smp_mflags -j$jobs" \
+    -bb "$rpmtop/SPECS/arctic-comfyui-helper.spec"
 
   mkdir -p "$OUT_DIR/rpm"
-  find "$rpmtop/RPMS" "$rpmtop/SRPMS" -type f \( -name '*.rpm' -o -name '*.src.rpm' \) -print0 |
+  find "$rpmtop/RPMS" -type f -name '*.rpm' -print0 |
     while IFS= read -r -d '' f; do
       cp -f "$f" "$OUT_DIR/rpm/"
     done
 
   echo "RPM artifacts: $OUT_DIR/rpm"
+}
+
+build_deb_in_distrobox() {
+  require_cmd distrobox
+  echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
+  distrobox enter "$DEB_DISTROBOX" -- bash -lc "
+    set -euo pipefail
+    export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+    cd '$ROOT_DIR'
+    bash packaging/build-packages.sh deb
+  "
+}
+
+build_rpm_in_distrobox() {
+  require_cmd distrobox
+  echo "Building RPM package in distrobox '$RPM_DISTROBOX' ..."
+  distrobox enter "$RPM_DISTROBOX" -- bash -lc "
+    set -euo pipefail
+    export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+    cd '$ROOT_DIR'
+    bash packaging/build-packages.sh rpm
+  "
 }
 
 main() {
@@ -129,8 +167,8 @@ main() {
       ;;
     all)
       build_arch
-      build_deb
-      build_rpm
+      build_deb_in_distrobox
+      build_rpm_in_distrobox
       ;;
     -h|--help|help)
       usage
