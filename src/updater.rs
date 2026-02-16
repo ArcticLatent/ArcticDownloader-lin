@@ -312,18 +312,44 @@ async fn run_install_command(path: &Path) -> Result<()> {
     let file_arg = path.to_string_lossy().to_string();
 
     if file_name.ends_with(".deb") {
-        run_privileged_install("apt", &["install", "-y", &file_arg]).await?;
+        if let Err(err) = run_privileged_install("apt", &["install", "-y", &file_arg]).await {
+            bail!(
+                "Update downloaded, but automatic install failed.\n\
+                 Run manually:\n\
+                 sudo apt install -y \"{}\"\n\
+                 Details: {err}",
+                file_arg
+            );
+        }
         return Ok(());
     }
     if file_name.ends_with(".src.rpm") {
         bail!("Refusing to auto-install source RPM update package: {}", path.display());
     }
     if file_name.ends_with(".rpm") {
-        run_privileged_install("dnf", &["install", "-y", &file_arg]).await?;
+        if let Err(err) = run_privileged_install("dnf", &["install", "-y", &file_arg]).await {
+            bail!(
+                "Update downloaded, but automatic install failed.\n\
+                 Run manually:\n\
+                 sudo dnf install -y \"{}\"\n\
+                 Details: {err}",
+                file_arg
+            );
+        }
         return Ok(());
     }
     if file_name.contains(".pkg.tar") {
-        run_privileged_install("pacman", &["-U", "--noconfirm", &file_arg]).await?;
+        if let Err(err) =
+            run_privileged_install("pacman", &["-U", "--noconfirm", &file_arg]).await
+        {
+            bail!(
+                "Update downloaded, but automatic install failed.\n\
+                 Run manually:\n\
+                 sudo pacman -U --noconfirm \"{}\"\n\
+                 Details: {err}",
+                file_arg
+            );
+        }
         return Ok(());
     }
 
@@ -334,36 +360,49 @@ async fn run_install_command(path: &Path) -> Result<()> {
 }
 
 async fn run_privileged_install(program: &str, args: &[&str]) -> Result<()> {
-    if run_install_command_direct(program, args).await.is_ok() {
-        return Ok(());
+    let mut attempts: Vec<String> = Vec::new();
+
+    match run_install_command_direct(program, args).await {
+        Ok(()) => {
+            return Ok(());
+        }
+        Err(err) => attempts.push(format!("{program} {} => {err}", args.join(" "))),
     }
 
     let mut sudo_non_interactive = vec!["-n", program];
     sudo_non_interactive.extend_from_slice(args);
-    if run_install_command_direct("sudo", &sudo_non_interactive)
-        .await
-        .is_ok()
-    {
-        return Ok(());
+    match run_install_command_direct("sudo", &sudo_non_interactive).await {
+        Ok(()) => {
+            return Ok(());
+        }
+        Err(err) => attempts.push(format!("sudo {} => {err}", sudo_non_interactive.join(" "))),
     }
 
-    if run_install_command_direct("pkexec", &[program])
-        .await
-        .is_ok()
-    {
+    if run_install_command_direct("pkexec", &[program]).await.is_ok() {
         // Defensive noop for weird pkexec policies that reject direct no-arg checks.
     }
     let mut pkexec_args = vec![program];
     pkexec_args.extend_from_slice(args);
-    if run_install_command_direct("pkexec", &pkexec_args).await.is_ok() {
-        return Ok(());
+    match run_install_command_direct("pkexec", &pkexec_args).await {
+        Ok(()) => {
+            return Ok(());
+        }
+        Err(err) => attempts.push(format!("pkexec {} => {err}", pkexec_args.join(" "))),
     }
 
     let mut sudo_interactive = vec![program];
     sudo_interactive.extend_from_slice(args);
-    run_install_command_direct("sudo", &sudo_interactive)
-        .await
-        .context("failed to install update package with direct/sudo/pkexec")
+    match run_install_command_direct("sudo", &sudo_interactive).await {
+        Ok(()) => {
+            return Ok(());
+        }
+        Err(err) => attempts.push(format!("sudo {} => {err}", sudo_interactive.join(" "))),
+    }
+
+    bail!(
+        "could not run installer with required privileges. attempts: {}",
+        attempts.join(" | ")
+    );
 }
 
 async fn run_install_command_direct(program: &str, args: &[&str]) -> Result<()> {
