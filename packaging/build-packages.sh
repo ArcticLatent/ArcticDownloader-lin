@@ -39,8 +39,30 @@ read_pkgver() {
   awk -F= '/^pkgver=/{gsub(/'\''|"/, "", $2); print $2; exit}' "$PACKAGING_DIR/arch/PKGBUILD"
 }
 
+clean_arch_previous_builds() {
+  echo "Cleaning previous Arch build artifacts..."
+  rm -rf "$OUT_DIR/arch"
+  rm -rf "$PACKAGING_DIR/arch/src" "$PACKAGING_DIR/arch/pkg"
+  rm -f "$PACKAGING_DIR/arch"/arctic-comfyui-helper-*.pkg.tar.*
+}
+
+clean_deb_previous_builds() {
+  echo "Cleaning previous Debian build artifacts..."
+  rm -rf "$OUT_DIR/deb"
+  rm -f "$ROOT_DIR"/../arctic-comfyui-helper_*_amd64.deb
+  rm -f "$ROOT_DIR"/../arctic-comfyui-helper_*_amd64.changes
+  rm -f "$ROOT_DIR"/../arctic-comfyui-helper_*_amd64.buildinfo
+  rm -f "$ROOT_DIR"/../arctic-comfyui-helper-dbgsym_*_amd64.ddeb
+}
+
+clean_rpm_previous_builds() {
+  echo "Cleaning previous RPM build artifacts..."
+  rm -rf "$OUT_DIR/rpm"
+}
+
 build_arch() {
   require_cmd makepkg
+  clean_arch_previous_builds
   mkdir -p "$OUT_DIR/arch"
   (
     cd "$PACKAGING_DIR/arch"
@@ -58,6 +80,7 @@ build_arch() {
 
 build_deb() {
   require_cmd dpkg-buildpackage
+  clean_deb_previous_builds
   mkdir -p "$OUT_DIR/deb"
   (
     cd "$ROOT_DIR"
@@ -82,6 +105,7 @@ build_deb() {
 
 build_rpm() {
   require_cmd rpmbuild
+  clean_rpm_previous_builds
   local version
   version="$(read_pkgver)"
   local rpmtop="$OUT_DIR/rpm/rpmbuild"

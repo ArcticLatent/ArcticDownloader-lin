@@ -178,6 +178,7 @@ if ((SKIP_CLEAN == 0)); then
 fi
 
 rm -rf "$PACKAGING_DIR/out"
+rm -rf "$OUT_ABS_DIR"
 mkdir -p "$OUT_ABS_DIR"
 
 echo "Building Arch package on host ..."
