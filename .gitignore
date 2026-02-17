@@ -17,6 +17,7 @@ repo/
 /packaging/out/**
 /packaging/out/rpm/rpmbuild/
 /packaging/out/rpm/rpmbuild/**
+/dist/
 
 
 # Added by cargo

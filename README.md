@@ -201,11 +201,22 @@ Prerequisite:
 
 ## Automated Linux Release Flow
 
-Linux release scripts are in `scripts/`:
+Use one command:
 
 ```bash
-# Build + verify + publish GitHub release (Arch + Deb + RPM artifacts)
-bash ./scripts/release-linux.sh --version 0.1.1 --repository ArcticLatent/Arctic-Helper
+bash ./scripts/release-linux.sh
+```
+
+By default this publishes to `ArcticLatent/Arctic-Helper`.  
+It will:
+1. Prompt for version (example: `0.1.1`)
+2. Prompt for release notes (end with `END` line)
+3. Build + verify + publish GitHub release (Arch + Deb + RPM artifacts)
+
+Optional non-interactive variant:
+
+```bash
+bash ./scripts/release-linux.sh --version 0.1.1
 ```
 
 Build-only:

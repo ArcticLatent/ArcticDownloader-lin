@@ -117,7 +117,6 @@ require_cmd distrobox
 update_simple_version() {
   local file="$1"
   local pattern="$2"
-  local replacement="$3"
   local tmp
   tmp="$(mktemp)"
   if ! sed -E "$pattern" "$file" > "$tmp"; then
