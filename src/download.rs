@@ -1,6 +1,6 @@
 use crate::{
     config::ConfigStore,
-    model::{LoraDefinition, ModelArtifact, ResolvedModel, TargetCategory},
+    model::{LoraDefinition, ModelArtifact, ResolvedModel, TargetCategory, WorkflowDefinition},
 };
 use anyhow::{anyhow, Context, Result};
 use futures::{StreamExt, TryStreamExt};
@@ -57,6 +57,13 @@ pub struct DownloadOutcome {
 #[derive(Clone, Debug)]
 pub struct LoraDownloadOutcome {
     pub lora: LoraDefinition,
+    pub destination: PathBuf,
+    pub status: DownloadStatus,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkflowDownloadOutcome {
+    pub workflow: WorkflowDefinition,
     pub destination: PathBuf,
     pub status: DownloadStatus,
 }
@@ -460,6 +467,92 @@ impl DownloadManager {
             fetch_preview_image_bytes(&client, &image_url, token.as_deref())
                 .await
                 .ok_or_else(|| anyhow!("failed to download preview image"))
+        })
+    }
+
+    pub fn download_workflow_with_cancel(
+        &self,
+        workflows_dir: PathBuf,
+        workflow: WorkflowDefinition,
+        progress: Sender<DownloadSignal>,
+        cancel: Option<CancellationToken>,
+    ) -> tokio::task::JoinHandle<Result<WorkflowDownloadOutcome>> {
+        let download_clients = self.download_clients.clone();
+        self.runtime.spawn(async move {
+            if is_cancelled(cancel.as_ref()) {
+                return Err(anyhow!("download cancelled by user"));
+            }
+            let url = workflow.workflow_json_url.trim().to_string();
+            if url.is_empty() {
+                return Err(anyhow!("Workflow {} is missing workflow_json_url", workflow.id));
+            }
+
+            let mut file_name = url
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .split('?')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if file_name.is_empty() {
+                file_name = format!("{}.json", workflow.id);
+            }
+            if !file_name.to_ascii_lowercase().ends_with(".json") {
+                file_name.push_str(".json");
+            }
+            file_name = sanitize_file_name(&file_name);
+            let destination_path = workflows_dir.join(&file_name);
+
+            if fs::try_exists(&destination_path)
+                .await
+                .with_context(|| format!("failed to check {:?} existence", destination_path))?
+            {
+                let _ = progress.send(DownloadSignal::Started {
+                    artifact: file_name.clone(),
+                    index: 0,
+                    total: 1,
+                    size: Some(0),
+                });
+                let _ = progress.send(DownloadSignal::Finished {
+                    artifact: file_name.clone(),
+                    index: 0,
+                    size: Some(0),
+                    folder: destination_path
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string()),
+                });
+                return Ok(WorkflowDownloadOutcome {
+                    workflow,
+                    destination: destination_path,
+                    status: DownloadStatus::SkippedExisting,
+                });
+            }
+
+            let _ = progress.send(DownloadSignal::Started {
+                artifact: file_name.clone(),
+                index: 0,
+                total: 1,
+                size: None,
+            });
+
+            let destination = download_direct(
+                &download_clients,
+                &url,
+                &workflows_dir,
+                &file_name,
+                Some((progress.clone(), 0, file_name.clone())),
+                None,
+                false,
+                cancel.as_ref(),
+            )
+            .await?;
+
+            Ok(WorkflowDownloadOutcome {
+                workflow,
+                destination,
+                status: DownloadStatus::Downloaded,
+            })
         })
     }
 }

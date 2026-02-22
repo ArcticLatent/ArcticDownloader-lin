@@ -7,6 +7,8 @@ pub struct ModelCatalog {
     pub models: Vec<MasterModel>,
     #[serde(default)]
     pub loras: Vec<LoraDefinition>,
+    #[serde(default)]
+    pub workflows: Vec<WorkflowDefinition>,
 }
 
 impl ModelCatalog {
@@ -38,6 +40,21 @@ impl ModelCatalog {
         families.sort();
         families.dedup();
         families
+    }
+
+    pub fn workflow_families(&self) -> Vec<String> {
+        let mut families: Vec<String> = self
+            .workflows
+            .iter()
+            .map(|workflow| workflow.family.clone())
+            .collect();
+        families.sort();
+        families.dedup();
+        families
+    }
+
+    pub fn find_workflow(&self, id: &str) -> Option<WorkflowDefinition> {
+        self.workflows.iter().find(|workflow| workflow.id == id).cloned()
     }
 }
 
@@ -256,6 +273,16 @@ impl LoraDefinition {
                 .unwrap_or(false),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkflowDefinition {
+    pub id: String,
+    pub display_name: String,
+    pub family: String,
+    pub workflow_json_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_image_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

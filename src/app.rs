@@ -2,7 +2,6 @@ use crate::{
     catalog::CatalogService,
     config::ConfigStore,
     download::DownloadManager,
-    env_flags::remote_refresh_enabled,
     ram::{RamProfile, RamTier},
     updater::Updater,
 };
@@ -45,16 +44,11 @@ pub fn build_context() -> Result<AppContext> {
         let config = Arc::new(ConfigStore::new()?);
         let catalog = Arc::new(CatalogService::new(config.clone())?);
 
-        if remote_refresh_enabled() {
-            let catalog_for_refresh = Arc::clone(&catalog);
-            let runtime_for_refresh = Arc::clone(&runtime);
-            runtime_for_refresh.spawn(async move {
-                if let Err(err) = catalog_for_refresh.refresh_from_remote().await {
-                    warn!("Unable to refresh catalog from remote source: {err:#}");
-                }
-            });
+        // Ensure catalog is always refreshed from remote before the UI boots.
+        if let Err(err) = runtime.block_on(catalog.refresh_from_remote()) {
+            warn!("Unable to refresh catalog from remote source: {err:#}");
         } else {
-            info!("Skipping remote catalog refresh (ARCTIC_SKIP_REMOTE_REFRESH present).");
+            info!("Catalog refreshed from remote at startup.");
         }
 
         let display_version = resolve_display_version(&config);

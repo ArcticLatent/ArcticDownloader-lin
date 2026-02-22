@@ -1,7 +1,7 @@
 use crate::{
     config::{default_catalog_endpoint, ConfigStore},
     env_flags::prefer_local_catalog,
-    model::{LoraDefinition, ModelCatalog, ModelVariant, ResolvedModel},
+    model::{LoraDefinition, ModelCatalog, ModelVariant, ResolvedModel, WorkflowDefinition},
     vram::VramTier,
 };
 use anyhow::{Context, Result};
@@ -39,9 +39,10 @@ impl CatalogService {
                 })
         };
         info!(
-            "Catalog initialised with {} models ({} LoRAs).",
+            "Catalog initialised with {} models ({} LoRAs, {} workflows).",
             catalog.models.len(),
-            catalog.loras.len()
+            catalog.loras.len(),
+            catalog.workflows.len()
         );
         Ok(Self {
             catalog: RwLock::new(catalog),
@@ -86,9 +87,24 @@ impl CatalogService {
         self.catalog_snapshot().find_lora(id)
     }
 
+    pub fn workflows(&self) -> Vec<WorkflowDefinition> {
+        self.catalog_snapshot().workflows
+    }
+
+    pub fn workflow_families(&self) -> Vec<String> {
+        self.catalog_snapshot().workflow_families()
+    }
+
+    pub fn find_workflow(&self, id: &str) -> Option<WorkflowDefinition> {
+        self.catalog_snapshot().find_workflow(id)
+    }
+
     pub async fn refresh_from_remote(&self) -> Result<bool> {
         let settings = self.config.settings();
-        let endpoint = default_catalog_endpoint();
+        let endpoint = settings
+            .catalog_endpoint
+            .clone()
+            .or_else(default_catalog_endpoint);
 
         let Some(url) = endpoint else {
             info!("No remote catalog endpoint configured; using bundled data.");
@@ -115,15 +131,37 @@ impl CatalogService {
         }
 
         info!("Refreshing catalog from {url}");
-        let response = request
+        let mut response = request
             .send()
             .await
             .with_context(|| format!("failed to fetch remote catalog from {url}"))?;
 
         match response.status() {
             StatusCode::NOT_MODIFIED => {
+                // Migration safety: older app versions could cache a lossy catalog
+                // missing newly added sections (e.g. `workflows`). If we detect
+                // that case, force one full fetch without ETag.
+                if !cached_catalog_contains_key(&self.cached_catalog_path(), "workflows") {
+                    info!(
+                        "Catalog cache is missing `workflows`; forcing a full remote fetch."
+                    );
+                    response = client
+                        .get(&url)
+                        .send()
+                        .await
+                        .with_context(|| format!("failed forced catalog fetch from {url}"))?;
+                    if response.status() != StatusCode::OK {
+                        warn!(
+                            "Forced catalog fetch skipped: server returned {} ({:?})",
+                            response.status().as_u16(),
+                            response.status()
+                        );
+                        return Ok(false);
+                    }
+                } else {
                 info!("Remote catalog is up to date (HTTP 304).");
                 return Ok(false);
+                }
             }
             StatusCode::OK => {}
             status => {
@@ -245,4 +283,12 @@ fn load_cached_catalog(config: &ConfigStore) -> Option<ModelCatalog> {
 
 fn cached_catalog_path(config: &ConfigStore) -> PathBuf {
     config.cache_path().join(CACHED_CATALOG_FILE)
+}
+
+fn cached_catalog_contains_key(path: &Path, key: &str) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let needle = format!("\"{key}\"");
+    text.contains(&needle)
 }

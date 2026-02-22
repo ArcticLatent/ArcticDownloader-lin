@@ -67,6 +67,7 @@ const el = {
   version: document.getElementById("version"),
   updateStatus: document.getElementById("update-status"),
   statusLog: document.getElementById("status-log"),
+  clearStatusLog: document.getElementById("clear-status-log"),
   progressLine: document.getElementById("download-progress"),
   overallProgress: document.getElementById("overall-progress"),
   overallProgressFill: document.getElementById("overall-progress-fill"),
@@ -79,9 +80,11 @@ const el = {
   tabComfyui: document.getElementById("tab-comfyui"),
   tabModels: document.getElementById("tab-models"),
   tabLoras: document.getElementById("tab-loras"),
+  tabWorkflows: document.getElementById("tab-workflows"),
   contentComfyui: document.getElementById("tab-content-comfyui"),
   contentModels: document.getElementById("tab-content-models"),
   contentLoras: document.getElementById("tab-content-loras"),
+  contentWorkflows: document.getElementById("tab-content-workflows"),
   downloadsStatusPanel: document.getElementById("downloads-status-panel"),
 
   comfyTorchProfile: document.getElementById("comfy-torch-profile"),
@@ -134,6 +137,9 @@ const el = {
   comfyRootLora: document.getElementById("comfy-root-lora"),
   chooseRootLora: document.getElementById("choose-root-lora"),
   saveRootLora: document.getElementById("save-root-lora"),
+  comfyRootWorkflow: document.getElementById("comfy-root-workflow"),
+  chooseRootWorkflow: document.getElementById("choose-root-workflow"),
+  saveRootWorkflow: document.getElementById("save-root-workflow"),
 
   modelFamily: document.getElementById("model-family"),
   modelId: document.getElementById("model-id"),
@@ -148,6 +154,9 @@ const el = {
   civitaiToken: document.getElementById("civitai-token"),
   saveToken: document.getElementById("save-token"),
   downloadLora: document.getElementById("download-lora"),
+  workflowFamily: document.getElementById("workflow-family"),
+  workflowId: document.getElementById("workflow-id"),
+  downloadWorkflow: document.getElementById("download-workflow"),
 
   metaCreator: document.getElementById("meta-creator"),
   metaCreatorLink: document.getElementById("meta-creator-link"),
@@ -158,6 +167,8 @@ const el = {
   previewImage: document.getElementById("preview-image"),
   previewVideo: document.getElementById("preview-video"),
   previewCaption: document.getElementById("preview-caption"),
+  workflowPreviewImage: document.getElementById("workflow-preview-image"),
+  workflowPreviewCaption: document.getElementById("workflow-preview-caption"),
   confirmOverlay: document.getElementById("confirm-overlay"),
   confirmMessage: document.getElementById("confirm-message"),
   confirmYes: document.getElementById("confirm-yes"),
@@ -1393,7 +1404,13 @@ function renderOverallProgress() {
 function beginBusyDownload(label) {
   state.busyDownloads += 1;
   if (!state.activeDownloadKind) {
-    state.activeDownloadKind = state.activeTab === "loras" ? "lora" : "model";
+    if (state.activeTab === "loras") {
+      state.activeDownloadKind = "lora";
+    } else if (state.activeTab === "workflows") {
+      state.activeDownloadKind = "workflow";
+    } else {
+      state.activeDownloadKind = "model";
+    }
   }
   setProgress(label || "Downloading...");
   updateDownloadButtons();
@@ -1416,9 +1433,11 @@ function updateDownloadButtons() {
   if (cancelling) {
     el.downloadModel.textContent = "Cancel Download";
     el.downloadLora.textContent = "Cancel Download";
+    el.downloadWorkflow.textContent = "Cancel Download";
   } else {
     el.downloadModel.textContent = "Download Model Assets";
     el.downloadLora.textContent = "Download LoRA";
+    el.downloadWorkflow.textContent = "Download Workflow";
   }
 }
 
@@ -1564,12 +1583,15 @@ function switchTab(tab) {
   const comfyui = tab === "comfyui";
   const models = tab === "models";
   const loras = tab === "loras";
+  const workflows = tab === "workflows";
   el.tabComfyui.classList.toggle("active", comfyui);
   el.tabModels.classList.toggle("active", models);
   el.tabLoras.classList.toggle("active", loras);
+  el.tabWorkflows.classList.toggle("active", workflows);
   el.contentComfyui.classList.toggle("hidden", !comfyui);
   el.contentModels.classList.toggle("hidden", !models);
   el.contentLoras.classList.toggle("hidden", !loras);
+  el.contentWorkflows.classList.toggle("hidden", !workflows);
   el.downloadsStatusPanel.classList.toggle("hidden", comfyui);
 }
 
@@ -1581,6 +1603,11 @@ function familyOptions(models) {
 function loraFamilyOptions(loras) {
   const families = [...new Set(loras.map((l) => l.family).filter(Boolean))].sort();
   return [{ value: "all", label: "All LoRA Families" }, ...families.map((f) => ({ value: f, label: f }))];
+}
+
+function workflowFamilyOptions(workflows) {
+  const families = [...new Set((workflows || []).map((w) => w.family).filter(Boolean))].sort();
+  return [{ value: "all", label: "All Workflow Families" }, ...families.map((f) => ({ value: f, label: f }))];
 }
 
 function refreshModelSelectors() {
@@ -1609,6 +1636,50 @@ function refreshLoraSelectors() {
   const filtered = state.catalog.loras.filter((l) => family === "all" || l.family === family);
   const options = filtered.map((l) => ({ value: l.id, label: l.display_name }));
   setOptions(el.loraId, options);
+}
+
+function refreshWorkflowSelectors() {
+  if (!state.catalog) return;
+  const family = el.workflowFamily.value || "all";
+  const filtered = (state.catalog.workflows || []).filter((w) => family === "all" || w.family === family);
+  const options = filtered.map((w) => ({ value: w.id, label: w.display_name }));
+  setOptions(el.workflowId, options);
+  loadWorkflowPreview();
+}
+
+function loadWorkflowPreview() {
+  const selectedId = String(el.workflowId?.value || "").trim();
+  const workflow = (state.catalog?.workflows || []).find((w) => w.id === selectedId);
+  if (!workflow) {
+    if (el.workflowPreviewImage) {
+      el.workflowPreviewImage.classList.add("hidden");
+      el.workflowPreviewImage.removeAttribute("src");
+    }
+    if (el.workflowPreviewCaption) {
+      el.workflowPreviewCaption.textContent = "No workflow preview loaded.";
+    }
+    return;
+  }
+
+  const previewUrl = String(workflow.preview_image_url || "").trim();
+  if (!previewUrl) {
+    if (el.workflowPreviewImage) {
+      el.workflowPreviewImage.classList.add("hidden");
+      el.workflowPreviewImage.removeAttribute("src");
+    }
+    if (el.workflowPreviewCaption) {
+      el.workflowPreviewCaption.textContent = "No preview image available for this workflow.";
+    }
+    return;
+  }
+
+  if (el.workflowPreviewImage) {
+    el.workflowPreviewImage.src = previewUrl;
+    el.workflowPreviewImage.classList.remove("hidden");
+  }
+  if (el.workflowPreviewCaption) {
+    el.workflowPreviewCaption.textContent = workflow.display_name || "Workflow preview";
+  }
 }
 
 async function loadLoraMetadata() {
@@ -1705,6 +1776,9 @@ async function bootstrap() {
 
   el.comfyRoot.value = settings.comfyui_root || "";
   el.comfyRootLora.value = settings.comfyui_root || "";
+  if (el.comfyRootWorkflow) {
+    el.comfyRootWorkflow.value = settings.comfyui_root || "";
+  }
   el.comfyInstallRoot.value = settings.comfyui_install_base || "";
   state.sharedModelsRootDefault = String(settings.shared_models_root || "").trim();
   state.sharedModelsUseDefault = Boolean(
@@ -1827,7 +1901,10 @@ async function bootstrap() {
     loadLoraMetadata().catch(() => {});
   }, 0);
 
-  logLine(`Loaded ${catalog.models?.length || 0} models and ${catalog.loras?.length || 0} LoRAs.`);
+  setOptions(el.workflowFamily, workflowFamilyOptions(catalog.workflows || []));
+  refreshWorkflowSelectors();
+
+  logLine(`Loaded ${catalog.models?.length || 0} models, ${catalog.loras?.length || 0} LoRAs, and ${catalog.workflows?.length || 0} workflows.`);
   try {
     setStartupStatus("Checking downloader acceleration...");
     const xet = await invoke("get_hf_xet_preflight");
@@ -1841,6 +1918,7 @@ async function bootstrap() {
 el.tabComfyui.addEventListener("click", () => switchTab("comfyui"));
 el.tabModels.addEventListener("click", () => switchTab("models"));
 el.tabLoras.addEventListener("click", () => switchTab("loras"));
+el.tabWorkflows.addEventListener("click", () => switchTab("workflows"));
 
 el.modelFamily.addEventListener("change", refreshModelSelectors);
 el.modelId.addEventListener("change", refreshModelSelectors);
@@ -1853,11 +1931,16 @@ el.loraFamily.addEventListener("change", () => {
 el.loraId.addEventListener("change", () => {
   loadLoraMetadata().catch((err) => logLine(String(err)));
 });
+el.workflowFamily.addEventListener("change", refreshWorkflowSelectors);
+el.workflowId.addEventListener("change", loadWorkflowPreview);
 
 el.saveRoot.addEventListener("click", async () => {
   try {
     await invoke("set_comfyui_root", { comfyuiRoot: el.comfyRoot.value });
     el.comfyRootLora.value = el.comfyRoot.value;
+    if (el.comfyRootWorkflow) {
+      el.comfyRootWorkflow.value = el.comfyRoot.value;
+    }
     await loadInstalledAddonState(el.comfyRoot.value);
     const original = el.saveRoot.textContent;
     el.saveRoot.textContent = "Saved";
@@ -1878,6 +1961,9 @@ el.chooseRoot.addEventListener("click", async () => {
     el.comfyRoot.value = selected;
     await invoke("set_comfyui_root", { comfyuiRoot: selected });
     el.comfyRootLora.value = selected;
+    if (el.comfyRootWorkflow) {
+      el.comfyRootWorkflow.value = selected;
+    }
     logLine("ComfyUI folder selected.");
     await loadInstalledAddonState(selected);
   } catch (err) {
@@ -1889,6 +1975,9 @@ el.saveRootLora.addEventListener("click", async () => {
   try {
     await invoke("set_comfyui_root", { comfyuiRoot: el.comfyRootLora.value });
     el.comfyRoot.value = el.comfyRootLora.value;
+    if (el.comfyRootWorkflow) {
+      el.comfyRootWorkflow.value = el.comfyRootLora.value;
+    }
     await loadInstalledAddonState(el.comfyRoot.value);
     const original = el.saveRootLora.textContent;
     el.saveRootLora.textContent = "Saved";
@@ -1909,6 +1998,42 @@ el.chooseRootLora.addEventListener("click", async () => {
     el.comfyRootLora.value = selected;
     await invoke("set_comfyui_root", { comfyuiRoot: selected });
     el.comfyRoot.value = selected;
+    if (el.comfyRootWorkflow) {
+      el.comfyRootWorkflow.value = selected;
+    }
+    logLine("ComfyUI folder selected.");
+    await loadInstalledAddonState(selected);
+  } catch (err) {
+    logLine(`Choose folder failed: ${err}`);
+  }
+});
+
+el.saveRootWorkflow?.addEventListener("click", async () => {
+  try {
+    await invoke("set_comfyui_root", { comfyuiRoot: el.comfyRootWorkflow.value });
+    el.comfyRoot.value = el.comfyRootWorkflow.value;
+    el.comfyRootLora.value = el.comfyRootWorkflow.value;
+    await loadInstalledAddonState(el.comfyRoot.value);
+    const original = el.saveRootWorkflow.textContent;
+    el.saveRootWorkflow.textContent = "Saved";
+    el.saveRootWorkflow.disabled = true;
+    window.setTimeout(() => {
+      el.saveRootWorkflow.textContent = original || "Save Folder";
+      el.saveRootWorkflow.disabled = false;
+    }, 900);
+  } catch (err) {
+    logLine(`Save folder failed: ${err}`);
+  }
+});
+
+el.chooseRootWorkflow?.addEventListener("click", async () => {
+  try {
+    const selected = await invoke("pick_folder");
+    if (!selected) return;
+    el.comfyRootWorkflow.value = selected;
+    await invoke("set_comfyui_root", { comfyuiRoot: selected });
+    el.comfyRoot.value = selected;
+    el.comfyRootLora.value = selected;
     logLine("ComfyUI folder selected.");
     await loadInstalledAddonState(selected);
   } catch (err) {
@@ -2191,6 +2316,10 @@ el.comfyFreshBtn?.addEventListener("click", async () => {
 
 el.comfyClearInstallLog?.addEventListener("click", () => {
   if (el.comfyInstallLog) el.comfyInstallLog.textContent = "Ready";
+});
+
+el.clearStatusLog?.addEventListener("click", () => {
+  if (el.statusLog) el.statusLog.textContent = "Ready";
 });
 
 el.comfyOpenInstallFolder?.addEventListener("click", async () => {
@@ -2568,6 +2697,28 @@ el.downloadLora.addEventListener("click", async () => {
       token: el.civitaiToken.value?.trim() || null,
       comfyuiRoot: el.comfyRootLora.value,
     });
+  } catch (err) {
+    logLine(String(err));
+    endBusyDownload();
+  }
+});
+
+el.downloadWorkflow?.addEventListener("click", async () => {
+  if (state.busyDownloads > 0) {
+    await requestCancelDownload();
+    return;
+  }
+  if (!el.workflowId.value) {
+    logLine("Select a workflow first.");
+    return;
+  }
+  beginBusyDownload("Starting workflow download...");
+  try {
+    await invoke("download_workflow_asset", {
+      workflowId: el.workflowId.value,
+      comfyuiRoot: el.comfyRootWorkflow?.value || el.comfyRoot.value,
+    });
+    logLine("Workflow download started.");
   } catch (err) {
     logLine(String(err));
     endBusyDownload();

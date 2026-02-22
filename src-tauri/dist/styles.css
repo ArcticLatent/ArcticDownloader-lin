@@ -281,7 +281,7 @@ button.update-available:hover {
 .preview {
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: #0d1119;
+  background: transparent;
   padding: 8px;
 }
 .preview img,
@@ -290,11 +290,17 @@ button.update-available:hover {
   max-height: 360px;
   object-fit: contain;
   border-radius: 8px;
-  background: #07090e;
+  background: transparent;
 }
 .preview p {
   margin: 8px 0 0;
   color: var(--muted);
+}
+#workflow-preview-container {
+  background: transparent;
+}
+#workflow-preview-image {
+  background: transparent;
 }
 .hidden { display: none !important; }
 h2 { margin: 0; font-size: 1rem; }
@@ -405,14 +411,6 @@ input[type="checkbox"] {
 .empty-msg {
   color: var(--muted);
   font-size: 0.8rem;
-}
-#status-log {
-  margin: 0;
-  min-height: 90px;
-  max-height: 220px;
-  overflow: auto;
-  white-space: pre-wrap;
-  color: var(--muted);
 }
 .comfy-log {
   margin: 0;

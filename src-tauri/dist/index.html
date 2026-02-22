@@ -37,6 +37,7 @@
         <button class="tab active" data-tab="comfyui" id="tab-comfyui">ComfyUI</button>
         <button class="tab" data-tab="models" id="tab-models">Models</button>
         <button class="tab" data-tab="loras" id="tab-loras">LoRAs</button>
+        <button class="tab" data-tab="workflows" id="tab-workflows">Workflows</button>
       </nav>
 
       <section class="panel" id="tab-content-comfyui">
@@ -197,6 +198,25 @@
         </div>
       </section>
 
+      <section class="panel hidden" id="tab-content-workflows">
+        <div class="row folder-row">
+          <input id="comfy-root-workflow" type="text" placeholder="Select your ComfyUI root folder" />
+          <button id="choose-root-workflow">Choose Folder</button>
+          <button id="save-root-workflow">Save Folder</button>
+        </div>
+
+        <div class="row lora-row">
+          <select id="workflow-family"></select>
+          <select id="workflow-id"></select>
+          <button id="download-workflow" class="primary">Download Workflow</button>
+        </div>
+
+        <div class="preview" id="workflow-preview-container">
+          <img id="workflow-preview-image" class="hidden" alt="Workflow preview" />
+          <p id="workflow-preview-caption">No workflow preview loaded.</p>
+        </div>
+      </section>
+
       <section class="panel" id="downloads-status-panel">
         <h2>Status</h2>
         <div id="download-progress" class="progress-line">Idle</div>
@@ -214,7 +234,13 @@
             <div id="completed-list" class="transfer-list"></div>
           </div>
         </div>
-        <pre id="status-log">Ready</pre>
+        <div class="row">
+          <h3>Download Logs</h3>
+          <pre id="status-log" class="comfy-log">Ready</pre>
+        </div>
+        <div class="row">
+          <button id="clear-status-log">Clear Logs</button>
+        </div>
       </section>
 
       <footer class="footer-links">

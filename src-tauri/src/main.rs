@@ -1,9 +1,9 @@
 use arctic_downloader::{
     app::{build_context, AppContext},
     config::AppSettings,
-    download::{CivitaiPreview, DownloadSignal},
+    download::{CivitaiPreview, DownloadSignal, DownloadStatus},
     env_flags::auto_update_enabled,
-    model::{LoraDefinition, ModelCatalog},
+    model::{LoraDefinition, ModelCatalog, WorkflowDefinition},
     ram::{detect_ram_profile, RamTier},
 };
 use serde::{Deserialize, Serialize};
@@ -3631,6 +3631,134 @@ async fn download_lora_asset(
 }
 
 #[tauri::command]
+async fn download_workflow_asset(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workflow_id: String,
+    comfyui_root: Option<String>,
+) -> Result<(), String> {
+    let root = resolve_root_path(&state.context, comfyui_root)?;
+    let workflow: WorkflowDefinition = state
+        .context
+        .catalog
+        .find_workflow(&workflow_id)
+        .ok_or_else(|| "Selected workflow was not found in catalog.".to_string())?;
+
+    let workflows_dir = root.join("user").join("default").join("workflows");
+    std::fs::create_dir_all(&workflows_dir).map_err(|err| {
+        format!(
+            "Failed to create ComfyUI workflows directory ({}): {err}",
+            workflows_dir.display()
+        )
+    })?;
+
+    let cancel = CancellationToken::new();
+    {
+        let mut active = state
+            .active_cancel
+            .lock()
+            .map_err(|_| "download state lock poisoned".to_string())?;
+        if active.is_some() {
+            return Err("A download is already active. Cancel it first.".to_string());
+        }
+        *active = Some(cancel.clone());
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = state.context.downloads.download_workflow_with_cancel(
+        workflows_dir,
+        workflow,
+        tx,
+        Some(cancel),
+    );
+    if let Ok(mut abort) = state.active_abort.lock() {
+        *abort = Some(handle.abort_handle());
+    }
+    spawn_progress_emitter(app.clone(), "workflow".to_string(), rx);
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = handle.await;
+        let managed = app_for_task.state::<AppState>();
+        if let Ok(mut active) = managed.active_cancel.lock() {
+            *active = None;
+        }
+        if let Ok(mut abort) = managed.active_abort.lock() {
+            *abort = None;
+        }
+
+        match result {
+            Ok(Ok(outcome)) => {
+                let message = match outcome.status {
+                    DownloadStatus::SkippedExisting => {
+                        "Workflow already exists. Skipped download.".to_string()
+                    }
+                    DownloadStatus::Downloaded => "Workflow download completed.".to_string(),
+                };
+                let _ = app_for_task.emit(
+                    "download-progress",
+                    DownloadProgressEvent {
+                        kind: "workflow".to_string(),
+                        phase: "batch_finished".to_string(),
+                        artifact: None,
+                        index: None,
+                        total: Some(1),
+                        received: None,
+                        size: None,
+                        folder: None,
+                        message: Some(message),
+                    },
+                );
+            }
+            Ok(Err(err)) => {
+                let lower = err.to_string().to_ascii_lowercase();
+                let phase = if lower.contains("cancel") {
+                    "cancelled"
+                } else {
+                    "batch_failed"
+                };
+                let _ = app_for_task.emit(
+                    "download-progress",
+                    DownloadProgressEvent {
+                        kind: "workflow".to_string(),
+                        phase: phase.to_string(),
+                        artifact: None,
+                        index: None,
+                        total: None,
+                        received: None,
+                        size: None,
+                        folder: None,
+                        message: Some(err.to_string()),
+                    },
+                );
+            }
+            Err(join_err) => {
+                let phase = if join_err.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "batch_failed"
+                };
+                let _ = app_for_task.emit(
+                    "download-progress",
+                    DownloadProgressEvent {
+                        kind: "workflow".to_string(),
+                        phase: phase.to_string(),
+                        artifact: None,
+                        index: None,
+                        total: None,
+                        received: None,
+                        size: None,
+                        folder: None,
+                        message: Some(join_err.to_string()),
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_lora_metadata(
     state: State<'_, AppState>,
     lora_id: String,
@@ -6032,6 +6160,7 @@ fn main() {
             auto_update_startup,
             download_model_assets,
             download_lora_asset,
+            download_workflow_asset,
             get_lora_metadata,
             start_comfyui_install,
             cancel_comfyui_install,
