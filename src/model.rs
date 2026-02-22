@@ -283,6 +283,8 @@ pub struct WorkflowDefinition {
     pub workflow_json_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_image_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub youtube_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

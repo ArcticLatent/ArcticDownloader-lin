@@ -139,11 +139,14 @@ impl CatalogService {
         match response.status() {
             StatusCode::NOT_MODIFIED => {
                 // Migration safety: older app versions could cache a lossy catalog
-                // missing newly added sections (e.g. `workflows`). If we detect
+                // missing newly added sections/fields (e.g. `workflows`, `youtube_url`).
+                // If we detect
                 // that case, force one full fetch without ETag.
-                if !cached_catalog_contains_key(&self.cached_catalog_path(), "workflows") {
+                if !cached_catalog_contains_key(&self.cached_catalog_path(), "workflows")
+                    || !cached_catalog_contains_key(&self.cached_catalog_path(), "youtube_url")
+                {
                     info!(
-                        "Catalog cache is missing `workflows`; forcing a full remote fetch."
+                        "Catalog cache is missing required workflow keys; forcing a full remote fetch."
                     );
                     response = client
                         .get(&url)

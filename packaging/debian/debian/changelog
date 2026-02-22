@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.1.2-1) unstable; urgency=medium
+
+  * Added optional HF Xet (Experimental) toggle in Models; default downloader remains default/off.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Sun, 22 Feb 2026 02:28:30 -0500
+
 arctic-comfyui-helper (0.1.1-1) unstable; urgency=medium
 
   * First release of the updated app

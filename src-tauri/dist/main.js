@@ -169,6 +169,8 @@ const el = {
   previewCaption: document.getElementById("preview-caption"),
   workflowPreviewImage: document.getElementById("workflow-preview-image"),
   workflowPreviewCaption: document.getElementById("workflow-preview-caption"),
+  workflowYoutubeLink: document.getElementById("workflow-youtube-link"),
+  workflowYoutubeText: document.getElementById("workflow-youtube-text"),
   confirmOverlay: document.getElementById("confirm-overlay"),
   confirmMessage: document.getElementById("confirm-message"),
   confirmYes: document.getElementById("confirm-yes"),
@@ -208,6 +210,15 @@ function hideStartupOverlay() {
     overlay.classList.remove("is-hiding");
     overlay.setAttribute("aria-busy", "false");
   }, 240);
+}
+
+function showBlockingOverlay(text) {
+  const overlay = el.startupOverlay;
+  if (!overlay) return;
+  setStartupStatus(text || "Working...");
+  overlay.classList.remove("hidden");
+  overlay.classList.remove("is-hiding");
+  overlay.setAttribute("aria-busy", "true");
 }
 
 function notifySystem(title, body) {
@@ -1658,6 +1669,13 @@ function loadWorkflowPreview() {
     if (el.workflowPreviewCaption) {
       el.workflowPreviewCaption.textContent = "No workflow preview loaded.";
     }
+    if (el.workflowYoutubeText) {
+      el.workflowYoutubeText.textContent = "-";
+    }
+    if (el.workflowYoutubeLink) {
+      el.workflowYoutubeLink.href = "#";
+      el.workflowYoutubeLink.style.pointerEvents = "none";
+    }
     return;
   }
 
@@ -1679,6 +1697,15 @@ function loadWorkflowPreview() {
   }
   if (el.workflowPreviewCaption) {
     el.workflowPreviewCaption.textContent = workflow.display_name || "Workflow preview";
+  }
+
+  const ytUrl = String(workflow.youtube_url || "").trim();
+  if (el.workflowYoutubeText) {
+    el.workflowYoutubeText.textContent = ytUrl ? "Link" : "-";
+  }
+  if (el.workflowYoutubeLink) {
+    el.workflowYoutubeLink.href = ytUrl || "#";
+    el.workflowYoutubeLink.style.pointerEvents = ytUrl ? "auto" : "none";
   }
 }
 
@@ -2388,12 +2415,14 @@ el.checkUpdates.addEventListener("click", async () => {
       el.updateStatus.textContent = state.updateVersion
         ? `Installing v${state.updateVersion}...`
         : "Installing update...";
+      showBlockingOverlay("App updating... It will close now. Please launch it again after update.");
       await invoke("auto_update_startup");
     } catch (err) {
       state.updateInstalling = false;
       updateUpdateButton();
       el.updateStatus.textContent = "Error";
       logLine(String(err));
+      hideStartupOverlay();
     }
     return;
   }
@@ -2433,6 +2462,20 @@ el.metaCreatorLink.addEventListener("click", async (event) => {
     await invoke("open_external_url", { url: href });
   } catch (err) {
     logLine(`Open owner link failed: ${err}`);
+  }
+});
+
+el.workflowYoutubeLink?.addEventListener("click", async (event) => {
+  const href = el.workflowYoutubeLink.getAttribute("href") || "";
+  if (!href || href === "#") {
+    event.preventDefault();
+    return;
+  }
+  event.preventDefault();
+  try {
+    await invoke("open_external_url", { url: href });
+  } catch (err) {
+    logLine(`Open workflow tutorial link failed: ${err}`);
   }
 });
 
@@ -2545,6 +2588,7 @@ async function initEventListeners() {
         state.updateInstalling = true;
         updateUpdateButton();
         el.updateStatus.textContent = "Installing update...";
+        showBlockingOverlay("App updating... It will close now. Please launch it again after update.");
       } else {
         el.updateStatus.textContent = `${p.phase}`;
       }
