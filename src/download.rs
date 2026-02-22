@@ -1,4 +1,7 @@
-use crate::model::{LoraDefinition, ModelArtifact, ResolvedModel, TargetCategory};
+use crate::{
+    config::ConfigStore,
+    model::{LoraDefinition, ModelArtifact, ResolvedModel, TargetCategory},
+};
 use anyhow::{anyhow, Context, Result};
 use futures::{StreamExt, TryStreamExt};
 use log::{info, warn};
@@ -10,10 +13,11 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
+    process::Stdio,
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc::Sender,
-        Arc,
+        Arc, OnceLock,
     },
     time::Instant,
 };
@@ -21,6 +25,7 @@ use thiserror::Error;
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom},
+    process::Command,
     runtime::Runtime,
     sync::{Mutex, Semaphore},
     time::timeout,
@@ -38,6 +43,9 @@ const ADAPTIVE_GROW_MBPS: f64 = 50.0;
 const ADAPTIVE_SHRINK_MBPS: f64 = 5.0;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static HF_CLI_AVAILABLE: OnceLock<bool> = OnceLock::new();
+static HF_BIN_AVAILABLE: OnceLock<bool> = OnceLock::new();
+static UVX_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct DownloadOutcome {
@@ -113,6 +121,7 @@ pub enum DownloadError {
 #[derive(Debug)]
 pub struct DownloadManager {
     runtime: Arc<Runtime>,
+    config: Arc<ConfigStore>,
     api_client: Client,
     download_clients: Vec<Client>,
     civitai_metadata_cache: Arc<Mutex<HashMap<u64, CivitaiModelMetadata>>>,
@@ -120,12 +129,13 @@ pub struct DownloadManager {
 }
 
 impl DownloadManager {
-    pub fn new(runtime: Arc<Runtime>) -> Self {
+    pub fn new(runtime: Arc<Runtime>, config: Arc<ConfigStore>) -> Self {
         let api_client = make_http_client();
         let download_clients = make_download_clients();
 
         Self {
             runtime,
+            config,
             api_client,
             download_clients,
             civitai_metadata_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -150,6 +160,7 @@ impl DownloadManager {
         cancel: Option<CancellationToken>,
     ) -> tokio::task::JoinHandle<Result<Vec<DownloadOutcome>>> {
         let download_clients = self.download_clients.clone();
+        let xet_enabled = self.config.settings().hf_xet_enabled;
         self.runtime.spawn(async move {
             let mut outcomes = Vec::new();
             let model_folder = resolved.master.id.clone();
@@ -185,6 +196,7 @@ impl DownloadManager {
                                 &model_folder,
                                 &artifact,
                                 Some((progress.clone(), index, artifact_name.clone())),
+                                xet_enabled,
                                 cancel.as_ref(),
                             )
                             .await
@@ -242,6 +254,7 @@ impl DownloadManager {
     ) -> tokio::task::JoinHandle<Result<LoraDownloadOutcome>> {
         let download_clients = self.download_clients.clone();
         let api_client = self.api_client.clone();
+        let xet_enabled = self.config.settings().hf_xet_enabled;
         self.runtime.spawn(async move {
             if is_cancelled(cancel.as_ref()) {
                 return Err(anyhow!("download cancelled by user"));
@@ -342,6 +355,7 @@ impl DownloadManager {
                 &file_name,
                 Some((progress.clone(), 0, file_name.clone())),
                 auth_token.as_deref(),
+                xet_enabled,
                 cancel.as_ref(),
             )
             .await
@@ -503,6 +517,7 @@ async fn download_artifact(
     model_folder: &str,
     artifact: &ModelArtifact,
     progress: Option<(Sender<DownloadSignal>, usize, String)>,
+    xet_enabled: bool,
     cancel: Option<&CancellationToken>,
 ) -> Result<DownloadOutcome> {
     if is_cancelled(cancel) {
@@ -544,6 +559,59 @@ async fn download_artifact(
         build_download_url(&artifact.repo, &artifact.path)?
     };
     log::info!("Requesting {}", url);
+
+    let mut xet_size_hint = artifact.size_bytes;
+    if xet_size_hint.is_none() {
+        let client = clients
+            .first()
+            .ok_or_else(|| anyhow!("missing HTTP client for downloads"))?;
+        if let Ok(Some(metadata)) =
+            fetch_head_metadata(client, &url, None, &initial_file_name).await
+        {
+            xet_size_hint = metadata.content_length;
+        }
+    }
+
+    if let Some(parsed) = parse_hf_resolve_url(&url) {
+        let cli_available = hf_cli_available();
+        log::info!(
+            "HF download path decision: xet_enabled={}, hf_cli_available={}, repo_file={}",
+            xet_enabled,
+            cli_available,
+            parsed.file_path
+        );
+        if xet_enabled && cli_available {
+            match download_via_hf_cli(
+                &parsed,
+                &dest_dir,
+                progress.clone(),
+                xet_size_hint,
+                cancel,
+            )
+            .await
+            {
+                Ok(dest_path) => {
+                    if let Some((sender, index, artifact_name)) = progress {
+                        let _ = sender.send(DownloadSignal::Finished {
+                            artifact: artifact_name,
+                            index,
+                            size: artifact.size_bytes,
+                            folder: dest_path
+                                .parent()
+                                .map(|p| p.to_string_lossy().to_string()),
+                        });
+                    }
+                    return Ok(DownloadOutcome {
+                        artifact: artifact.clone(),
+                        destination: dest_path,
+                        status: DownloadStatus::Downloaded,
+                    });
+                }
+                Err(err) => return Err(err.context(format!("hf CLI/Xet download failed for {url}"))),
+            }
+        }
+    }
+
     let mut content_length = artifact.size_bytes;
     let mut accept_ranges = false;
     let mut final_file_name = initial_file_name.clone();
@@ -796,12 +864,56 @@ async fn download_direct(
     file_name: &str,
     progress: Option<(Sender<DownloadSignal>, usize, String)>,
     auth_token: Option<&str>,
+    xet_enabled: bool,
     cancel: Option<&CancellationToken>,
 ) -> Result<PathBuf> {
     if is_cancelled(cancel) {
         return Err(anyhow!("download cancelled by user"));
     }
     let url = ensure_hf_download_url(url);
+
+    let mut xet_size_hint = None;
+    if let Some(client) = clients.first() {
+        if let Ok(Some(metadata)) =
+            fetch_head_metadata(client, &url, auth_token, file_name).await
+        {
+            xet_size_hint = metadata.content_length;
+        }
+    }
+
+    if let Some(parsed) = parse_hf_resolve_url(&url) {
+        let cli_available = hf_cli_available();
+        log::info!(
+            "HF direct path decision: xet_enabled={}, hf_cli_available={}, repo_file={}",
+            xet_enabled,
+            cli_available,
+            parsed.file_path
+        );
+        if xet_enabled && cli_available {
+            match download_via_hf_cli(
+                &parsed,
+                dest_dir,
+                progress.clone(),
+                xet_size_hint,
+                cancel,
+            )
+            .await
+            {
+                Ok(path) => {
+                    if let Some((sender, index, artifact_name)) = progress {
+                        let _ = sender.send(DownloadSignal::Finished {
+                            artifact: artifact_name,
+                            index,
+                            size: None,
+                            folder: path.parent().map(|p| p.to_string_lossy().to_string()),
+                        });
+                    }
+                    return Ok(path);
+                }
+                Err(err) => return Err(err.context(format!("hf CLI/Xet download failed for {url}"))),
+            }
+        }
+    }
     let mut content_length = None;
     let mut accept_ranges = false;
     let mut final_file_name = file_name.to_string();
@@ -1519,6 +1631,430 @@ fn ensure_hf_download_url(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+#[derive(Debug, Clone)]
+struct HfResolveUrl {
+    repo_id: String,
+    revision: String,
+    file_path: String,
+    file_name: String,
+}
+
+fn parse_hf_resolve_url(url: &str) -> Option<HfResolveUrl> {
+    let parsed = Url::parse(url).ok()?;
+    if parsed.host_str() != Some("huggingface.co") {
+        return None;
+    }
+    let segments = parsed.path_segments()?.collect::<Vec<_>>();
+    let resolve_idx = segments
+        .iter()
+        .position(|segment| segment.eq_ignore_ascii_case("resolve"))?;
+    if resolve_idx < 2 || resolve_idx + 2 >= segments.len() {
+        return None;
+    }
+
+    let repo_id = segments[..resolve_idx].join("/");
+    let revision = segments.get(resolve_idx + 1)?.to_string();
+    let file_path = segments[(resolve_idx + 2)..].join("/");
+    let file_name = segments.last()?.to_string();
+    if repo_id.is_empty() || revision.is_empty() || file_path.is_empty() || file_name.is_empty() {
+        return None;
+    }
+
+    Some(HfResolveUrl {
+        repo_id,
+        revision,
+        file_path,
+        file_name,
+    })
+}
+
+fn hf_cli_available() -> bool {
+    *HF_CLI_AVAILABLE.get_or_init(|| {
+        hf_bin_available() || uvx_available()
+    })
+}
+
+fn hf_bin_available() -> bool {
+    *HF_BIN_AVAILABLE.get_or_init(|| {
+        std::process::Command::new("hf")
+            .arg("--help")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    })
+}
+
+fn uvx_available() -> bool {
+    *UVX_AVAILABLE.get_or_init(|| {
+        std::process::Command::new("uvx")
+            .arg("--version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    })
+}
+
+fn hf_command() -> Command {
+    if hf_bin_available() {
+        Command::new("hf")
+    } else {
+        let mut c = Command::new("uvx");
+        c.arg("hf");
+        c
+    }
+}
+
+async fn download_via_hf_cli(
+    parsed: &HfResolveUrl,
+    dest_dir: &Path,
+    progress: Option<(Sender<DownloadSignal>, usize, String)>,
+    expected_size: Option<u64>,
+    cancel: Option<&CancellationToken>,
+) -> Result<PathBuf> {
+    fs::create_dir_all(dest_dir)
+        .await
+        .with_context(|| format!("failed to create directory {:?}", dest_dir))?;
+    let staging_root = dest_dir.join(".arctic-hf-staging");
+
+    let flat_existing = dest_dir.join(&parsed.file_name);
+    let nested_existing = dest_dir.join(&parsed.file_path);
+    if fs::try_exists(&flat_existing).await.unwrap_or(false) {
+        cleanup_xet_local_sidecars(dest_dir, &staging_root).await;
+        return Ok(flat_existing);
+    }
+    if fs::try_exists(&nested_existing).await.unwrap_or(false) {
+        fs::rename(&nested_existing, &flat_existing)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to move existing hf file from {} to {}",
+                    nested_existing.display(),
+                    flat_existing.display()
+                )
+            })?;
+        cleanup_xet_local_sidecars(dest_dir, &staging_root).await;
+        return Ok(flat_existing);
+    }
+
+    let stage_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stage_dir = staging_root.join(format!("job-{stage_id}"));
+    if let Some(parent) = Path::new(&parsed.file_path).parent() {
+        if parent != Path::new("") {
+            fs::create_dir_all(stage_dir.join(parent)).await.with_context(|| {
+                format!(
+                    "failed to prepare hf staging parent {:?}",
+                    stage_dir.join(parent)
+                )
+            })?;
+        }
+    } else {
+        fs::create_dir_all(&stage_dir).await.with_context(|| {
+            format!("failed to create hf staging dir {}", stage_dir.display())
+        })?;
+    }
+
+    let mut cmd = hf_command();
+    log::info!(
+        "HF/Xet staging download: repo_file={}, local_dir={}",
+        parsed.file_path,
+        stage_dir.display()
+    );
+    cmd.arg("download")
+        .arg(&parsed.repo_id)
+        .arg(&parsed.file_path)
+        .arg("--revision")
+        .arg(&parsed.revision)
+        .arg("--local-dir")
+        .arg(&stage_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        .env("HF_XET_HIGH_PERFORMANCE", "1");
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "failed to spawn 'hf download' command")?;
+
+    let expected_size = if expected_size.is_some() {
+        expected_size
+    } else {
+        hf_dry_run_size(parsed).await
+    };
+
+    let mut last_reported = 0u64;
+    if let Some((sender, index, artifact_name)) = progress.as_ref() {
+        // Seed UI with known total size early so progress can be determinate.
+        let _ = sender.send(DownloadSignal::Progress {
+            artifact: artifact_name.clone(),
+            index: *index,
+            received: 0,
+            size: expected_size,
+        });
+    }
+    let status = loop {
+        if let Some(token) = cancel {
+            if token.is_cancelled() {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                cleanup_xet_local_sidecars(dest_dir, &staging_root).await;
+                return Err(anyhow!("download cancelled by user"));
+            }
+        }
+
+        if let Some((sender, index, artifact_name)) = progress.as_ref() {
+            let mut received = hf_downloaded_bytes(&stage_dir, parsed)
+                .await
+                .unwrap_or(last_reported);
+            if let Some(size) = expected_size {
+                received = received.min(size);
+            }
+            if received > last_reported {
+                last_reported = received;
+                let _ = sender.send(DownloadSignal::Progress {
+                    artifact: artifact_name.clone(),
+                    index: *index,
+                    received,
+                    size: expected_size,
+                });
+            }
+        }
+
+        match child
+            .try_wait()
+            .with_context(|| "failed waiting for 'hf download' command")?
+        {
+            Some(status) => break status,
+            None => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
+        }
+    };
+
+    if !status.success() {
+        cleanup_xet_local_sidecars(dest_dir, &staging_root).await;
+        return Err(anyhow!("hf download exited with status {}", status));
+    }
+
+    let flat_path = dest_dir.join(&parsed.file_name);
+    // `hf download` materializes nested repo paths under `--local-dir`.
+    // Move the downloaded file back to the flat destination used by non-Xet mode.
+    let nested_path = stage_dir.join(&parsed.file_path);
+    if fs::try_exists(&nested_path).await.unwrap_or(false) {
+        move_file_with_fallback(&nested_path, &flat_path).await?;
+        cleanup_xet_local_sidecars(dest_dir, &staging_root).await;
+        return Ok(flat_path);
+    }
+
+    // Defensive fallback: if a legacy/old binary wrote into dest_dir directly,
+    // normalize it back to flat layout and clean up empty nested folders.
+    let legacy_nested_path = dest_dir.join(&parsed.file_path);
+    if fs::try_exists(&legacy_nested_path).await.unwrap_or(false) {
+        move_file_with_fallback(&legacy_nested_path, &flat_path).await?;
+        if let Some(parent) = legacy_nested_path.parent() {
+            remove_empty_parents_until(parent, dest_dir).await;
+        }
+        cleanup_xet_local_sidecars(dest_dir, &staging_root).await;
+        return Ok(flat_path);
+    }
+
+    let staged_flat_path = stage_dir.join(&parsed.file_name);
+    if fs::try_exists(&staged_flat_path).await.unwrap_or(false) {
+        move_file_with_fallback(&staged_flat_path, &flat_path).await?;
+        cleanup_xet_local_sidecars(dest_dir, &staging_root).await;
+        return Ok(flat_path);
+    }
+
+    if fs::try_exists(&flat_path).await.unwrap_or(false) {
+        cleanup_xet_local_sidecars(dest_dir, &staging_root).await;
+        return Ok(flat_path);
+    }
+
+    cleanup_xet_local_sidecars(dest_dir, &staging_root).await;
+    Err(anyhow!(
+        "hf download completed but output file was not found at {} or {}",
+        flat_path.display(),
+        nested_path.display()
+    ))
+}
+
+async fn move_file_with_fallback(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).await.with_context(|| {
+            format!("failed to create destination parent {}", parent.display())
+        })?;
+    }
+    match fs::rename(src, dst).await {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            fs::copy(src, dst).await.with_context(|| {
+                format!(
+                    "failed to copy hf-downloaded file from {} to {} after rename error: {}",
+                    src.display(),
+                    dst.display(),
+                    rename_err
+                )
+            })?;
+            fs::remove_file(src).await.ok();
+            Ok(())
+        }
+    }
+}
+
+async fn remove_empty_parents_until(start: &Path, stop_at: &Path) {
+    let mut current = start.to_path_buf();
+    loop {
+        if current == stop_at {
+            break;
+        }
+        match fs::remove_dir(&current).await {
+            Ok(()) => {
+                if let Some(parent) = current.parent() {
+                    current = parent.to_path_buf();
+                } else {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+async fn cleanup_xet_local_sidecars(dest_dir: &Path, staging_root: &Path) {
+    let _ = fs::remove_dir_all(staging_root).await;
+    if let Some(parent) = staging_root.parent() {
+        remove_empty_parents_until(parent, dest_dir).await;
+    }
+
+    // Drop legacy local Hugging Face cache under model folders to avoid duplicate payload usage.
+    let legacy_download_cache = dest_dir
+        .join(".cache")
+        .join("huggingface")
+        .join("download");
+    if fs::try_exists(&legacy_download_cache).await.unwrap_or(false) {
+        let _ = fs::remove_dir_all(&legacy_download_cache).await;
+        if let Some(parent) = legacy_download_cache.parent() {
+            remove_empty_parents_until(parent, dest_dir).await;
+        }
+    }
+}
+
+async fn hf_dry_run_size(parsed: &HfResolveUrl) -> Option<u64> {
+    let mut cmd = hf_command();
+    let output = cmd
+        .arg("download")
+        .arg(&parsed.repo_id)
+        .arg(&parsed.file_path)
+        .arg("--revision")
+        .arg(&parsed.revision)
+        .arg("--dry-run")
+        .env("HF_XET_HIGH_PERFORMANCE", "1")
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        // Example: [dry-run] Will download 1 files (out of 1) totalling 28.6G.
+        if let Some(rest) = line.split("totalling ").nth(1) {
+            let token = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('.')
+                .trim();
+            if let Some(bytes) = parse_hf_size_token(token) {
+                return Some(bytes);
+            }
+        }
+
+        // Fallback: parse table lines like ".../filename.safetensors 28.6G"
+        if line.contains(&parsed.file_name) {
+            if let Some(last) = line.split_whitespace().last() {
+                if let Some(bytes) = parse_hf_size_token(last.trim_end_matches('.').trim()) {
+                    return Some(bytes);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_hf_size_token(token: &str) -> Option<u64> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let unit_char = trimmed.chars().last()?;
+    let (num_part, mul) = match unit_char {
+        'K' | 'k' => (&trimmed[..trimmed.len() - 1], 1024_f64),
+        'M' | 'm' => (&trimmed[..trimmed.len() - 1], 1024_f64 * 1024_f64),
+        'G' | 'g' => (&trimmed[..trimmed.len() - 1], 1024_f64 * 1024_f64 * 1024_f64),
+        'T' | 't' => (
+            &trimmed[..trimmed.len() - 1],
+            1024_f64 * 1024_f64 * 1024_f64 * 1024_f64,
+        ),
+        _ => (trimmed, 1.0),
+    };
+    let value = num_part.parse::<f64>().ok()?;
+    if value <= 0.0 {
+        return None;
+    }
+    Some((value * mul) as u64)
+}
+
+async fn hf_downloaded_bytes(
+    dest_dir: &Path,
+    parsed: &HfResolveUrl,
+) -> Option<u64> {
+    let flat_path = dest_dir.join(&parsed.file_name);
+    let nested_path = dest_dir.join(&parsed.file_path);
+
+    // Prefer real destination file growth when present. Cache growth can be bursty.
+    if let Ok(meta) = fs::metadata(&flat_path).await {
+        return Some(meta.len());
+    }
+    if let Ok(meta) = fs::metadata(&nested_path).await {
+        return Some(meta.len());
+    }
+
+    // During hf_xet downloads, bytes are typically written to a hashed
+    // `*.incomplete` file under:
+    // <local-dir>/.cache/huggingface/download/<repo_subdir>/
+    // Track that folder directly for per-file progress.
+    let mut rel_dir = PathBuf::new();
+    if let Some(parent) = Path::new(&parsed.file_path).parent() {
+        if parent != Path::new("") {
+            rel_dir = parent.to_path_buf();
+        }
+    }
+    let download_dir = dest_dir
+        .join(".cache")
+        .join("huggingface")
+        .join("download")
+        .join(rel_dir);
+
+    let mut best = 0u64;
+    let mut rd = fs::read_dir(&download_dir).await.ok()?;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".incomplete") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata().await {
+            best = best.max(meta.len());
+        }
+        // Some hf builds may use temp suffixes; keep a defensive branch.
+        if path.extension().and_then(|x| x.to_str()) == Some("tmp") {
+            if let Ok(meta) = entry.metadata().await {
+                best = best.max(meta.len());
+            }
+        }
+    }
+
+    if best > 0 { Some(best) } else { None }
 }
 
 fn build_download_url(repo: &str, path: &str) -> Result<String> {

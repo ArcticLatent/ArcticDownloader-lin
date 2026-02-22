@@ -25,6 +25,57 @@ body {
   background: radial-gradient(circle at 10% -10%, #1b2740, var(--bg) 45%);
   color: var(--text);
 }
+.startup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: radial-gradient(circle at 15% 0%, #1c2942, #0a0d14 55%);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  transition: opacity 220ms ease;
+}
+.startup-overlay.is-hiding {
+  opacity: 0;
+  pointer-events: none;
+}
+.startup-overlay.hidden {
+  display: none;
+}
+.startup-card {
+  width: min(520px, 96vw);
+  border: 1px solid #354261;
+  border-radius: 16px;
+  background: linear-gradient(150deg, #151d2d, #111826);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  text-align: center;
+  padding: 24px 20px;
+}
+.startup-icon {
+  width: 36px;
+  height: 36px;
+}
+.startup-card h2 {
+  margin: 0;
+  font-size: 1.45rem;
+}
+.startup-status {
+  margin: 0;
+  color: #c5d2ef;
+  font-size: 0.9rem;
+  min-height: 1.3em;
+}
+.startup-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid #5e6f92;
+  border-top-color: #8eb4ff;
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
 .app-shell {
   max-width: 1280px;
   margin: 0 auto;
@@ -491,4 +542,3 @@ button.starting-state {
 button.starting-state:hover {
   border-color: #7487a7;
 }
-

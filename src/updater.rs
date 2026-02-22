@@ -7,6 +7,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsStr,
+    io::IsTerminal,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -390,19 +391,29 @@ async fn run_privileged_install(program: &str, args: &[&str]) -> Result<()> {
         Err(err) => attempts.push(format!("pkexec {} => {err}", pkexec_args.join(" "))),
     }
 
-    let mut sudo_interactive = vec![program];
-    sudo_interactive.extend_from_slice(args);
-    match run_install_command_direct("sudo", &sudo_interactive).await {
-        Ok(()) => {
-            return Ok(());
+    if can_use_interactive_sudo() {
+        let mut sudo_interactive = vec![program];
+        sudo_interactive.extend_from_slice(args);
+        match run_install_command_direct("sudo", &sudo_interactive).await {
+            Ok(()) => {
+                return Ok(());
+            }
+            Err(err) => attempts.push(format!("sudo {} => {err}", sudo_interactive.join(" "))),
         }
-        Err(err) => attempts.push(format!("sudo {} => {err}", sudo_interactive.join(" "))),
+    } else {
+        attempts.push("sudo interactive skipped (no terminal attached)".to_string());
     }
 
     bail!(
-        "could not run installer with required privileges. attempts: {}",
+        "could not run installer with required privileges. \
+         If running from desktop GUI, ensure a PolicyKit agent is active; otherwise run from a terminal with --nerdstats so sudo can prompt. \
+         attempts: {}",
         attempts.join(" | ")
     );
+}
+
+fn can_use_interactive_sudo() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
 async fn run_install_command_direct(program: &str, args: &[&str]) -> Result<()> {

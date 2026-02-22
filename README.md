@@ -61,6 +61,8 @@ Model/LoRA downloader:
 - Shows active/completed transfers and per-item progress
 - Supports cancellation
 - LoRA preview metadata supports creator/trigger/description handling
+- Optional Hugging Face Xet fast-path via app toggle in Models:
+  enable `HF Xet (Experimental)` and ensure `uvx hf` or `hf` CLI backend is available.
 
 ## ComfyUI Installer Module
 

@@ -8,6 +8,7 @@ use arctic_downloader::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    io::IsTerminal,
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::Stdio,
@@ -54,6 +55,16 @@ struct UpdateCheckResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct HfXetPreflightResponse {
+    xet_enabled: bool,
+    hf_cli_available: bool,
+    hf_backend: String,
+    hf_xet_installed: bool,
+    hub_version: Option<String>,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
 struct LoraMetadataResponse {
     creator: String,
     creator_url: Option<String>,
@@ -90,6 +101,10 @@ struct ComfyInstallRecommendation {
 #[serde(rename_all = "camelCase")]
 struct ComfyInstallRequest {
     install_root: String,
+    #[serde(default)]
+    extra_model_root: Option<String>,
+    #[serde(default)]
+    extra_model_use_default: bool,
     torch_profile: Option<String>,
     include_sage_attention: bool,
     include_sage_attention3: bool,
@@ -156,6 +171,7 @@ struct ComfyInstallationEntry {
 struct ComfyUiUpdateStatus {
     installed_version: Option<String>,
     latest_version: Option<String>,
+    head_matches_latest_tag: bool,
     update_available: bool,
     checked: bool,
     detail: String,
@@ -358,20 +374,25 @@ fn install_missing_linux_prereqs(scan: &LinuxPrereqScan) -> Result<(), String> {
     if scan.missing_required.is_empty() {
         return Ok(());
     }
-    let mut args: Vec<&str> = Vec::new();
-    let mut packages: Vec<&str> = scan.missing_required.iter().map(String::as_str).collect();
+    let mut package_args: Vec<&str> = scan.missing_required.iter().map(String::as_str).collect();
     match scan.distro.as_str() {
         "arch" => {
-            run_command("sudo", &["pacman", "-Sy"], None)?;
-            args.extend_from_slice(&["pacman", "-S", "--needed", "--noconfirm"]);
+            run_privileged_command("pacman", &["-Sy"], None)?;
+            let mut args = vec!["-S", "--needed", "--noconfirm"];
+            args.append(&mut package_args);
+            run_privileged_command("pacman", &args, None)?;
         }
         "debian" => {
-            run_command("sudo", &["apt", "update"], None)?;
-            args.extend_from_slice(&["apt", "install", "-y"]);
+            run_privileged_command("apt", &["update"], None)?;
+            let mut args = vec!["install", "-y"];
+            args.append(&mut package_args);
+            run_privileged_command("apt", &args, None)?;
         }
         "fedora" => {
-            run_command("sudo", &["dnf", "makecache"], None)?;
-            args.extend_from_slice(&["dnf", "install", "-y"]);
+            run_privileged_command("dnf", &["makecache"], None)?;
+            let mut args = vec!["install", "-y"];
+            args.append(&mut package_args);
+            run_privileged_command("dnf", &args, None)?;
         }
         _ => {
             return Err(
@@ -380,8 +401,6 @@ fn install_missing_linux_prereqs(scan: &LinuxPrereqScan) -> Result<(), String> {
             );
         }
     }
-    args.append(&mut packages);
-    run_command("sudo", &args, None)?;
     Ok(())
 }
 
@@ -551,6 +570,87 @@ fn normalize_path(raw: &str) -> Result<PathBuf, String> {
             .join(path);
     }
     Ok(normalize_canonical_path(&path))
+}
+
+fn normalize_optional_path(raw: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(value) = raw else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    normalize_path(trimmed).map(Some)
+}
+
+fn yaml_single_quote(input: &str) -> String {
+    format!("'{}'", input.replace('\'', "''"))
+}
+
+fn write_extra_model_paths_yaml(
+    comfy_dir: &Path,
+    base_path: &Path,
+    is_default: bool,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(base_path).map_err(|err| {
+        format!(
+            "failed to prepare extra models folder '{}': {err}",
+            base_path.display()
+        )
+    })?;
+
+    let target = comfy_dir.join("extra_model_paths.yaml");
+    let example = comfy_dir.join("extra_model_paths.yaml.example");
+    if !target.exists() {
+        if example.exists() {
+            std::fs::rename(&example, &target).map_err(|err| {
+                format!(
+                    "failed to rename '{}' to '{}': {err}",
+                    example.display(),
+                    target.display()
+                )
+            })?;
+        } else {
+            return Err(
+                "extra_model_paths.yaml.example was not found in ComfyUI install folder."
+                    .to_string(),
+            );
+        }
+    }
+
+    let base = yaml_single_quote(&normalize_canonical_path(base_path).to_string_lossy());
+    let default_value = if is_default { "true" } else { "false" };
+    let yaml = format!(
+        "# Managed by Arctic ComfyUI Helper.\n\
+comfyui:\n\
+  base_path: {base}\n\
+  is_default: {default_value}\n\
+  checkpoints: models/checkpoints/\n\
+  text_encoders: |\n\
+    models/text_encoders/\n\
+    models/clip/\n\
+  clip_vision: models/clip_vision/\n\
+  configs: models/configs/\n\
+  controlnet: models/controlnet/\n\
+  diffusion_models: |\n\
+    models/diffusion_models/\n\
+    models/unet/\n\
+  embeddings: models/embeddings/\n\
+  loras: models/loras/\n\
+  upscale_models: models/upscale_models/\n\
+  vae: models/vae/\n\
+  audio_encoders: models/audio_encoders/\n\
+  model_patches: models/model_patches/\n"
+    );
+
+    std::fs::write(&target, yaml).map_err(|err| {
+        format!(
+            "failed to write extra model paths config '{}': {err}",
+            target.display()
+        )
+    })?;
+
+    Ok(target)
 }
 
 fn is_forbidden_install_path(path: &Path) -> bool {
@@ -755,9 +855,157 @@ fn has_dns(host: &str, port: u16) -> bool {
         .unwrap_or(false)
 }
 
+fn parse_hf_env_value(text: &str, key: &str) -> Option<String> {
+    let prefix = format!("- {key}:");
+    text.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(&prefix).map(str::trim))
+        .map(str::to_string)
+}
+
+fn get_hf_xet_preflight_internal(xet_enabled: bool) -> HfXetPreflightResponse {
+    let uvx_hf_available = command_available("uvx", &["hf", "--help"]);
+    let hf_native_available = command_available("hf", &["--help"]);
+    let hf_cli_available = uvx_hf_available || hf_native_available;
+    let hf_backend = if uvx_hf_available {
+        "uvx hf".to_string()
+    } else if hf_native_available {
+        "hf".to_string()
+    } else {
+        "none".to_string()
+    };
+
+    if !hf_cli_available {
+        return HfXetPreflightResponse {
+            xet_enabled,
+            hf_cli_available,
+            hf_backend,
+            hf_xet_installed: false,
+            hub_version: None,
+            detail: "HF CLI backend not found. Install uv (`https://docs.astral.sh/uv/`) for `uvx hf`, or install `hf` (`pip install -U huggingface_hub hf_xet`).".to_string(),
+        };
+    }
+
+    let env_probe = if uvx_hf_available {
+        run_command_capture("uvx", &["hf", "env"], None)
+    } else {
+        run_command_capture("hf", &["env"], None)
+    };
+
+    match env_probe {
+        Ok((stdout, _stderr)) => {
+            let hf_xet_raw = parse_hf_env_value(&stdout, "hf_xet").unwrap_or_default();
+            let hub_version = parse_hf_env_value(&stdout, "huggingface_hub version");
+            let hf_xet_installed = {
+                let normalized = hf_xet_raw.trim().to_ascii_lowercase();
+                !normalized.is_empty() && normalized != "n/a" && normalized != "none"
+            };
+
+            let detail = if !xet_enabled {
+                format!(
+                    "Xet is installed but disabled in app settings (backend: {}).",
+                    hf_backend
+                )
+            } else if hf_xet_installed {
+                format!(
+                    "HF/Xet preflight OK via {} (huggingface_hub {}, hf_xet {}).",
+                    hf_backend,
+                    hub_version.clone().unwrap_or_else(|| "unknown".to_string()),
+                    hf_xet_raw
+                )
+            } else {
+                format!(
+                    "HF backend {} found, but hf_xet is missing. Run `pip install -U huggingface_hub hf_xet`.",
+                    hf_backend
+                )
+            };
+
+            HfXetPreflightResponse {
+                xet_enabled,
+                hf_cli_available,
+                hf_backend,
+                hf_xet_installed,
+                hub_version,
+                detail,
+            }
+        }
+        Err(err) => HfXetPreflightResponse {
+            xet_enabled,
+            hf_cli_available,
+            hf_backend,
+            hf_xet_installed: false,
+            hub_version: None,
+            detail: format!("Could not run HF env probe: {err}"),
+        },
+    }
+}
+
+#[tauri::command]
+fn get_hf_xet_preflight(state: State<'_, AppState>) -> HfXetPreflightResponse {
+    let xet_enabled = state.context.config.settings().hf_xet_enabled;
+    get_hf_xet_preflight_internal(xet_enabled)
+}
+
+fn ensure_hf_xet_runtime_installed(always_upgrade: bool) -> Result<(), String> {
+    let before = get_hf_xet_preflight_internal(true);
+
+    let mut attempts: Vec<String> = Vec::new();
+    if !command_available("uv", &["--version"]) {
+        return Err("uv is required for HF/Xet setup but was not found in PATH.".to_string());
+    }
+    if always_upgrade || !before.hf_xet_installed {
+        match run_command_capture(
+            "uv",
+            &[
+                "tool",
+                "install",
+                "--upgrade",
+                "--force",
+                "huggingface_hub[hf_xet]",
+            ],
+            None,
+        ) {
+            Ok(_) => attempts.push(
+                "uv tool install --upgrade --force huggingface_hub[hf_xet] => ok".to_string(),
+            ),
+            Err(err) => {
+                attempts.push(format!(
+                    "uv tool install --upgrade --force huggingface_hub[hf_xet] => {err}"
+                ));
+            }
+        }
+    }
+
+    let after = get_hf_xet_preflight_internal(true);
+    if after.hf_cli_available && after.hf_xet_installed {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not prepare HF/Xet runtime. {}. attempts: {}",
+            after.detail,
+            attempts.join(" | ")
+        ))
+    }
+}
+
+#[tauri::command]
+fn set_hf_xet_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<AppSettings, String> {
+    if enabled {
+        ensure_hf_xet_runtime_installed(true)?;
+    }
+    state
+        .context
+        .config
+        .update_settings(|settings| settings.hf_xet_enabled = enabled)
+        .map_err(|err| err.to_string())
+}
+
 #[tauri::command]
 fn run_comfyui_preflight(
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     request: ComfyInstallRequest,
 ) -> ComfyPreflightResponse {
     let mut items: Vec<PreflightItem> = Vec::new();
@@ -919,6 +1167,30 @@ fn run_comfyui_preflight(
             "warn",
             "uv runtime",
             "uv not found. Installer will auto-install uv for current user during ComfyUI install.",
+        );
+    }
+
+    let hf_xet = get_hf_xet_preflight_internal(state.context.config.settings().hf_xet_enabled);
+    if !hf_xet.hf_cli_available {
+        push_preflight(
+            &mut items,
+            "warn",
+            "HF/Xet acceleration",
+            hf_xet.detail,
+        );
+    } else if hf_xet.hf_xet_installed && hf_xet.xet_enabled {
+        push_preflight(
+            &mut items,
+            "pass",
+            "HF/Xet acceleration",
+            hf_xet.detail,
+        );
+    } else {
+        push_preflight(
+            &mut items,
+            "warn",
+            "HF/Xet acceleration",
+            hf_xet.detail,
         );
     }
 
@@ -1210,6 +1482,42 @@ fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Resu
         return Err(format!("Command failed: {} {}", program, args.join(" ")));
     }
     Ok(())
+}
+
+fn can_use_interactive_sudo() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+fn run_privileged_command(
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&Path>,
+) -> Result<(), String> {
+    let mut sudo_non_interactive: Vec<&str> = vec!["-n", program];
+    sudo_non_interactive.extend_from_slice(args);
+    if run_command("sudo", &sudo_non_interactive, working_dir).is_ok() {
+        return Ok(());
+    }
+
+    let mut pkexec_args: Vec<&str> = vec![program];
+    pkexec_args.extend_from_slice(args);
+    if run_command("pkexec", &pkexec_args, working_dir).is_ok() {
+        return Ok(());
+    }
+
+    if can_use_interactive_sudo() {
+        let mut sudo_args: Vec<&str> = vec![program];
+        sudo_args.extend_from_slice(args);
+        if run_command("sudo", &sudo_args, working_dir).is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err(format!(
+        "Privilege escalation failed for {} {}. If running from desktop GUI, ensure a PolicyKit agent is active; otherwise run with --nerdstats from a terminal so sudo can prompt.",
+        program,
+        args.join(" ")
+    ))
 }
 
 fn run_command_capture(
@@ -2141,6 +2449,7 @@ fn run_comfyui_install_linux(
     }
 
     let base_root = normalize_path(&request.install_root)?;
+    let extra_model_root = normalize_optional_path(request.extra_model_root.as_deref())?;
     let selected_comfy_root = path_name_is_comfyui(&base_root);
     let comfy_dir = if selected_comfy_root {
         base_root.clone()
@@ -2220,6 +2529,32 @@ fn run_comfyui_install_linux(
             name: "ComfyUI core".to_string(),
             status: "skipped".to_string(),
             detail: "Existing ComfyUI folder reused.".to_string(),
+        });
+    }
+
+    if let Some(extra_root) = extra_model_root.as_ref() {
+        write_install_state(&install_root, "in_progress", "extra_model_paths");
+        emit_install_event(
+            app,
+            "step",
+            &format!(
+                "Configuring ComfyUI extra model paths from {}...",
+                extra_root.display()
+            ),
+        );
+        let config_path = write_extra_model_paths_yaml(
+            &comfy_dir,
+            extra_root,
+            request.extra_model_use_default,
+        )?;
+        summary.push(InstallSummaryItem {
+            name: "extra_model_paths".to_string(),
+            status: "ok".to_string(),
+            detail: format!(
+                "Configured {} with base path {}.",
+                config_path.display(),
+                extra_root.display()
+            ),
         });
     }
 
@@ -2709,6 +3044,8 @@ async fn start_comfyui_install(
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| comfy_root.clone());
                 let managed = app_for_task.state::<AppState>();
+                let normalized_shared_models =
+                    normalize_optional_path(request.extra_model_root.as_deref()).ok().flatten();
                 let _ = managed.context.config.update_settings(|settings| {
                     settings.comfyui_root = Some(comfy_root.clone());
                     settings.comfyui_last_install_dir = Some(install_dir.clone());
@@ -2721,6 +3058,10 @@ async fn start_comfyui_install(
                     );
                     settings.comfyui_attention_backend =
                         Some(selected_attention_backend(&request).to_string());
+                    settings.shared_models_root = normalized_shared_models.clone();
+                    settings.shared_models_use_default = normalized_shared_models
+                        .as_ref()
+                        .is_some_and(|_| request.extra_model_use_default);
                 });
                 let _ = app_for_task.emit(
                     "comfyui-install-progress",
@@ -2844,6 +3185,64 @@ fn set_comfyui_install_base(
         .config
         .update_settings(|settings| {
             settings.comfyui_install_base = normalized.clone();
+        })
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_comfyui_extra_model_config(
+    state: State<'_, AppState>,
+    comfyui_root: Option<String>,
+) -> Result<ComfyExtraModelConfigResponse, String> {
+    let root = resolve_root_path(&state.context, comfyui_root)?;
+    let config = comfy_extra_model_config(&root);
+    Ok(match config {
+        Some(cfg) => ComfyExtraModelConfigResponse {
+            configured: true,
+            base_path: Some(cfg.base_path.to_string_lossy().to_string()),
+            use_as_default: cfg.is_default,
+        },
+        None => ComfyExtraModelConfigResponse {
+            configured: false,
+            base_path: None,
+            use_as_default: false,
+        },
+    })
+}
+
+#[tauri::command]
+fn set_comfyui_extra_model_config(
+    state: State<'_, AppState>,
+    comfyui_root: Option<String>,
+    extra_model_root: Option<String>,
+    use_as_default: bool,
+) -> Result<AppSettings, String> {
+    let root = resolve_root_path(&state.context, comfyui_root)?;
+    let normalized_extra = normalize_optional_path(extra_model_root.as_deref())?;
+    let yaml_path = root.join("extra_model_paths.yaml");
+    let example_path = root.join("extra_model_paths.yaml.example");
+
+    if let Some(extra_root) = normalized_extra.as_ref() {
+        write_extra_model_paths_yaml(&root, extra_root, use_as_default)?;
+    } else {
+        if yaml_path.exists() {
+            let _ = std::fs::remove_file(&yaml_path);
+        }
+        if !example_path.exists() {
+            let _ = std::fs::write(
+                &example_path,
+                "# Rename this to extra_model_paths.yaml and ComfyUI will load it\n",
+            );
+        }
+    }
+
+    state
+        .context
+        .config
+        .update_settings(|settings| {
+            settings.shared_models_root = normalized_extra.clone();
+            settings.shared_models_use_default =
+                normalized_extra.is_some() && use_as_default;
         })
         .map_err(|err| err.to_string())
 }
@@ -2979,6 +3378,16 @@ async fn download_model_assets(
     comfyui_root: Option<String>,
 ) -> Result<(), String> {
     let root = resolve_root_path(&state.context, comfyui_root)?;
+    let effective_root = match comfy_extra_model_config(&root) {
+        Some(config) if config.is_default => {
+            log::info!(
+                "Using extra model base path for model downloads: {}",
+                config.base_path.display()
+            );
+            config.base_path
+        }
+        _ => root,
+    };
     let resolved = state
         .context
         .catalog
@@ -3011,7 +3420,7 @@ async fn download_model_assets(
 
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = state.context.downloads.download_variant_with_cancel(
-        root,
+        effective_root,
         resolved_for_download,
         tx,
         Some(cancel),
@@ -3106,6 +3515,16 @@ async fn download_lora_asset(
     comfyui_root: Option<String>,
 ) -> Result<(), String> {
     let root = resolve_root_path(&state.context, comfyui_root)?;
+    let effective_root = match comfy_extra_model_config(&root) {
+        Some(config) if config.is_default => {
+            log::info!(
+                "Using extra model base path for LoRA downloads: {}",
+                config.base_path.display()
+            );
+            config.base_path
+        }
+        _ => root,
+    };
     let lora = state
         .context
         .catalog
@@ -3129,7 +3548,7 @@ async fn download_lora_asset(
         state
             .context
             .downloads
-            .download_lora_with_cancel(root, lora, token, tx, Some(cancel));
+            .download_lora_with_cancel(effective_root, lora, token, tx, Some(cancel));
     if let Ok(mut abort) = state.active_abort.lock() {
         *abort = Some(handle.abort_handle());
     }
@@ -3339,6 +3758,122 @@ fn resolve_root_path(
     }
 
     Err("Select a valid ComfyUI root folder first.".to_string())
+}
+
+fn parse_yaml_scalar(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 {
+        let single = trimmed.starts_with('\'') && trimmed.ends_with('\'');
+        let double = trimmed.starts_with('"') && trimmed.ends_with('"');
+        if single || double {
+            let inner = &trimmed[1..trimmed.len() - 1];
+            if single {
+                return inner.replace("''", "'");
+            }
+            return inner.replace("\\\"", "\"");
+        }
+    }
+    trimmed.to_string()
+}
+
+fn parse_yaml_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ComfyExtraModelConfig {
+    base_path: PathBuf,
+    is_default: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ComfyExtraModelConfigResponse {
+    configured: bool,
+    base_path: Option<String>,
+    use_as_default: bool,
+}
+
+fn comfy_extra_model_config(comfy_root: &Path) -> Option<ComfyExtraModelConfig> {
+    let path = comfy_root.join("extra_model_paths.yaml");
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut in_comfyui = false;
+    let mut base_path: Option<PathBuf> = None;
+    let mut is_default = false;
+
+    for line in content.lines() {
+        let without_comment = line.split('#').next().unwrap_or_default();
+        if without_comment.trim().is_empty() {
+            continue;
+        }
+
+        let indent = without_comment
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .count();
+        let trimmed = without_comment.trim();
+
+        if trimmed == "comfyui:" {
+            in_comfyui = true;
+            continue;
+        }
+
+        if in_comfyui {
+            if let Some(raw) = trimmed.strip_prefix("base_path:") {
+                let scalar = parse_yaml_scalar(raw);
+                if !scalar.trim().is_empty() {
+                    let parsed = PathBuf::from(scalar.trim());
+                    let resolved = if parsed.is_absolute() {
+                        parsed
+                    } else {
+                        comfy_root.join(parsed)
+                    };
+                    base_path = Some(normalize_canonical_path(&resolved));
+                }
+                continue;
+            }
+
+            if let Some(raw) = trimmed.strip_prefix("is_default:") {
+                let scalar = parse_yaml_scalar(raw);
+                if let Some(parsed) = parse_yaml_bool(&scalar) {
+                    is_default = parsed;
+                }
+                continue;
+            }
+        }
+
+        if indent == 0 && trimmed.ends_with(':') {
+            in_comfyui = false;
+            continue;
+        }
+
+        if !in_comfyui {
+            continue;
+        }
+
+        if let Some(raw) = trimmed.strip_prefix("base_path:") {
+            let scalar = parse_yaml_scalar(raw);
+            if scalar.trim().is_empty() {
+                continue;
+            }
+            let parsed = PathBuf::from(scalar.trim());
+            let resolved = if parsed.is_absolute() {
+                parsed
+            } else {
+                comfy_root.join(parsed)
+            };
+            base_path = Some(normalize_canonical_path(&resolved));
+            continue;
+        }
+    }
+
+    base_path.map(|base| ComfyExtraModelConfig {
+        base_path: base,
+        is_default,
+    })
 }
 
 fn comfyui_instance_name_from_path(path: &Path) -> String {
@@ -4125,35 +4660,53 @@ fn read_comfyui_installed_version(root: &Path) -> Option<String> {
     None
 }
 
-fn parse_comfyui_version_text(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("__version__") {
+fn parse_semver_triplet(input: &str) -> Option<(u64, u64, u64)> {
+    let trimmed = input.trim().trim_start_matches('v').trim_start_matches('V');
+    let core = trimmed.split('-').next().unwrap_or(trimmed);
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn normalize_release_version(input: &str) -> Option<String> {
+    let (major, minor, patch) = parse_semver_triplet(input)?;
+    Some(format!("{major}.{minor}.{patch}"))
+}
+
+fn git_latest_release_tag(root: &Path) -> Option<(String, String)> {
+    let (stdout, _) = run_command_capture("git", &["ls-remote", "--tags", "--refs", "origin"], Some(root)).ok()?;
+    let mut best: Option<((u64, u64, u64), String, String)> = None;
+
+    for line in stdout.lines() {
+        let mut cols = line.split_whitespace();
+        let Some(_sha) = cols.next() else {
             continue;
-        }
-        let (_, rhs) = trimmed.split_once('=')?;
-        let value = rhs.trim().trim_matches('"').trim_matches('\'').trim();
-        if !value.is_empty() {
-            return Some(value.to_string());
+        };
+        let Some(ref_name) = cols.next() else {
+            continue;
+        };
+        let Some(tag) = ref_name.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        let Some(version) = normalize_release_version(tag) else {
+            continue;
+        };
+        let Some(parsed) = parse_semver_triplet(&version) else {
+            continue;
+        };
+
+        match &best {
+            Some((current, _, _)) if *current >= parsed => {}
+            _ => best = Some((parsed, tag.to_string(), version)),
         }
     }
-    None
-}
 
-fn comfyui_version_from_git_ref(root: &Path, git_ref: &str) -> Option<String> {
-    let spec = format!("{git_ref}:comfyui_version.py");
-    let (stdout, _) = run_command_capture("git", &["show", &spec], Some(root)).ok()?;
-    parse_comfyui_version_text(&stdout)
-}
-
-fn git_head_commit(root: &Path) -> Option<String> {
-    let (stdout, _) = run_command_capture("git", &["rev-parse", "HEAD"], Some(root)).ok()?;
-    let commit = stdout.lines().next().unwrap_or_default().trim().to_string();
-    if commit.len() >= 7 {
-        Some(commit)
-    } else {
-        None
-    }
+    best.map(|(_, tag, version)| (tag, version))
 }
 
 fn git_current_branch(root: &Path) -> Option<String> {
@@ -4167,41 +4720,14 @@ fn git_current_branch(root: &Path) -> Option<String> {
     }
 }
 
-fn git_remote_commit(root: &Path, branch: &str) -> Option<String> {
-    let ref_name = format!("refs/heads/{branch}");
-    let (stdout, _) =
-        run_command_capture("git", &["ls-remote", "origin", &ref_name], Some(root)).ok()?;
-    let first = stdout.lines().next().unwrap_or_default().trim();
-    let sha = first.split_whitespace().next().unwrap_or_default().trim();
-    if sha.len() >= 7 {
-        Some(sha.to_string())
+fn git_commit_for_ref(root: &Path, git_ref: &str) -> Option<String> {
+    let (stdout, _) = run_command_capture("git", &["rev-parse", git_ref], Some(root)).ok()?;
+    let commit = stdout.lines().next().unwrap_or_default().trim().to_string();
+    if commit.len() >= 7 {
+        Some(commit)
     } else {
         None
     }
-}
-
-fn git_fetch_branch(root: &Path, branch: &str) -> bool {
-    run_command_capture(
-        "git",
-        &["fetch", "origin", branch, "--depth", "1"],
-        Some(root),
-    )
-    .is_ok()
-}
-
-fn git_ahead_behind(root: &Path) -> Option<(u64, u64)> {
-    // Compare local HEAD with the already fetched remote tip (FETCH_HEAD).
-    let (stdout, _) = run_command_capture(
-        "git",
-        &["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"],
-        Some(root),
-    )
-    .ok()?;
-    let line = stdout.lines().next()?.trim();
-    let mut parts = line.split_whitespace();
-    let ahead = parts.next()?.parse::<u64>().ok()?;
-    let behind = parts.next()?.parse::<u64>().ok()?;
-    Some((ahead, behind))
 }
 
 fn stop_comfyui_for_mutation(app: &AppHandle, state: &AppState) -> Result<bool, String> {
@@ -4954,101 +5480,76 @@ fn get_comfyui_update_status(
         return Ok(ComfyUiUpdateStatus {
             installed_version,
             latest_version: None,
+            head_matches_latest_tag: false,
             update_available: false,
             checked: false,
             detail: "Not a git-based ComfyUI install.".to_string(),
         });
     }
 
-    let branch = git_current_branch(&root).unwrap_or_else(|| "master".to_string());
-    if git_head_commit(&root).is_none() {
+    let Some((latest_tag, latest_version)) = git_latest_release_tag(&root) else {
         return Ok(ComfyUiUpdateStatus {
             installed_version,
             latest_version: None,
+            head_matches_latest_tag: false,
             update_available: false,
             checked: false,
-            detail: "Failed to read local ComfyUI git commit.".to_string(),
-        });
-    }
-    if git_remote_commit(&root, &branch).is_none() {
-        return Ok(ComfyUiUpdateStatus {
-            installed_version,
-            latest_version: None,
-            update_available: false,
-            checked: false,
-            detail: format!("Could not check remote branch '{branch}'."),
-        });
-    }
-    if !git_fetch_branch(&root, &branch) {
-        return Ok(ComfyUiUpdateStatus {
-            installed_version,
-            latest_version: None,
-            update_available: false,
-            checked: false,
-            detail: "Could not fetch remote ComfyUI branch.".to_string(),
-        });
-    }
-
-    let remote_version = comfyui_version_from_git_ref(&root, "FETCH_HEAD");
-    if let Some(local_ver) = installed_version.clone() {
-        match remote_version {
-            Some(remote_ver) if local_ver == remote_ver => {
-                return Ok(ComfyUiUpdateStatus {
-                    installed_version,
-                    latest_version: Some(remote_ver.clone()),
-                    update_available: false,
-                    checked: true,
-                    detail: format!(
-                        "ComfyUI is up to date (local v{local_ver}, remote v{remote_ver})."
-                    ),
-                });
-            }
-            Some(remote_ver) => {
-                return Ok(ComfyUiUpdateStatus {
-                    installed_version,
-                    latest_version: Some(remote_ver.clone()),
-                    update_available: true,
-                    checked: true,
-                    detail: format!(
-                        "ComfyUI version differs (local v{local_ver}, remote v{remote_ver})."
-                    ),
-                });
-            }
-            None => {
-                return Ok(ComfyUiUpdateStatus {
-                    installed_version,
-                    latest_version: None,
-                    update_available: false,
-                    checked: false,
-                    detail: "Could not read remote ComfyUI version from fetched branch."
-                        .to_string(),
-                });
-            }
-        }
-    }
-
-    // Fallback for installs that do not expose local version metadata.
-    let Some((ahead, behind)) = git_ahead_behind(&root) else {
-        return Ok(ComfyUiUpdateStatus {
-            installed_version,
-            latest_version: None,
-            update_available: false,
-            checked: false,
-            detail: "Could not compare local and remote revision state.".to_string(),
+            detail: "Could not read remote ComfyUI release tags.".to_string(),
         });
     };
-    let update_available = behind > 0;
-    Ok(ComfyUiUpdateStatus {
-        installed_version,
-        latest_version: None,
-        update_available,
-        checked: true,
-        detail: if update_available {
-            format!("A newer ComfyUI revision is available (behind {behind}, ahead {ahead}).")
-        } else {
-            "ComfyUI is up to date.".to_string()
-        },
-    })
+
+    let head_commit = git_commit_for_ref(&root, "HEAD");
+    let tag_commit = git_commit_for_ref(&root, &latest_tag);
+    if head_commit.is_some() && head_commit == tag_commit {
+        return Ok(ComfyUiUpdateStatus {
+            installed_version,
+            latest_version: Some(latest_version.clone()),
+            head_matches_latest_tag: true,
+            update_available: false,
+            checked: true,
+            detail: format!(
+                "ComfyUI is up to date by release tags (HEAD matches {latest_tag})."
+            ),
+        });
+    }
+
+    match installed_version.clone().and_then(|v| normalize_release_version(&v)) {
+        Some(local_version) => {
+            let local_triplet = parse_semver_triplet(&local_version);
+            let latest_triplet = parse_semver_triplet(&latest_version);
+            let update_available = matches!(
+                (local_triplet, latest_triplet),
+                (Some(local), Some(latest)) if latest > local
+            );
+
+            Ok(ComfyUiUpdateStatus {
+                installed_version,
+                latest_version: Some(latest_version.clone()),
+                head_matches_latest_tag: false,
+                update_available,
+                checked: true,
+                detail: if update_available {
+                    format!(
+                        "ComfyUI update available from release tags (local v{local_version}, latest tag {latest_tag})."
+                    )
+                } else {
+                    format!(
+                        "ComfyUI is up to date by release tags (local v{local_version}, latest tag {latest_tag})."
+                    )
+                },
+            })
+        }
+        None => Ok(ComfyUiUpdateStatus {
+            installed_version,
+            latest_version: Some(latest_version.clone()),
+            head_matches_latest_tag: false,
+            update_available: false,
+            checked: true,
+            detail: format!(
+                "Detected latest release tag {latest_tag}, but local ComfyUI version metadata is unavailable."
+            ),
+        }),
+    }
 }
 
 #[tauri::command]
@@ -5093,6 +5594,24 @@ async fn update_selected_comfyui(
         return Err("Selected ComfyUI install is not git-based.".to_string());
     }
 
+    let Some((latest_tag, latest_version)) = git_latest_release_tag(&root) else {
+        return Err("Could not resolve latest ComfyUI release tag from remote.".to_string());
+    };
+    let installed_version_norm = read_comfyui_installed_version(&root)
+        .and_then(|v| normalize_release_version(&v));
+    if let Some(current) = installed_version_norm {
+        let current_triplet = parse_semver_triplet(&current);
+        let latest_triplet = parse_semver_triplet(&latest_version);
+        if matches!(
+            (current_triplet, latest_triplet),
+            (Some(local), Some(latest)) if local >= latest
+        ) {
+            return Ok(format!(
+                "ComfyUI is already on latest release tag (v{latest_version})."
+            ));
+        }
+    }
+
     let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
     let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
     let uv_python_install_dir = shared_runtime_root
@@ -5100,16 +5619,47 @@ async fn update_selected_comfyui(
         .to_string_lossy()
         .to_string();
     let selected_profile = resolve_desired_torch_profile(&state.context.config.settings(), &root);
+    let latest_tag_for_task = latest_tag.clone();
+    let latest_version_for_task = latest_version.clone();
+    let branch_for_task = git_current_branch(&root).unwrap_or_else(|| "master".to_string());
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        // Prefer fast-forward updates. If local/remote diverged, fall back to rebase+autostash.
-        if let Err(ff_err) = run_command_with_retry("git", &["pull", "--ff-only"], Some(&root), 2) {
-            run_command_with_retry("git", &["pull", "--rebase", "--autostash"], Some(&root), 2)
-                .map_err(|rebase_err| {
+        run_command_with_retry("git", &["fetch", "--tags", "origin"], Some(&root), 2)?;
+        if let Err(err) =
+            run_command_with_retry("git", &["merge", "--ff-only", &latest_tag_for_task], Some(&root), 2)
+        {
+            let lower = err.to_ascii_lowercase();
+            if lower.contains("unrelated histories") {
+                // Preserve recoverability before rebasing branch tip to release tag.
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let backup_branch = format!("arctic-backup-before-tag-update-{ts}");
+                run_command_with_retry("git", &["branch", &backup_branch], Some(&root), 1)
+                    .map_err(|backup_err| {
+                        format!(
+                            "Failed to create backup branch before tag migration ({backup_branch}). Details: {backup_err}"
+                        )
+                    })?;
+                run_command_with_retry(
+                    "git",
+                    &["checkout", "-B", &branch_for_task, &latest_tag_for_task],
+                    Some(&root),
+                    1,
+                )
+                .map_err(|checkout_err| {
                     format!(
-                        "ComfyUI git update failed (fast-forward and rebase both failed). ff-only: {ff_err} | rebase: {rebase_err}"
+                        "Failed to switch branch '{}' to release tag {} after unrelated-history merge failure. Backup branch: {}. Details: {}",
+                        branch_for_task, latest_tag_for_task, backup_branch, checkout_err
                     )
                 })?;
+            } else {
+                return Err(format!(
+                    "Failed to fast-forward ComfyUI to release tag {latest_tag_for_task}. Resolve local git divergence first. Details: {err}"
+                ));
+            }
         }
+
         let py = python_exe_for_root(&root)?;
         let req = root.join("requirements.txt");
         if req.exists() {
@@ -5130,13 +5680,17 @@ async fn update_selected_comfyui(
             )
             .map_err(|err| format!("Failed to re-apply selected torch profile: {err}"))?;
         }
-        Ok("ComfyUI updated successfully.".to_string())
+        Ok(format!(
+            "ComfyUI updated successfully to release tag {latest_tag_for_task} (v{latest_version_for_task})."
+        ))
     })
     .await
     .map_err(|err| format!("ComfyUI update task failed: {err}"))??;
 
     restart_comfyui_after_mutation(&app, &state, was_running)?;
-    Ok("ComfyUI updated successfully.".to_string())
+    Ok(format!(
+        "ComfyUI updated successfully to release tag {latest_tag} (v{latest_version})."
+    ))
 }
 
 fn stop_comfyui_root_impl(state: &AppState) -> Result<bool, String> {
@@ -5360,9 +5914,7 @@ fn cancel_active_download(state: State<'_, AppState>) -> Result<bool, String> {
         .map_err(|_| "download state lock poisoned".to_string())?;
     if let Some(token) = active.as_ref() {
         token.cancel();
-        if let Some(handle) = abort.take() {
-            handle.abort();
-        }
+        *abort = None;
         *active = None;
         Ok(true)
     } else {
@@ -5412,7 +5964,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-
     let mut tauri_context = tauri::generate_context!();
     tauri_context.set_default_window_icon(main_window_icon());
 
@@ -5470,8 +6021,12 @@ fn main() {
             get_comfyui_update_status,
             update_selected_comfyui,
             run_comfyui_preflight,
+            get_hf_xet_preflight,
+            set_hf_xet_enabled,
             set_comfyui_root,
             set_comfyui_install_base,
+            get_comfyui_extra_model_config,
+            set_comfyui_extra_model_config,
             save_civitai_token,
             check_updates_now,
             auto_update_startup,

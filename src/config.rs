@@ -139,6 +139,12 @@ pub struct AppSettings {
     pub comfyui_attention_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comfyui_torch_profile: Option<String>,
+    #[serde(default)]
+    pub hf_xet_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_models_root: Option<PathBuf>,
+    #[serde(default)]
+    pub shared_models_use_default: bool,
 }
 
 impl AppSettings {
@@ -165,6 +171,9 @@ impl Default for AppSettings {
             comfyui_pinned_memory_enabled: true,
             comfyui_attention_backend: None,
             comfyui_torch_profile: None,
+            hf_xet_enabled: false,
+            shared_models_root: None,
+            shared_models_use_default: false,
         }
     }
 }

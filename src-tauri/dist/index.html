@@ -8,6 +8,15 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <div id="startup-overlay" class="startup-overlay" aria-live="polite" aria-busy="true">
+      <div class="startup-card">
+        <img class="startup-icon" src="./icon.svg" alt="Arctic icon" />
+        <h2>Arctic ComfyUI Helper</h2>
+        <p id="startup-status" class="startup-status">Preparing workspace...</p>
+        <div class="startup-spinner" aria-hidden="true"></div>
+      </div>
+    </div>
+
     <main class="app-shell">
       <header class="topbar">
         <div class="title-wrap">
@@ -52,8 +61,17 @@
 
         <div class="row folder-row">
           <input id="comfy-install-root" type="text" placeholder="Select base folder (e.g. Documents). App will create /ComfyUI inside it." />
-          <button id="choose-install-root">Choose Folder</button>
-          <button id="save-install-root">Save Folder</button>
+          <button id="choose-install-root">Choose Base</button>
+          <button id="save-install-root">Save Base</button>
+        </div>
+        <div class="row folder-row" id="comfy-extra-model-row">
+          <input id="comfy-extra-model-root" type="text" placeholder="Optional shared models root (for extra_model_paths.yaml)" />
+          <button id="choose-extra-model-root">Choose Shared</button>
+          <label title="When enabled, model downloads use this shared folder by default via extra_model_paths.yaml">
+            <input type="checkbox" id="comfy-extra-model-default" />
+            Use as Default
+          </label>
+          <button id="clear-extra-model-root">Clear Shared</button>
         </div>
         <div class="row resume-banner hidden" id="comfy-resume-banner">
           <span id="comfy-resume-text">Interrupted install found.</span>
@@ -137,6 +155,13 @@
 
         <div class="row">
           <button id="download-model" class="primary">Download Model Assets</button>
+        </div>
+        <div class="row option-grid">
+          <label title="Experimental. Enables Hugging Face Xet-backed download path for model files. May be faster on some networks/disks but can stall or behave inconsistently.">
+            <input type="checkbox" id="enable-hf-xet" />
+            Enable HF Xet (Experimental)
+          </label>
+          <span class="transfer-sub">Experimental: Xet can improve speed but may show unstable behavior. Default downloader is recommended.</span>
         </div>
       </section>
 

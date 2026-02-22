@@ -58,7 +58,7 @@ pub fn build_context() -> Result<AppContext> {
         }
 
         let display_version = resolve_display_version(&config);
-        let downloads = Arc::new(DownloadManager::new(runtime.clone()));
+        let downloads = Arc::new(DownloadManager::new(runtime.clone(), config.clone()));
         let updater = Arc::new(Updater::new(
             runtime.clone(),
             config.clone(),
