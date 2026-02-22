@@ -2519,6 +2519,40 @@ fn run_comfyui_install_linux(
             Some(&install_root),
             2,
         )?;
+        // Pin fresh installs to latest release tag so users do not see an
+        // immediate update prompt after a clean install.
+        if let Some((latest_tag, latest_version)) = git_latest_release_tag(&comfy_dir) {
+            if let Err(err) = run_command_with_retry(
+                "git",
+                &["checkout", "-B", "master", &latest_tag],
+                Some(&comfy_dir),
+                1,
+            ) {
+                emit_install_event(
+                    app,
+                    "warn",
+                    &format!(
+                        "ComfyUI cloned, but failed to pin to release tag {} (v{}): {}",
+                        latest_tag, latest_version, err
+                    ),
+                );
+            } else {
+                emit_install_event(
+                    app,
+                    "info",
+                    &format!(
+                        "Pinned fresh ComfyUI install to latest release tag {} (v{}).",
+                        latest_tag, latest_version
+                    ),
+                );
+            }
+        } else {
+            emit_install_event(
+                app,
+                "warn",
+                "ComfyUI cloned, but latest release tag could not be resolved during install.",
+            );
+        }
         summary.push(InstallSummaryItem {
             name: "ComfyUI core".to_string(),
             status: "ok".to_string(),
@@ -5749,15 +5783,25 @@ async fn update_selected_comfyui(
     let selected_profile = resolve_desired_torch_profile(&state.context.config.settings(), &root);
     let latest_tag_for_task = latest_tag.clone();
     let latest_version_for_task = latest_version.clone();
-    let branch_for_task = git_current_branch(&root).unwrap_or_else(|| "master".to_string());
+    let branch_for_task_raw = git_current_branch(&root).unwrap_or_else(|| "master".to_string());
+    let branch_for_task = if branch_for_task_raw.eq_ignore_ascii_case("head") {
+        "master".to_string()
+    } else {
+        branch_for_task_raw
+    };
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         run_command_with_retry("git", &["fetch", "--tags", "origin"], Some(&root), 2)?;
         if let Err(err) =
             run_command_with_retry("git", &["merge", "--ff-only", &latest_tag_for_task], Some(&root), 2)
         {
             let lower = err.to_ascii_lowercase();
-            if lower.contains("unrelated histories") {
-                // Preserve recoverability before rebasing branch tip to release tag.
+            let can_repoint_branch = lower.contains("unrelated histories")
+                || lower.contains("not possible to fast-forward")
+                || lower.contains("not possible to fast forward")
+                || lower.contains("cannot fast-forward")
+                || lower.contains("diverging");
+            if can_repoint_branch {
+                // Preserve recoverability before repointing branch tip to release tag.
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -5777,7 +5821,7 @@ async fn update_selected_comfyui(
                 )
                 .map_err(|checkout_err| {
                     format!(
-                        "Failed to switch branch '{}' to release tag {} after unrelated-history merge failure. Backup branch: {}. Details: {}",
+                        "Failed to switch branch '{}' to release tag {} after merge fast-forward failed. Backup branch: {}. Details: {}",
                         branch_for_task, latest_tag_for_task, backup_branch, checkout_err
                     )
                 })?;

@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.1.3-1) unstable; urgency=medium
+
+  * ComfyUI updates are now more reliable and less confusing: fresh installs pin to latest release tag, divergent git states auto-recover with backup, and update close/relaunch messaging is clearer.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Sun, 22 Feb 2026 04:11:48 -0500
+
 arctic-comfyui-helper (0.1.2-1) unstable; urgency=medium
 
   * Added optional HF Xet (Experimental) toggle in Models; default downloader remains default/off.

@@ -1,5 +1,5 @@
 Name:           arctic-comfyui-helper
-Version:        0.1.2
+Version:        0.1.3
 Release:        1%{?dist}
 Summary:        ComfyUI installer and model manager
 %global debug_package %{nil}
