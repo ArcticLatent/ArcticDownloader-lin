@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.1.4-1) unstable; urgency=medium
+
+  * Fixed extra model (shared folder) issue
+
+ -- Arctic Latent <contact@arcticlatent.com>  Fri, 27 Feb 2026 11:13:28 -0500
+
 arctic-comfyui-helper (0.1.3-1) unstable; urgency=medium
 
   * ComfyUI updates are now more reliable and less confusing: fresh installs pin to latest release tag, divergent git states auto-recover with backup, and update close/relaunch messaging is clearer.

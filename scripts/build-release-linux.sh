@@ -9,6 +9,8 @@ NOTES_FILE=""
 SKIP_CLEAN=0
 DEB_DISTROBOX="arctic-ubuntu"
 RPM_DISTROBOX="arctic-fedora"
+DEB_SUDO_PASSWORD="${ARCTIC_DEB_SUDO_PASSWORD:-}"
+RPM_SUDO_PASSWORD="${ARCTIC_RPM_SUDO_PASSWORD:-}"
 
 usage() {
   cat <<'USAGE'
@@ -25,6 +27,9 @@ Options:
   --skip-clean           Skip cargo clean.
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
   --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
+  Environment variables for non-interactive sudo:
+    ARCTIC_DEB_SUDO_PASSWORD
+    ARCTIC_RPM_SUDO_PASSWORD
   -h, --help             Show help.
 USAGE
 }
@@ -186,9 +191,65 @@ echo "Building Arch package on host ..."
 echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
 distrobox enter "$DEB_DISTROBOX" -- bash -lc "
   set -euo pipefail
+  SUDO_PASSWORD='${DEB_SUDO_PASSWORD//\'/\'\"\'\"\'}'
+  as_root() {
+    if [[ \"\$(id -u)\" -eq 0 ]]; then
+      \"\$@\"
+    elif command -v sudo >/dev/null 2>&1; then
+      if [[ -n \"\$SUDO_PASSWORD\" ]]; then
+        printf '%s\n' \"\$SUDO_PASSWORD\" | sudo -S -p '' \"\$@\"
+      else
+        sudo \"\$@\"
+      fi
+    else
+      echo \"Need root privileges to install Debian build dependencies (missing sudo).\" >&2
+      exit 1
+    fi
+  }
+
+  ensure_deb_build_tools() {
+    local missing=0
+    for cmd in dpkg-buildpackage cargo rustc; do
+      command -v \"\$cmd\" >/dev/null 2>&1 || missing=1
+    done
+    if [[ \"\$missing\" -eq 1 ]]; then
+      as_root apt update
+      as_root apt install -y \
+        build-essential devscripts pkg-config \
+        debhelper-compat cargo rustc \
+        libgtk-3-dev libwebkit2gtk-4.1-dev \
+        libayatana-appindicator3-dev
+    fi
+  }
+
+  ensure_modern_rust() {
+    local min_cargo=\"1.85.0\"
+    if ! command -v rustup >/dev/null 2>&1; then
+      if ! command -v curl >/dev/null 2>&1; then
+        as_root apt update
+        as_root apt install -y curl
+      fi
+      curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+    fi
+
+    export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+    rustup toolchain install stable --profile minimal >/dev/null
+    rustup default stable >/dev/null
+    hash -r
+
+    local cargo_version
+    cargo_version=\"\$(cargo --version | awk '{print \$2}')\"
+    if [[ \"\$(printf '%s\n' \"\$cargo_version\" \"\$min_cargo\" | sort -V | head -n1)\" != \"\$min_cargo\" ]]; then
+      echo \"Cargo \$cargo_version is too old (need >= \$min_cargo).\" >&2
+      exit 1
+    fi
+  }
+
+  ensure_deb_build_tools
+  ensure_modern_rust
   export PATH=\"\$HOME/.cargo/bin:\$PATH\"
-  sudo apt purge -y arctic-comfyui-helper || true
-  sudo apt autoremove -y || true
+  as_root apt purge -y arctic-comfyui-helper || true
+  as_root apt autoremove -y || true
   cd '$ROOT_DIR'
   bash packaging/build-packages.sh deb
 "
@@ -196,8 +257,63 @@ distrobox enter "$DEB_DISTROBOX" -- bash -lc "
 echo "Building RPM package in distrobox '$RPM_DISTROBOX' ..."
 distrobox enter "$RPM_DISTROBOX" -- bash -lc "
   set -euo pipefail
+  SUDO_PASSWORD='${RPM_SUDO_PASSWORD//\'/\'\"\'\"\'}'
+  as_root() {
+    if [[ \"\$(id -u)\" -eq 0 ]]; then
+      \"\$@\"
+    elif command -v sudo >/dev/null 2>&1; then
+      if [[ -n \"\$SUDO_PASSWORD\" ]]; then
+        printf '%s\n' \"\$SUDO_PASSWORD\" | sudo -S -p '' \"\$@\"
+      else
+        sudo \"\$@\"
+      fi
+    else
+      echo \"Need root privileges to install RPM build dependencies (missing sudo).\" >&2
+      exit 1
+    fi
+  }
+
+  ensure_rpm_build_tools() {
+    local missing=0
+    for cmd in rpmbuild cargo rustc; do
+      command -v "\$cmd" >/dev/null 2>&1 || missing=1
+    done
+    if [[ "\$missing" -eq 1 ]] || ! rpm -q openssl-devel >/dev/null 2>&1; then
+      as_root dnf install -y \
+        rpm-build rpmdevtools \
+        rust cargo openssl-devel \
+        gcc gcc-c++ make pkgconf-pkg-config \
+        gtk3-devel webkit2gtk4.1-devel \
+        libayatana-appindicator-gtk3-devel
+    fi
+  }
+
+  ensure_modern_rust() {
+    local min_cargo=\"1.85.0\"
+    if ! command -v rustup >/dev/null 2>&1; then
+      if ! command -v curl >/dev/null 2>&1; then
+        as_root dnf install -y curl
+      fi
+      curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+    fi
+
+    export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+    rustup toolchain install stable --profile minimal >/dev/null
+    rustup default stable >/dev/null
+    hash -r
+
+    local cargo_version
+    cargo_version=\"\$(cargo --version | awk '{print \$2}')\"
+    if [[ \"\$(printf '%s\n' \"\$cargo_version\" \"\$min_cargo\" | sort -V | head -n1)\" != \"\$min_cargo\" ]]; then
+      echo \"Cargo \$cargo_version is too old (need >= \$min_cargo).\" >&2
+      exit 1
+    fi
+  }
+
+  ensure_rpm_build_tools
+  ensure_modern_rust
   export PATH=\"\$HOME/.cargo/bin:\$PATH\"
-  sudo dnf remove -y arctic-comfyui-helper || true
+  as_root dnf remove -y arctic-comfyui-helper || true
   cd '$ROOT_DIR'
   bash packaging/build-packages.sh rpm
 "
