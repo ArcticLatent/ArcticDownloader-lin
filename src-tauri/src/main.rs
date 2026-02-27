@@ -620,28 +620,30 @@ fn write_extra_model_paths_yaml(
 
     let base = yaml_single_quote(&normalize_canonical_path(base_path).to_string_lossy());
     let default_value = if is_default { "true" } else { "false" };
-    let yaml = format!(
-        "# Managed by Arctic ComfyUI Helper.\n\
-comfyui:\n\
-  base_path: {base}\n\
-  is_default: {default_value}\n\
-  checkpoints: models/checkpoints/\n\
-  text_encoders: |\n\
-    models/text_encoders/\n\
-    models/clip/\n\
-  clip_vision: models/clip_vision/\n\
-  configs: models/configs/\n\
-  controlnet: models/controlnet/\n\
-  diffusion_models: |\n\
-    models/diffusion_models/\n\
-    models/unet/\n\
-  embeddings: models/embeddings/\n\
-  loras: models/loras/\n\
-  upscale_models: models/upscale_models/\n\
-  vae: models/vae/\n\
-  audio_encoders: models/audio_encoders/\n\
-  model_patches: models/model_patches/\n"
-    );
+    let yaml = [
+        "# Managed by Arctic ComfyUI Helper.".to_string(),
+        "comfyui:".to_string(),
+        format!("  base_path: {base}"),
+        format!("  is_default: {default_value}"),
+        "  checkpoints: models/checkpoints/".to_string(),
+        "  text_encoders: |".to_string(),
+        "    models/text_encoders/".to_string(),
+        "    models/clip/".to_string(),
+        "  clip_vision: models/clip_vision/".to_string(),
+        "  configs: models/configs/".to_string(),
+        "  controlnet: models/controlnet/".to_string(),
+        "  diffusion_models: |".to_string(),
+        "    models/diffusion_models/".to_string(),
+        "    models/unet/".to_string(),
+        "  embeddings: models/embeddings/".to_string(),
+        "  loras: models/loras/".to_string(),
+        "  upscale_models: models/upscale_models/".to_string(),
+        "  vae: models/vae/".to_string(),
+        "  audio_encoders: models/audio_encoders/".to_string(),
+        "  model_patches: models/model_patches/".to_string(),
+    ]
+    .join("\n")
+        + "\n";
 
     std::fs::write(&target, yaml).map_err(|err| {
         format!(
@@ -6260,6 +6262,18 @@ fn install_linux_gdk_log_filter() {
             && domain == Some("Gdk")
             && message
                 .map(|m| m.contains("gdk_window_thaw_toplevel_updates"))
+                .unwrap_or(false)
+        {
+            return glib::LogWriterOutput::Handled;
+        }
+
+        if matches!(level, glib::LogLevel::Warning)
+            && domain == Some("libayatana-appindicator")
+            && message
+                .map(|m| {
+                    m.contains("libayatana-appindicator is deprecated")
+                        && m.contains("libayatana-appindicator-glib")
+                })
                 .unwrap_or(false)
         {
             return glib::LogWriterOutput::Handled;

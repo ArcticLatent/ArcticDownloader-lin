@@ -32,3 +32,6 @@ arctic-downloader = { path = ".." }
 tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2"
 glib = "0.18"
+
+[patch.crates-io]
+tray-icon = { path = "../vendor/tray-icon-0.21.3" }
