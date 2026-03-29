@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.2.0-1) unstable; urgency=medium
+
+  * Release v0.2.0
+
+ -- Arctic Latent <contact@arcticlatent.com>  Sun, 29 Mar 2026 17:04:36 -0400
+
 arctic-comfyui-helper (0.1.9-1) unstable; urgency=medium
 
   * Fixed a Linux Intel XPU readiness-check issue where the app could keep telling users to log out and back in even after a reboot.

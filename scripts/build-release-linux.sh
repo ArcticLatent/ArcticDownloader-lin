@@ -294,6 +294,7 @@ distrobox enter "$DEB_DISTROBOX" -- bash -lc "
       as_root apt install -y \
         build-essential devscripts pkg-config \
         debhelper-compat cargo rustc \
+        libssl-dev \
         libgtk-3-dev libwebkit2gtk-4.1-dev \
         libayatana-appindicator3-dev
     fi
