@@ -68,6 +68,21 @@ struct HfXetPreflightResponse {
     detail: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchModelDownloadItem {
+    model_id: String,
+    variant_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchModelDownloadRequest {
+    items: Vec<BatchModelDownloadItem>,
+    ram_tier: Option<String>,
+    comfyui_root: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct LoraMetadataResponse {
     creator: String,
@@ -3717,6 +3732,7 @@ fn comfyui_launch_args(
     bf16_unet_enabled: bool,
     async_offload_enabled: bool,
     disable_smart_memory_enabled: bool,
+    custom_launch_args: &[String],
 ) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     if listen_enabled {
@@ -3738,7 +3754,52 @@ fn comfyui_launch_args(
         args.push("--disable-pinned-memory".to_string());
     }
     append_attention_launch_arg(&mut args, attention_backend);
+    args.extend(custom_launch_args.iter().cloned());
     args
+}
+
+fn parse_custom_launch_args(input: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut quote: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(active_quote) => match ch {
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    }
+                }
+                _ if ch == active_quote => quote = None,
+                _ => current.push(ch),
+            },
+            None => match ch {
+                '"' | '\'' => quote = Some(ch),
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    }
+                }
+                c if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        args.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+
+    if quote.is_some() {
+        return Err("Custom launch args contain an unclosed quote.".to_string());
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+
+    Ok(args)
 }
 
 fn run_comfyui_install(
@@ -4574,6 +4635,20 @@ fn get_comfyui_extra_model_config(
 }
 
 #[tauri::command]
+fn get_effective_download_destination(
+    state: State<'_, AppState>,
+    comfyui_root: Option<String>,
+) -> Result<EffectiveDownloadDestinationResponse, String> {
+    let root = resolve_root_path(&state.context, comfyui_root)?;
+    let effective_root = effective_download_root(&root);
+    Ok(EffectiveDownloadDestinationResponse {
+        comfyui_root: root.to_string_lossy().to_string(),
+        effective_root: effective_root.to_string_lossy().to_string(),
+        uses_shared_default: effective_root != root,
+    })
+}
+
+#[tauri::command]
 fn set_comfyui_extra_model_config(
     state: State<'_, AppState>,
     comfyui_root: Option<String>,
@@ -4607,6 +4682,38 @@ fn set_comfyui_extra_model_config(
             settings.shared_models_use_default =
                 normalized_extra.is_some() && use_as_default;
         })
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn set_comfyui_custom_launch_args(
+    state: State<'_, AppState>,
+    custom_launch_args: String,
+) -> Result<AppSettings, String> {
+    let trimmed = custom_launch_args.trim();
+    let normalized = if trimmed.is_empty() {
+        String::new()
+    } else {
+        parse_custom_launch_args(trimmed)?;
+        trimmed.to_string()
+    };
+
+    state
+        .context
+        .config
+        .update_settings(|settings| settings.comfyui_custom_launch_args = normalized.clone())
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn set_comfyui_show_runtime_logs(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<AppSettings, String> {
+    state
+        .context
+        .config
+        .update_settings(|settings| settings.comfyui_show_runtime_logs = enabled)
         .map_err(|err| err.to_string())
 }
 
@@ -4741,16 +4848,7 @@ async fn download_model_assets(
     comfyui_root: Option<String>,
 ) -> Result<(), String> {
     let root = resolve_root_path(&state.context, comfyui_root)?;
-    let effective_root = match comfy_extra_model_config(&root) {
-        Some(config) if config.is_default => {
-            log::info!(
-                "Using extra model base path for model downloads: {}",
-                config.base_path.display()
-            );
-            config.base_path
-        }
-        _ => root,
-    };
+    let effective_root = effective_download_root(&root);
     let resolved = state
         .context
         .catalog
@@ -4870,6 +4968,153 @@ async fn download_model_assets(
 }
 
 #[tauri::command]
+async fn download_model_assets_batch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: BatchModelDownloadRequest,
+) -> Result<(), String> {
+    if request.items.is_empty() {
+        return Err("Select at least one model first.".to_string());
+    }
+
+    let root = resolve_root_path(&state.context, request.comfyui_root)?;
+    let effective_root = effective_download_root(&root);
+    let tier = request
+        .ram_tier
+        .as_deref()
+        .and_then(parse_ram_tier)
+        .or_else(|| state.context.ram_tier());
+
+    let mut resolved_items = Vec::new();
+    for item in &request.items {
+        let resolved = state
+            .context
+            .catalog
+            .resolve_variant(&item.model_id, &item.variant_id)
+            .ok_or_else(|| {
+                format!(
+                    "Selected model variant was not found in catalog: {}/{}",
+                    item.model_id, item.variant_id
+                )
+            })?;
+
+        let planned = resolved.artifacts_for_download(tier);
+        if planned.is_empty() {
+            return Err(format!(
+                "No artifacts match the selected RAM tier for {}.",
+                resolved.master.display_name
+            ));
+        }
+
+        let mut resolved_for_download = resolved.clone();
+        resolved_for_download.variant.artifacts = planned;
+        resolved_items.push(resolved_for_download);
+    }
+
+    let cancel = CancellationToken::new();
+    {
+        let mut active = state
+            .active_cancel
+            .lock()
+            .map_err(|_| "download state lock poisoned".to_string())?;
+        if active.is_some() {
+            return Err("A download is already active. Cancel it first.".to_string());
+        }
+        *active = Some(cancel.clone());
+    }
+
+    let app_for_task = app.clone();
+    let downloads = state.context.downloads.clone();
+    let effective_root_for_task = effective_root.clone();
+    let abort = tauri::async_runtime::spawn(async move {
+        for (batch_index, resolved) in resolved_items.into_iter().enumerate() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            spawn_progress_emitter(app_for_task.clone(), "model".to_string(), rx);
+            let handle = downloads.download_variant_with_cancel(
+                effective_root_for_task.clone(),
+                resolved,
+                tx,
+                Some(cancel.clone()),
+            );
+            match handle.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    let _ = app_for_task.emit(
+                        "download-progress",
+                        DownloadProgressEvent {
+                            kind: "model".to_string(),
+                            phase: if err.to_string().to_ascii_lowercase().contains("cancel") {
+                                "cancelled".to_string()
+                            } else {
+                                "batch_failed".to_string()
+                            },
+                            artifact: None,
+                            index: Some(batch_index + 1),
+                            total: None,
+                            received: None,
+                            size: None,
+                            folder: None,
+                            message: Some(err.to_string()),
+                        },
+                    );
+                    return;
+                }
+                Err(join_err) => {
+                    let _ = app_for_task.emit(
+                        "download-progress",
+                        DownloadProgressEvent {
+                            kind: "model".to_string(),
+                            phase: if join_err.is_cancelled() {
+                                "cancelled".to_string()
+                            } else {
+                                "batch_failed".to_string()
+                            },
+                            artifact: None,
+                            index: Some(batch_index + 1),
+                            total: None,
+                            received: None,
+                            size: None,
+                            folder: None,
+                            message: Some(join_err.to_string()),
+                        },
+                    );
+                    return;
+                }
+            }
+        }
+
+        let _ = app_for_task.emit(
+            "download-progress",
+            DownloadProgressEvent {
+                kind: "model".to_string(),
+                phase: "batch_finished".to_string(),
+                artifact: None,
+                index: None,
+                total: None,
+                received: None,
+                size: None,
+                folder: None,
+                message: Some("Model download batch completed.".to_string()),
+            },
+        );
+    });
+
+    let managed = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = abort.await;
+        let state = managed.state::<AppState>();
+        match state.active_cancel.lock() {
+            Ok(mut active) => {
+                *active = None;
+            }
+            Err(_) => {}
+        };
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn download_lora_asset(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -4878,16 +5123,7 @@ async fn download_lora_asset(
     comfyui_root: Option<String>,
 ) -> Result<(), String> {
     let root = resolve_root_path(&state.context, comfyui_root)?;
-    let effective_root = match comfy_extra_model_config(&root) {
-        Some(config) if config.is_default => {
-            log::info!(
-                "Using extra model base path for LoRA downloads: {}",
-                config.base_path.display()
-            );
-            config.base_path
-        }
-        _ => root,
-    };
+    let effective_root = effective_download_root(&root);
     let lora = state
         .context
         .catalog
@@ -5249,6 +5485,19 @@ fn resolve_root_path(
     }
 
     Err("Select a valid ComfyUI root folder first.".to_string())
+}
+
+fn effective_download_root(root: &Path) -> PathBuf {
+    match comfy_extra_model_config(root) {
+        Some(config) if config.is_default => {
+            log::info!(
+                "Using extra model base path for downloads: {}",
+                config.base_path.display()
+            );
+            config.base_path
+        }
+        _ => root.to_path_buf(),
+    }
 }
 
 fn parse_yaml_scalar(value: &str) -> String {
@@ -5709,6 +5958,7 @@ fn start_comfyui_root_impl(
 
     let py_exe = resolve_start_python_exe(app, state, &root)?;
     let settings = state.context.config.settings();
+    let custom_launch_args = parse_custom_launch_args(&settings.comfyui_custom_launch_args)?;
 
     let mut cmd = std::process::Command::new(py_exe);
     if !nerdstats_enabled() {
@@ -5790,6 +6040,7 @@ fn start_comfyui_root_impl(
         settings.comfyui_bf16_unet_enabled,
         settings.comfyui_async_offload_enabled,
         settings.comfyui_disable_smart_memory_enabled,
+        &custom_launch_args,
     );
     emit_comfyui_runtime_event(
         app,
@@ -5803,11 +6054,21 @@ fn start_comfyui_root_impl(
     cmd.current_dir(root);
     if nerdstats_enabled() {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else if settings.comfyui_show_runtime_logs {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|err| format!("Failed to start ComfyUI: {err}"))?;
+    if !nerdstats_enabled() && settings.comfyui_show_runtime_logs {
+        if let Some(stdout) = child.stdout.take() {
+            spawn_comfyui_runtime_log_stream(app.clone(), "stdout", stdout);
+        }
+        if let Some(stderr) = child.stderr.take() {
+            spawn_comfyui_runtime_log_stream(app.clone(), "stderr", stderr);
+        }
+    }
     let mut guard = state
         .comfyui_process
         .lock()
@@ -5981,6 +6242,19 @@ struct ComfyRuntimeEvent {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ComfyRuntimeLogEvent {
+    stream: String,
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EffectiveDownloadDestinationResponse {
+    comfyui_root: String,
+    effective_root: String,
+    uses_shared_default: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct ComfyAddonState {
     torch_profile: Option<String>,
@@ -6027,6 +6301,33 @@ fn emit_comfyui_runtime_event(app: &AppHandle, phase: &str, message: impl Into<S
             .body(msg)
             .show();
     }
+}
+
+fn emit_comfyui_runtime_log_event(app: &AppHandle, stream: &str, text: impl Into<String>) {
+    let _ = app.emit(
+        "comfyui-runtime-log",
+        ComfyRuntimeLogEvent {
+            stream: stream.to_string(),
+            text: text.into(),
+        },
+    );
+}
+
+fn spawn_comfyui_runtime_log_stream(
+    app: AppHandle,
+    stream_name: &'static str,
+    reader: impl std::io::Read + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let buffered = std::io::BufReader::new(reader);
+        for line in buffered.lines().map_while(Result::ok) {
+            let text = line.trim_end().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            emit_comfyui_runtime_log_event(&app, stream_name, text);
+        }
+    });
 }
 
 fn python_for_root(root: &Path) -> std::process::Command {
@@ -7747,11 +8048,15 @@ fn main() {
             set_comfyui_root,
             set_comfyui_install_base,
             get_comfyui_extra_model_config,
+            get_effective_download_destination,
             set_comfyui_extra_model_config,
+            set_comfyui_custom_launch_args,
+            set_comfyui_show_runtime_logs,
             save_civitai_token,
             check_updates_now,
             auto_update_startup,
             download_model_assets,
+            download_model_assets_batch,
             download_lora_asset,
             download_workflow_asset,
             get_lora_metadata,

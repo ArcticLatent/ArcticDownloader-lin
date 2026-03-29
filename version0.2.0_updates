@@ -1,0 +1,54 @@
+ArcticDownloader 0.2.0 update log
+
+Purpose:
+- Track code changes made in the Linux workspace so they can be mirrored in the Windows workspace.
+
+Format:
+- Date
+- Change summary
+- Files changed
+- Notes
+
+Entries:
+- 2026-03-29
+  - Added the 0.2.0 QoL update for model downloads, ComfyUI launch configuration, runtime logging, and effective download-path visibility.
+  - Files changed:
+    - src/config.rs
+    - src-tauri/src/main.rs
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - src-tauri/dist/styles.css
+    - version0.2.0_updates
+  - Notes:
+    - The Models tab now supports batch selection with a visible multi-select list instead of a single-model dropdown flow.
+    - Each selected model can choose its own existing catalog variant for the active VRAM tier, without requiring catalog JSON schema changes.
+    - Model downloads now show the effective destination path so users can tell when a shared extra-models folder is overriding the selected ComfyUI root.
+    - Added a saved free-text field for additional ComfyUI launch args so users can pass unsupported flags such as `--reserve-ram`.
+    - Added a saved toggle for showing live ComfyUI runtime logs inside the app.
+    - When ComfyUI is launched from the app, stdout/stderr is now streamed into a new in-app runtime console with ANSI color rendering.
+    - The existing shared-model-folder behavior is now surfaced more clearly in the UI to reduce confusion around "Use as Default".
+- 2026-03-29
+  - Refined the new batch model-download UI so it scales better with a larger catalog.
+  - Files changed:
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - src-tauri/dist/styles.css
+    - version0.2.0_updates
+  - Notes:
+    - Added a model search field to reduce long scrolling through the available-model list.
+    - Split the Models tab into an available-models panel and a separate selected-queue panel.
+    - Selected models can now be reviewed and removed from a compact queue without losing the browsing position in the main list.
+- 2026-03-29
+  - Polished the 0.2.0 UI update for readability and consistency across logs, dropdowns, and launch-args controls.
+  - Files changed:
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - src-tauri/dist/styles.css
+    - version0.2.0_updates
+  - Notes:
+    - Improved the ComfyUI runtime log panel with softer wording, semantic highlighting, a cleaner timestamp prefix, and filter labels that are easier for non-technical users to understand.
+    - Added a `Clear Args` button next to `Save Args` for custom ComfyUI launch options.
+    - Refined the custom-args placeholder copy to use current ComfyUI flag examples.
+    - Fixed model-list layout issues such as horizontal overflow and crowded row content.
+    - Restyled dropdown menus so they better match the app's buttons and text fields.
+    - All later 0.2.0 UI polish in this pass was contained within the same three frontend files listed above: `index.html`, `main.js`, and `styles.css`.
