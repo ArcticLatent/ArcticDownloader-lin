@@ -9,6 +9,7 @@ NOTES_FILE=""
 SKIP_CLEAN=0
 PUBLISH_GITHUB=0
 PUBLISH_AUR=0
+ARCH_AUR_ONLY=0
 DEB_DISTROBOX="arctic-ubuntu"
 RPM_DISTROBOX="arctic-fedora"
 AUR_PACKAGE="arctic-comfyui-helper-bin"
@@ -34,6 +35,7 @@ Options:
   --publish-github       Create/update the GitHub release and upload built assets.
   --publish-aur          Update and push the AUR binary package metadata.
   --publish-all          Publish both GitHub release assets and the AUR package.
+  --archaur             Build only the Arch package, upload that Arch asset to GitHub, and update AUR.
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
   --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
   --aur-package <name>   AUR package name to update (default: arctic-comfyui-helper-bin).
@@ -114,6 +116,12 @@ while (($# > 0)); do
       PUBLISH_AUR=1
       shift
       ;;
+    --archaur)
+      ARCH_AUR_ONLY=1
+      PUBLISH_GITHUB=1
+      PUBLISH_AUR=1
+      shift
+      ;;
     --deb-distrobox)
       DEB_DISTROBOX="${2:-}"
       shift 2
@@ -188,7 +196,9 @@ fi
 require_cmd cargo
 require_cmd sha256sum
 require_cmd bash
-require_cmd distrobox
+if ((ARCH_AUR_ONLY == 0)); then
+  require_cmd distrobox
+fi
 if ((PUBLISH_GITHUB == 1)); then
   require_cmd gh
 fi
@@ -265,6 +275,7 @@ mkdir -p "$OUT_ABS_DIR"
 echo "Building Arch package on host ..."
 (cd "$ROOT_DIR" && bash packaging/build-packages.sh arch)
 
+if ((ARCH_AUR_ONLY == 0)); then
 echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
 distrobox enter "$DEB_DISTROBOX" -- bash -lc "
   set -euo pipefail
@@ -395,8 +406,13 @@ distrobox enter "$RPM_DISTROBOX" -- bash -lc "
   cd '$ROOT_DIR'
   bash packaging/build-packages.sh rpm
 "
+fi
 
-mapfile -t artifacts < <(find "$PACKAGING_DIR/out" -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' \) | sort)
+if ((ARCH_AUR_ONLY == 1)); then
+  mapfile -t artifacts < <(find "$PACKAGING_DIR/out/arch" -type f -name '*.pkg.tar.*' | sort)
+else
+  mapfile -t artifacts < <(find "$PACKAGING_DIR/out" -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' \) | sort)
+fi
 if ((${#artifacts[@]} == 0)); then
   echo "No package artifacts were produced." >&2
   exit 1
@@ -446,7 +462,11 @@ echo "  Checksums: $OUT_ABS_DIR/SHA256SUMS"
 
 if ((PUBLISH_GITHUB == 1)); then
   echo "Publishing GitHub release '$TAG' to '$REPOSITORY' ..."
-  mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name 'SHA256SUMS' \) | sort)
+  if ((ARCH_AUR_ONLY == 1)); then
+    mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f -name '*.pkg.tar.*' | sort)
+  else
+    mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name 'SHA256SUMS' \) | sort)
+  fi
   if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
     gh release upload "$TAG" "${release_files[@]}" --repo "$REPOSITORY" --clobber
     if [[ -n "$NOTES_FILE" ]]; then
