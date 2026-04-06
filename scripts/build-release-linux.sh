@@ -369,7 +369,11 @@ distrobox enter "$RPM_DISTROBOX" -- bash -lc "
     for cmd in rpmbuild cargo rustc; do
       command -v "\$cmd" >/dev/null 2>&1 || missing=1
     done
-    if [[ "\$missing" -eq 1 ]] || ! rpm -q openssl-devel >/dev/null 2>&1; then
+    if [[ "\$missing" -eq 1 ]] \
+      || ! rpm -q openssl-devel >/dev/null 2>&1 \
+      || ! rpm -q gtk3-devel >/dev/null 2>&1 \
+      || ! rpm -q webkit2gtk4.1-devel >/dev/null 2>&1 \
+      || ! rpm -q libayatana-appindicator-gtk3-devel >/dev/null 2>&1; then
       as_root dnf install -y \
         rpm-build rpmdevtools \
         rust cargo openssl-devel \

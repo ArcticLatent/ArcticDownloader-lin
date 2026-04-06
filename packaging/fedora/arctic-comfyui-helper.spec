@@ -1,5 +1,5 @@
 Name:           arctic-comfyui-helper
-Version:        0.2.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        ComfyUI installer and model manager
 %global debug_package %{nil}
@@ -18,7 +18,7 @@ BuildRequires:  openssl-devel
 
 Requires:       gtk3
 Requires:       webkit2gtk4.1
-Requires:       libappindicator-gtk3
+Requires:       libayatana-appindicator-gtk3
 
 %description
 Native Linux desktop app for installing and managing ComfyUI,

@@ -105,3 +105,12 @@ Entries:
   - Notes:
     - This makes newly published remote catalog changes show up more reliably at app startup.
     - The app still keeps cached catalog data as a fallback, but refresh now always requests the full remote JSON during boot.
+- 2026-04-06
+  - Fixed the Fedora RPM spec dependency name for AppIndicator so Fedora package builds use the pkg-config provider Fedora actually exposes.
+  - Files changed:
+    - packaging/fedora/arctic-comfyui-helper.spec
+    - version0.2.1_updates
+  - Notes:
+    - Replaced `pkgconfig(ayatana-appindicator3-0.1)` with `pkgconfig(appindicator3-0.1)` in the RPM build requirements.
+- Fedora RPM packaging now uses the Ayatana AppIndicator development/runtime packages that Tauri's Linux tray dependency actually requires, and the distrobox bootstrap now explicitly checks for and installs `libayatana-appindicator-gtk3-devel` before building.
+- Flatpak packaging now exports the app on the `stable` branch before bundling, fixing the `Refspec 'app/io.github.ArcticHelper/x86_64/stable' not found` error at the final `flatpak build-bundle` step.

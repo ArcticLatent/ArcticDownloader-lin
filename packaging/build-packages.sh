@@ -195,6 +195,7 @@ build_flatpak() {
 
   flatpak-builder \
     --force-clean \
+    --default-branch=stable \
     --user \
     --install-deps-from=flathub \
     --repo="$repo_dir" \

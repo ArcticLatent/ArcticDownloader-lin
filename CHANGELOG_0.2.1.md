@@ -15,9 +15,12 @@
 - The Models RAM dropdown now reflects custom catalog RAM thresholds when the current model context supports them.
 - The Models tab no longer offers `All Model Families`, which avoids mixed-family RAM-label ambiguity.
 - Startup catalog refresh now always fetches the latest remote catalog body so newly published catalog changes show up more reliably.
+- The Fedora/RPM packaging flow now uses the correct AppIndicator pkg-config dependency name for Fedora builds.
 - The Linux packaging flow now includes `.flatpak` artifacts in release outputs, checksums, manifest generation, and GitHub uploads.
 
 ## Notes
 
 - The Flatpak package targets `org.gnome.Platform//50`.
 - The Flatpak release flow produces a single-file `.flatpak` bundle alongside the existing Arch, Debian, and RPM artifacts.
+- Fixed Fedora RPM packaging to depend on the Ayatana AppIndicator development/runtime packages required by the Tauri tray build, and tightened the Fedora distrobox bootstrap so the needed devel package is always installed before `rpmbuild`.
+- Fixed Flatpak bundling to export and bundle the app on the same `stable` branch, resolving the final `Refspec ... stable not found` failure after a successful Flatpak build.

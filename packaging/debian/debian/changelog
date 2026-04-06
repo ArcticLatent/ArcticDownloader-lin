@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.2.1-1) unstable; urgency=medium
+
+  * Added a full-screen loading transition when switching into `Manage Existing` and when changing between managed ComfyUI installs.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Mon, 06 Apr 2026 19:02:26 -0400
+
 arctic-comfyui-helper (0.2.0-1) unstable; urgency=medium
 
   * Release v0.2.0
