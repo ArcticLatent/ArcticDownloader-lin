@@ -9,6 +9,12 @@
 
 - The ComfyUI tab now hides manage-only controls when you are in `Install New`, so the workflow is less confusing when an existing install has already been detected.
 - Entering `Manage Existing` now gives immediate visual feedback instead of leaving the previous UI visible while the app loads the selected install.
+- The Models tab now shows `Always Artifacts` under each selected model so users can see the extra files that will be downloaded automatically.
+- The Models tab now shows the actual selected variant file names, including multi-file variants, in the `Selected Queue`.
+- The Models family, GPU VRAM, and RAM dropdowns now start with clearer placeholder-style defaults.
+- The Models RAM dropdown now reflects custom catalog RAM thresholds when the current model context supports them.
+- The Models tab no longer offers `All Model Families`, which avoids mixed-family RAM-label ambiguity.
+- Startup catalog refresh now always fetches the latest remote catalog body so newly published catalog changes show up more reliably.
 - The Linux packaging flow now includes `.flatpak` artifacts in release outputs, checksums, manifest generation, and GitHub uploads.
 
 ## Notes

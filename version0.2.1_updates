@@ -66,3 +66,42 @@ Entries:
     - version0.2.1_updates
   - Notes:
     - GNOME 50 was released on March 18, 2026, so the Flatpak runtime target was bumped to `org.gnome.Platform//50`.
+- 2026-04-06
+  - Added an `Always Artifacts` view inside the Models tab `Selected Queue` so users can see the extra files that will always be downloaded alongside each selected model.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - src-tauri/dist/styles.css
+    - version0.2.1_updates
+  - Notes:
+    - The selected-model queue now renders each model's catalog `always` groups directly under the selected item.
+    - Artifact names are deduplicated for display and filtered against the currently selected RAM tier so the list better matches what the downloader will actually fetch.
+    - Changing the RAM tier now refreshes the queue so the `Always Artifacts` list stays in sync with RAM-gated artifacts.
+- 2026-04-06
+  - Made the Models RAM dropdown use custom catalog RAM thresholds when exactly one selected model defines them, instead of always showing the generic hardcoded labels.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - version0.2.1_updates
+  - Notes:
+    - When a single selected model includes `ram_tier_thresholds`, the RAM dropdown now shows labels derived from that model's configured cutoffs.
+    - If no model is selected or multiple models are selected, the dropdown falls back to the generic `Tier A/B/C` labels so mixed-model selections do not show misleading custom ranges.
+- 2026-04-06
+  - Expanded the Models tab queue and selector UX so users can see the exact selected variant files, start from clearer dropdown placeholders, and avoid mixed-family ambiguity.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - src-tauri/dist/styles.css
+    - CHANGELOG_0.2.1.md
+    - version0.2.1_updates
+  - Notes:
+    - The `Selected Queue` now shows the actual selected variant file names, including all files for multi-file variants such as WAN/LTX-style split downloads.
+    - The Models dropdowns now start with placeholder-style defaults: `MODELS`, `GPU VRAM`, and `RAM`.
+    - The model list waits for the required selections and the empty state now explains that users should choose model family, GPU VRAM, and RAM first.
+    - The synthetic `All Model Families` option was removed so family-specific RAM-threshold behavior no longer gets muddied by mixed-family views.
+- 2026-04-06
+  - Changed startup catalog refresh to always fetch the remote catalog body instead of relying on conditional ETag/304 behavior.
+  - Files changed:
+    - src/catalog.rs
+    - CHANGELOG_0.2.1.md
+    - version0.2.1_updates
+  - Notes:
+    - This makes newly published remote catalog changes show up more reliably at app startup.
+    - The app still keeps cached catalog data as a fallback, but refresh now always requests the full remote JSON during boot.
