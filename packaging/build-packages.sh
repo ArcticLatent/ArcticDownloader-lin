@@ -16,7 +16,8 @@ Targets:
   arch     Build Arch package (.pkg.tar.zst) with makepkg
   deb      Build Debian package (.deb) with dpkg-buildpackage
   rpm      Build Fedora/RPM package (.rpm) with rpmbuild
-  all      Build all targets in order: arch (host), deb (distrobox), rpm (distrobox)
+  flatpak  Build Flatpak bundle (.flatpak) with flatpak-builder
+  all      Build all targets in order: arch (host), deb (distrobox), rpm (distrobox), flatpak (host)
 
 Notes:
   - Run from anywhere inside the repo.
@@ -58,6 +59,12 @@ clean_deb_previous_builds() {
 clean_rpm_previous_builds() {
   echo "Cleaning previous RPM build artifacts..."
   rm -rf "$OUT_DIR/rpm"
+}
+
+clean_flatpak_previous_builds() {
+  echo "Cleaning previous Flatpak build artifacts..."
+  rm -rf "$OUT_DIR/flatpak"
+  rm -rf "$PACKAGING_DIR/flatpak/build-dir" "$PACKAGING_DIR/flatpak/repo" "$PACKAGING_DIR/flatpak/staging"
 }
 
 build_arch() {
@@ -151,6 +158,59 @@ build_rpm() {
   echo "RPM artifacts: $OUT_DIR/rpm"
 }
 
+build_flatpak() {
+  require_cmd flatpak-builder
+  require_cmd flatpak
+  require_cmd cargo
+  clean_flatpak_previous_builds
+
+  local version
+  version="$(read_pkgver)"
+  local flatpak_dir="$PACKAGING_DIR/flatpak"
+  local staging_dir="$flatpak_dir/staging"
+  local build_dir="$flatpak_dir/build-dir"
+  local repo_dir="$flatpak_dir/repo"
+  local manifest="$flatpak_dir/io.github.ArcticHelper.yml"
+  local bundle_name="arctic-comfyui-helper-${version}-x86_64.flatpak"
+
+  mkdir -p "$OUT_DIR/flatpak" "$staging_dir" "$repo_dir"
+
+  if ! flatpak remotes --user --columns=name 2>/dev/null | grep -qx 'flathub'; then
+    flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+  fi
+
+  (
+    cd "$ROOT_DIR"
+    cargo build --release --manifest-path src-tauri/Cargo.toml
+  )
+
+  install -Dm755 "$ROOT_DIR/src-tauri/target/release/Arctic-ComfyUI-Helper" \
+    "$staging_dir/Arctic-ComfyUI-Helper"
+  install -Dm644 "$PACKAGING_DIR/linux/io.github.ArcticHelper.desktop" \
+    "$staging_dir/io.github.ArcticHelper.desktop"
+  install -Dm644 "$ROOT_DIR/src-tauri/dist/icon.svg" \
+    "$staging_dir/io.github.ArcticHelper.svg"
+  install -Dm644 "$flatpak_dir/io.github.ArcticHelper.metainfo.xml" \
+    "$staging_dir/io.github.ArcticHelper.metainfo.xml"
+
+  flatpak-builder \
+    --force-clean \
+    --user \
+    --install-deps-from=flathub \
+    --repo="$repo_dir" \
+    "$build_dir" \
+    "$manifest"
+
+  flatpak build-bundle \
+    "$repo_dir" \
+    "$OUT_DIR/flatpak/$bundle_name" \
+    io.github.ArcticHelper \
+    stable \
+    --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
+
+  echo "Flatpak artifacts: $OUT_DIR/flatpak"
+}
+
 build_deb_in_distrobox() {
   require_cmd distrobox
   echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
@@ -189,10 +249,14 @@ main() {
     rpm)
       build_rpm
       ;;
+    flatpak)
+      build_flatpak
+      ;;
     all)
       build_arch
       build_deb_in_distrobox
       build_rpm_in_distrobox
+      build_flatpak
       ;;
     -h|--help|help)
       usage

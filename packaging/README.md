@@ -9,6 +9,7 @@ From repo root, use:
 - `bash packaging/build-packages.sh arch`
 - `bash packaging/build-packages.sh deb`
 - `bash packaging/build-packages.sh rpm`
+- `bash packaging/build-packages.sh flatpak`
 - `bash packaging/build-packages.sh all`
 
 Artifacts are copied to `packaging/out/`.
@@ -35,6 +36,18 @@ Artifacts are copied to `packaging/out/`.
 - File: `packaging/fedora/arctic-comfyui-helper.spec`
 - Build from repo root:
   - `bash packaging/build-packages.sh rpm`
+
+## Flatpak (`.flatpak`)
+
+- Files:
+  - `packaging/flatpak/io.github.ArcticHelper.yml`
+  - `packaging/flatpak/io.github.ArcticHelper.metainfo.xml`
+- Build from repo root:
+  - `bash packaging/build-packages.sh flatpak`
+- Notes:
+  - Builds a single-file Flatpak bundle for `io.github.ArcticHelper`
+  - Requires `flatpak` and `flatpak-builder` on the host
+  - Uses the Flathub remote to resolve the runtime/SDK during build
 
 ## Notes
 

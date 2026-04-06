@@ -24,6 +24,7 @@ const state = {
   comfyAttentionBusy: false,
   comfyComponentBusy: false,
   comfyMode: "install",
+  comfyInstallSwitchBusy: false,
   updateAvailable: false,
   updateVersion: null,
   appVersion: "0.1.0",
@@ -109,6 +110,7 @@ const el = {
   rocmGuidedInstall: document.getElementById("rocm-guided-install"),
   comfyMode: document.getElementById("comfy-mode"),
   comfyModeHelp: document.getElementById("comfy-mode-help"),
+  comfyExistingRow: document.getElementById("comfy-existing-row"),
   comfyExistingInstall: document.getElementById("comfy-existing-install"),
   updateSelectedInstall: document.getElementById("update-selected-install"),
   useExistingInstall: document.getElementById("use-existing-install"),
@@ -523,6 +525,11 @@ function updateComfyUpdateButton() {
   btn.classList.remove("update-available");
   if (!hasSelection) return;
 
+  if (state.comfyInstallSwitchBusy) {
+    btn.textContent = "Switching...";
+    btn.disabled = true;
+    return;
+  }
   if (state.comfyUpdateBusy) {
     btn.textContent = "Updating...";
     btn.disabled = true;
@@ -1184,10 +1191,19 @@ function updateComfyModeUi() {
   const installMode = state.comfyMode !== "manage";
   const hasSelectedInstall = Boolean(String(el.comfyExistingInstall?.value || "").trim());
   const canShowManageActions = !installMode && hasSelectedInstall;
+  const switchingManagedInstall = Boolean(state.comfyInstallSwitchBusy);
+  const shouldShowQuickActions = !installMode && canShowManageActions;
+  el.comfyExistingRow?.classList.toggle("hidden", installMode);
   el.installComfyui?.classList.toggle("hidden", !installMode);
   el.comfyResumeBanner?.classList.toggle("hidden", !installMode || !state.comfyResumeState?.found);
+  el.comfyQuickActions?.classList.toggle("hidden", !shouldShowQuickActions);
   el.comfyOpenInstallFolder?.classList.toggle("hidden", !canShowManageActions);
   el.comfyStartInstalled?.classList.toggle("hidden", !canShowManageActions);
+  if (el.comfyMode) el.comfyMode.disabled = switchingManagedInstall;
+  if (el.comfyExistingInstall) el.comfyExistingInstall.disabled = switchingManagedInstall;
+  if (el.useExistingInstall) {
+    el.useExistingInstall.disabled = switchingManagedInstall || !hasSelectedInstall;
+  }
   updateComfyUpdateButton();
   if (el.comfyModeHelp) {
     el.comfyModeHelp.textContent = installMode
@@ -1204,6 +1220,20 @@ function updateComfyModeUi() {
     el.comfyTorchProfile.title = installMode
       ? ""
       : "Torch stack is locked in Manage Existing mode.";
+  }
+}
+
+async function runWithManagedInstallOverlay(message, work) {
+  state.comfyInstallSwitchBusy = true;
+  updateComfyModeUi();
+  showBlockingOverlay(message || "Switching managed ComfyUI...");
+  await waitForNextPaint();
+  try {
+    return await work();
+  } finally {
+    state.comfyInstallSwitchBusy = false;
+    updateComfyModeUi();
+    hideStartupOverlay();
   }
 }
 
@@ -2953,7 +2983,9 @@ el.comfyMode?.addEventListener("change", async () => {
         if (el.comfyExistingInstall) {
           el.comfyExistingInstall.value = selectedRoot;
         }
-        await applySelectedExistingInstallation(selectedRoot);
+        await runWithManagedInstallOverlay(`Loading ${comfyInstallNameFromRoot(selectedRoot)}...`, async () => {
+          await applySelectedExistingInstallation(selectedRoot);
+        });
       } else {
         await loadInstalledAddonState(el.comfyRoot.value || "");
       }
@@ -2971,7 +3003,9 @@ el.useExistingInstall?.addEventListener("click", async () => {
     return;
   }
   try {
-    await applySelectedExistingInstallation(selectedRoot);
+    await runWithManagedInstallOverlay(`Loading ${comfyInstallNameFromRoot(selectedRoot)}...`, async () => {
+      await applySelectedExistingInstallation(selectedRoot);
+    });
     state.comfyMode = "manage";
     if (el.comfyMode) el.comfyMode.value = "manage";
     updateComfyModeUi();
@@ -2983,6 +3017,7 @@ el.useExistingInstall?.addEventListener("click", async () => {
 
 el.comfyExistingInstall?.addEventListener("change", async () => {
   updateComfyModeUi();
+  if (state.comfyInstallSwitchBusy) return;
   const selectedRoot = String(el.comfyExistingInstall?.value || "").trim();
   if (!selectedRoot) {
     refreshComfyUiUpdateStatus("").catch(() => {});
@@ -2993,19 +3028,29 @@ el.comfyExistingInstall?.addEventListener("change", async () => {
     && normalizeSlashes(previousRoot) !== normalizeSlashes(selectedRoot);
   try {
     if (state.comfyMode === "manage" && switchingInstall) {
-      await refreshComfyRuntimeStatus().catch(() => {});
-      if (state.comfyRuntimeRunning) {
-        logComfyLine("ComfyUI server is running. Stopping it before switching managed install...");
-        await invoke("stop_comfyui_root");
+      await runWithManagedInstallOverlay(`Switching to ${comfyInstallNameFromRoot(selectedRoot)}...`, async () => {
         await refreshComfyRuntimeStatus().catch(() => {});
         if (state.comfyRuntimeRunning) {
-          logComfyLine("ComfyUI is still running. Stop it first, then switch install.");
-          return;
+          setStartupStatus(`Stopping ComfyUI before loading ${comfyInstallNameFromRoot(selectedRoot)}...`);
+          logComfyLine("ComfyUI server is running. Stopping it before switching managed install...");
+          await invoke("stop_comfyui_root");
+          await refreshComfyRuntimeStatus().catch(() => {});
+          if (state.comfyRuntimeRunning) {
+            logComfyLine("ComfyUI is still running. Stop it first, then switch install.");
+            throw new Error("ComfyUI is still running. Stop it first, then switch install.");
+          }
+          logComfyLine("ComfyUI server stopped.");
         }
-        logComfyLine("ComfyUI server stopped.");
-      }
+        setStartupStatus(`Loading ${comfyInstallNameFromRoot(selectedRoot)}...`);
+        await applySelectedExistingInstallation(selectedRoot);
+      });
+    } else if (state.comfyMode !== "manage" && switchingInstall) {
+      await runWithManagedInstallOverlay(`Loading ${comfyInstallNameFromRoot(selectedRoot)}...`, async () => {
+        await applySelectedExistingInstallation(selectedRoot);
+      });
+    } else {
+      await applySelectedExistingInstallation(selectedRoot);
     }
-    await applySelectedExistingInstallation(selectedRoot);
     if (state.comfyMode === "manage") {
       logComfyLine(`Now managing: ${selectedRoot}`);
     }

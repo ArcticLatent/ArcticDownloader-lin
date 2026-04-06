@@ -1,0 +1,68 @@
+ArcticDownloader 0.2.1 update log
+
+Purpose:
+- Track code changes made in the Linux workspace so they can be mirrored in the Windows workspace.
+
+Format:
+- Date
+- Change summary
+- Files changed
+- Notes
+
+Entries:
+- 2026-04-06
+  - Added the 0.2.1 manage-mode loading-state update so switching between existing ComfyUI installs uses the full-screen startup loader instead of leaving the current UI static.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - version0.2.1_updates
+  - Notes:
+    - Switching to a different detected install while already in `Manage Existing` now shows the same blocking loader style used during app startup.
+    - The loader text updates during the switch so users can tell whether the app is stopping ComfyUI first or loading the newly selected install.
+    - Entering `Manage Existing` through `Use Selected` now uses the same loader treatment for consistency.
+    - Manage-mode controls are temporarily disabled while that switch is in progress to avoid duplicate actions.
+- 2026-04-06
+  - Hid the existing-install quick-actions row when the user switches back to `Install New` so that mode no longer shows the previously managed ComfyUI path.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - version0.2.1_updates
+  - Notes:
+    - The `Last install` / quick-actions block now only appears in `Manage Existing` when a detected install is actually selected.
+    - Switching back to `Install New` keeps that row out of view to avoid implying the old install is part of the new-install workflow.
+- 2026-04-06
+  - Hid the detected-install selector row in `Install New` so users no longer see the existing ComfyUI picker under the mode dropdown unless they are actively using `Manage Existing`.
+  - Files changed:
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - version0.2.1_updates
+  - Notes:
+    - The row containing the existing-install dropdown, `Check ComfyUI`, and `Use Selected` now only appears in `Manage Existing`.
+    - `Install New` keeps only the controls relevant to creating a new install, which removes the confusing signal that an already installed ComfyUI is part of that flow.
+- 2026-04-06
+  - Extended the 0.2.1 full-screen loading treatment to the mode-dropdown path so switching from `Install New` into `Manage Existing` also shows the startup-style loader while the managed install is loaded.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - version0.2.1_updates
+  - Notes:
+    - The full-screen loader now appears whether users enter manage mode by changing the mode dropdown or by using the existing install selector flow.
+    - This keeps the manage-entry behavior consistent and makes it clearer that the app is actively loading the selected ComfyUI install.
+- 2026-04-06
+  - Added Flatpak packaging to the Linux build and release flow so the scripts now build, checksum, manifest, and upload a `.flatpak` bundle alongside the existing Arch, Debian, and RPM artifacts.
+  - Files changed:
+    - packaging/build-packages.sh
+    - packaging/README.md
+    - packaging/flatpak/io.github.ArcticHelper.yml
+    - packaging/flatpak/io.github.ArcticHelper.metainfo.xml
+    - scripts/build-release-linux.sh
+    - scripts/release-linux.sh
+    - version0.2.1_updates
+  - Notes:
+    - Added a dedicated Flatpak target that stages the already-built app binary and shared desktop/icon metadata into a Flatpak bundle for `io.github.ArcticHelper`.
+    - The full Linux release flow now treats `.flatpak` as a first-class artifact for output copying, `SHA256SUMS`, `linux-release.json`, and GitHub release uploads.
+    - The Flatpak build uses Flathub as the runtime source and produces a single-file bundle suitable for attaching to GitHub releases.
+- 2026-04-06
+  - Updated the new Flatpak manifest to target GNOME runtime 50 instead of 48 so it matches the current GNOME release baseline.
+  - Files changed:
+    - packaging/flatpak/io.github.ArcticHelper.yml
+    - version0.2.1_updates
+  - Notes:
+    - GNOME 50 was released on March 18, 2026, so the Flatpak runtime target was bumped to `org.gnome.Platform//50`.

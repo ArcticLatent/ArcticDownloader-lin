@@ -198,6 +198,8 @@ require_cmd sha256sum
 require_cmd bash
 if ((ARCH_AUR_ONLY == 0)); then
   require_cmd distrobox
+  require_cmd flatpak
+  require_cmd flatpak-builder
 fi
 if ((PUBLISH_GITHUB == 1)); then
   require_cmd gh
@@ -406,12 +408,15 @@ distrobox enter "$RPM_DISTROBOX" -- bash -lc "
   cd '$ROOT_DIR'
   bash packaging/build-packages.sh rpm
 "
+
+echo "Building Flatpak bundle on host ..."
+(cd "$ROOT_DIR" && bash packaging/build-packages.sh flatpak)
 fi
 
 if ((ARCH_AUR_ONLY == 1)); then
   mapfile -t artifacts < <(find "$PACKAGING_DIR/out/arch" -type f -name '*.pkg.tar.*' | sort)
 else
-  mapfile -t artifacts < <(find "$PACKAGING_DIR/out" -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' \) | sort)
+  mapfile -t artifacts < <(find "$PACKAGING_DIR/out" -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' \) | sort)
 fi
 if ((${#artifacts[@]} == 0)); then
   echo "No package artifacts were produced." >&2
@@ -429,7 +434,7 @@ fi
 (
   cd "$OUT_ABS_DIR"
   rm -f SHA256SUMS
-  mapfile -t copied < <(find . -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' \) -printf '%f\n' | sort)
+  mapfile -t copied < <(find . -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' \) -printf '%f\n' | sort)
   sha256sum "${copied[@]}" > SHA256SUMS
 )
 
@@ -440,7 +445,7 @@ manifest="$OUT_ABS_DIR/linux-release.json"
   echo "  \"tag\": \"$TAG\"," 
   echo "  \"repository\": \"$REPOSITORY\"," 
   echo "  \"assets\": ["
-  mapfile -t copied < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' \) -printf '%f\n' | sort)
+  mapfile -t copied < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' \) -printf '%f\n' | sort)
   for i in "${!copied[@]}"; do
     name="${copied[$i]}"
     sha="$(sha256sum "$OUT_ABS_DIR/$name" | awk '{print $1}')"
@@ -465,7 +470,7 @@ if ((PUBLISH_GITHUB == 1)); then
   if ((ARCH_AUR_ONLY == 1)); then
     mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f -name '*.pkg.tar.*' | sort)
   else
-    mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name 'SHA256SUMS' \) | sort)
+    mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' -o -name 'SHA256SUMS' \) | sort)
   fi
   if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
     gh release upload "$TAG" "${release_files[@]}" --repo "$REPOSITORY" --clobber

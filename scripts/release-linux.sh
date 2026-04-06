@@ -146,7 +146,7 @@ SHAS_FILE="$OUT_DIR/SHA256SUMS"
 
 (cd "$ROOT_DIR" && bash scripts/verify-release-linux.sh --version "$VERSION" --tag "$TAG" --repository "$REPOSITORY" --output-dir "$OUTPUT_DIR")
 
-mapfile -t release_assets < <(find "$OUT_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' \) | sort)
+mapfile -t release_assets < <(find "$OUT_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' \) | sort)
 release_assets+=("$SHAS_FILE" "$MANIFEST_FILE")
 
 echo "Publishing GitHub release $TAG to $REPOSITORY ..."
