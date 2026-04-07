@@ -36,6 +36,7 @@ const state = {
   comfyUpdateAvailable: false,
   comfyUpdateChecked: false,
   comfyUpdateBusy: false,
+  comfyUpdateChecking: false,
   comfyLatestVersion: null,
   comfyLastUpdateDetailLogKey: "",
   comfyTorchProfileLocked: false,
@@ -532,14 +533,19 @@ function updateComfyUpdateButton() {
     btn.disabled = true;
     return;
   }
+  if (state.comfyUpdateChecking) {
+    btn.textContent = "Checking...";
+    btn.disabled = true;
+    return;
+  }
   if (state.comfyUpdateBusy) {
     btn.textContent = "Updating...";
     btn.disabled = true;
     return;
   }
   if (!state.comfyUpdateChecked) {
-    btn.textContent = "Checking...";
-    btn.disabled = true;
+    btn.textContent = "Check ComfyUI";
+    btn.disabled = false;
     return;
   }
   if (state.comfyUpdateAvailable) {
@@ -1363,6 +1369,7 @@ async function applySelectedExistingInstallation(rootPath) {
 
 async function refreshComfyUiUpdateStatus(rootPath = null) {
   const root = normalizeSlashes(rootPath || el.comfyExistingInstall?.value || el.comfyRoot.value || "");
+  state.comfyUpdateChecking = true;
   state.comfyUpdateChecked = false;
   state.comfyUpdateAvailable = false;
   state.comfyLatestVersion = null;
@@ -1395,9 +1402,11 @@ async function refreshComfyUiUpdateStatus(rootPath = null) {
     state.comfyUpdateAvailable = false;
     state.comfyLatestVersion = null;
     state.selectedComfyVersion = null;
-    updateComfyUpdateButton();
     renderTitleMeta();
     logComfyLine(`ComfyUI update check failed: ${err}`);
+  } finally {
+    state.comfyUpdateChecking = false;
+    updateComfyUpdateButton();
   }
 }
 

@@ -33,3 +33,105 @@ Entries:
   - Notes:
     - These models now use an `Always Artifacts Only` selection path in the UI.
     - The backend resolves a synthetic download selection for such models so the normal model download flow can still be reused.
+- 2026-04-07
+  - Changed Flatpak packaging to bundle the Ayatana tray runtime libraries inside the Flatpak so the tray-enabled app can start correctly in the sandbox.
+  - Files changed:
+    - packaging/build-packages.sh
+    - packaging/flatpak/io.github.ArcticHelper.yml
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - The Flatpak package keeps tray support enabled.
+    - The build now stages `libayatana-appindicator3`, `libayatana-indicator3`, `libayatana-ido3`, and the required `dbusmenu` shared libraries into `/app/lib` inside the bundle to satisfy the tray-linked binary at runtime.
+- 2026-04-07
+  - Added Flatpak D-Bus permission for `org.kde.StatusNotifierWatcher` so the tray icon can register with the host tray service from inside the sandbox.
+  - Files changed:
+    - packaging/flatpak/io.github.ArcticHelper.yml
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - This is the key Flatpak permission called out by Flatpak’s desktop integration docs for StatusNotifier/AppIndicator tray support.
+- 2026-04-07
+  - Updated Flatpak execution to run host system command probes through `flatpak-spawn --host`, and expanded tray-related D-Bus permissions for StatusNotifier/AppIndicator registration.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - packaging/flatpak/io.github.ArcticHelper.yml
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - Preflight checks for Git, uv, HF/Xet, distro detection, and package presence now reflect the host Linux environment when the app is running inside Flatpak.
+    - Added `--talk-name=com.canonical.AppMenu.Registrar` to better support tray registration from inside the Flatpak sandbox.
+- 2026-04-07
+  - Fixed Flatpak host-tool availability checks to reuse the host-command wrapper, and added explicit Flatpak session-bus access for tray registration.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - packaging/flatpak/io.github.ArcticHelper.yml
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - The preflight `Git`, `uv`, `HF/Xet`, and Linux package checks no longer probe the sandbox PATH by mistake.
+    - Added `--socket=session-bus` so the tray icon can talk to the filtered session bus in addition to the existing StatusNotifier/AppMenu name permissions.
+- 2026-04-07
+  - Switched Linux tray icons to PNG assets instead of ICO files to avoid invisible tray icons on Linux desktop panels and in Flatpak.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - src-tauri/icons/started-32.png
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - Windows keeps using the existing ICO assets.
+    - Linux now loads `icon-32.png` for the stopped state and `started-32.png` for the running state.
+- 2026-04-07
+  - Directed the Flatpak Linux tray backend to write icon temp files into a host-visible folder under the user's home directory.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - Tauri's Linux tray implementation writes image files to disk for StatusNotifier/AppIndicator integration.
+    - In Flatpak, the default temp/runtime path can be sandbox-only, so the host tray watcher may see the tray item but fail to load the icon image.
+- 2026-04-07
+  - Changed Flatpak ComfyUI startup to launch the selected Python runtime on the host instead of inside the sandbox.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - This preserves the existing runtime environment variables while routing the actual ComfyUI process through `flatpak-spawn --host`.
+    - It fixes custom nodes like ComfyUI-Manager that expect a real host `git` executable to be available during startup.
+- 2026-04-07
+  - Fixed Flatpak `Stop ComfyUI` so it terminates the host-side ComfyUI server for the selected install instead of only stopping the local wrapper process handle.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - The stop path now falls back to `pgrep -f <selected root>/main.py` plus `kill` on the host.
+    - This keeps stop behavior aligned with the earlier host-side Flatpak launch change.
+- 2026-04-07
+  - Suppressed false Flatpak stop-failure notifications when a matched host PID exits during the shutdown signal race.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - The stop path now re-checks whether the selected ComfyUI process is still running before surfacing a `kill` error.
+    - If the process is already gone, stop is treated as successful and only the normal success notification is shown.
+- 2026-04-07
+  - Changed Flatpak host stop to signal matching ComfyUI PIDs one by one instead of issuing a single multi-PID `kill` command.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - This avoids false stop failures when one matched PID exits before the rest during shutdown.
+    - The stop path now only fails if matching ComfyUI processes are still present after the TERM/KILL fallback window.
+- 2026-04-07
+  - Tightened Flatpak stop success detection around the actual ComfyUI listener state so stop returns as soon as port `8188` is down.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - CHANGELOG_0.2.2.md
+    - version0.2.2_updates
+  - Notes:
+    - This removes the extra stop delay caused by waiting on leftover host Python processes after the server is already down.
+    - The tray icon and stop notification now follow the listener state instead of trailing behind process cleanup.

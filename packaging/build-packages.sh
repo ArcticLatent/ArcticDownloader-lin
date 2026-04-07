@@ -184,6 +184,20 @@ build_flatpak() {
     cargo build --release --manifest-path src-tauri/Cargo.toml
   )
 
+  for lib in \
+    libayatana-appindicator3.so.1 \
+    libayatana-indicator3.so.7 \
+    libayatana-ido3-0.4.so.0 \
+    libdbusmenu-gtk3.so.4 \
+    libdbusmenu-glib.so.4; do
+    lib_path="$(ldconfig -p 2>/dev/null | awk -v name="$lib" '$1 == name { path = $NF } END { if (path) print path }')"
+    if [[ -z "$lib_path" || ! -f "$lib_path" ]]; then
+      echo "Required Flatpak tray library not found on host: $lib" >&2
+      exit 1
+    fi
+    install -Dm755 "$lib_path" "$staging_dir/lib/$lib"
+  done
+
   install -Dm755 "$ROOT_DIR/src-tauri/target/release/Arctic-ComfyUI-Helper" \
     "$staging_dir/Arctic-ComfyUI-Helper"
   install -Dm644 "$PACKAGING_DIR/linux/io.github.ArcticHelper.desktop" \

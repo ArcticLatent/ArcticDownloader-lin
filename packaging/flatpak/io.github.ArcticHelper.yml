@@ -8,19 +8,38 @@ finish-args:
   - --share=ipc
   - --socket=fallback-x11
   - --socket=wayland
+  - --socket=session-bus
   - --device=dri
   - --filesystem=home
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=com.canonical.AppMenu.Registrar
+  - --env=LD_LIBRARY_PATH=/app/lib
 modules:
   - name: arctic-comfyui-helper
     buildsystem: simple
     build-commands:
       - install -D Arctic-ComfyUI-Helper /app/bin/arctic-comfyui-helper
+      - install -D libayatana-appindicator3.so.1 /app/lib/libayatana-appindicator3.so.1
+      - install -D libayatana-indicator3.so.7 /app/lib/libayatana-indicator3.so.7
+      - install -D libayatana-ido3-0.4.so.0 /app/lib/libayatana-ido3-0.4.so.0
+      - install -D libdbusmenu-gtk3.so.4 /app/lib/libdbusmenu-gtk3.so.4
+      - install -D libdbusmenu-glib.so.4 /app/lib/libdbusmenu-glib.so.4
       - install -D io.github.ArcticHelper.desktop /app/share/applications/io.github.ArcticHelper.desktop
       - install -D io.github.ArcticHelper.svg /app/share/icons/hicolor/scalable/apps/io.github.ArcticHelper.svg
       - install -D io.github.ArcticHelper.metainfo.xml /app/share/metainfo/io.github.ArcticHelper.metainfo.xml
     sources:
       - type: file
         path: staging/Arctic-ComfyUI-Helper
+      - type: file
+        path: staging/lib/libayatana-appindicator3.so.1
+      - type: file
+        path: staging/lib/libayatana-indicator3.so.7
+      - type: file
+        path: staging/lib/libayatana-ido3-0.4.so.0
+      - type: file
+        path: staging/lib/libdbusmenu-gtk3.so.4
+      - type: file
+        path: staging/lib/libdbusmenu-glib.so.4
       - type: file
         path: staging/io.github.ArcticHelper.desktop
       - type: file

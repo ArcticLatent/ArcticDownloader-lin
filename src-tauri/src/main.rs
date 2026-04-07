@@ -21,11 +21,12 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+#[cfg(feature = "desktop-tray")]
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
 use tokio_util::sync::CancellationToken;
@@ -300,14 +301,17 @@ static AMD_GPU_DETAILS_CACHE: OnceLock<Mutex<Option<AmdGpuDetails>>> = OnceLock:
 static AMD_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
 static INTEL_GPU_DETAILS_CACHE: OnceLock<Mutex<Option<IntelGpuDetails>>> = OnceLock::new();
 static INTEL_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "desktop-tray")]
 static TRAY_MENU_ITEMS: OnceLock<Mutex<Option<TrayMenuItems>>> = OnceLock::new();
 static LINUX_PREREQ_CACHE: OnceLock<Mutex<Option<LinuxPrereqScan>>> = OnceLock::new();
 
+#[cfg(feature = "desktop-tray")]
 struct TrayMenuItems {
     start: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
 }
 
+#[cfg(feature = "desktop-tray")]
 fn tray_menu_items() -> &'static Mutex<Option<TrayMenuItems>> {
     TRAY_MENU_ITEMS.get_or_init(|| Mutex::new(None))
 }
@@ -353,7 +357,13 @@ fn detect_linux_os_release() -> LinuxOsRelease {
 
     #[cfg(target_os = "linux")]
     {
-        let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let os_release = if running_in_flatpak() {
+            run_command_capture("cat", &["/etc/os-release"], None)
+                .map(|(stdout, _)| stdout)
+                .unwrap_or_default()
+        } else {
+            std::fs::read_to_string("/etc/os-release").unwrap_or_default()
+        };
         let mut info = LinuxOsRelease::default();
         for line in os_release.lines() {
             if let Some(value) = line.strip_prefix("ID=") {
@@ -1843,14 +1853,27 @@ fn push_preflight(
 }
 
 fn command_available(program: &str, args: &[&str]) -> bool {
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args);
-    apply_background_command_flags(&mut cmd);
+    let mut cmd = match build_command(program, args, None, &[]) {
+        Ok(cmd) => cmd,
+        Err(_) => return false,
+    };
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn apply_background_command_flags(_cmd: &mut std::process::Command) {
     let _ = _cmd;
+}
+
+fn running_in_flatpak() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var_os("FLATPAK_ID").is_some() || Path::new("/.flatpak-info").exists()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 fn build_command(
@@ -1859,13 +1882,36 @@ fn build_command(
     working_dir: Option<&Path>,
     envs: &[(&str, &str)],
 ) -> Result<std::process::Command, String> {
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args);
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-    for (key, value) in envs {
-        cmd.env(key, value);
+    let mut cmd = if running_in_flatpak() && program != "flatpak-spawn" {
+        let mut wrapped = std::process::Command::new("flatpak-spawn");
+        wrapped.arg("--host");
+        if let Some(dir) = working_dir {
+            wrapped.arg(format!("--directory={}", dir.to_string_lossy()));
+        }
+        for (key, value) in envs {
+            wrapped.arg(format!("--env={key}={value}"));
+        }
+        wrapped.arg(program);
+        wrapped.args(args);
+        wrapped
+    } else {
+        let mut direct = std::process::Command::new(program);
+        direct.args(args);
+        if let Some(dir) = working_dir {
+            direct.current_dir(dir);
+        }
+        for (key, value) in envs {
+            direct.env(key, value);
+        }
+        direct
+    };
+    if !(running_in_flatpak() && program != "flatpak-spawn") {
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
+        }
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
     }
     apply_background_command_flags(&mut cmd);
     Ok(cmd)
@@ -3689,6 +3735,40 @@ fn apply_torch_allocator_env_compat(cmd: &mut std::process::Command) {
         }
         cmd.env_remove("PYTORCH_CUDA_ALLOC_CONF");
     }
+}
+
+fn python_runtime_env_for_root(root: &Path) -> Vec<(String, String)> {
+    let mut envs: Vec<(String, String)> = Vec::new();
+    let mpl_cache = root.join(".venv").join("var").join("matplotlib");
+    let _ = std::fs::create_dir_all(&mpl_cache);
+    let mut paths = collect_cuda_runtime_library_paths(root);
+    if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+        for p in std::env::split_paths(&existing) {
+            if !paths.iter().any(|d| d == &p) {
+                paths.push(p);
+            }
+        }
+    }
+    if !paths.is_empty() {
+        if let Ok(joined) = std::env::join_paths(paths) {
+            envs.push((
+                "LD_LIBRARY_PATH".to_string(),
+                joined.to_string_lossy().to_string(),
+            ));
+        }
+    }
+
+    if let Ok(value) = std::env::var("PYTORCH_CUDA_ALLOC_CONF") {
+        if std::env::var_os("PYTORCH_ALLOC_CONF").is_none() {
+            envs.push(("PYTORCH_ALLOC_CONF".to_string(), value));
+        }
+    }
+    envs.push(("MPLBACKEND".to_string(), "Agg".to_string()));
+    envs.push((
+        "MPLCONFIGDIR".to_string(),
+        mpl_cache.to_string_lossy().to_string(),
+    ));
+    envs
 }
 
 fn configure_python_runtime_env_for_root(cmd: &mut std::process::Command, root: &Path) {
@@ -5981,13 +6061,6 @@ fn start_comfyui_root_impl(
     let settings = state.context.config.settings();
     let custom_launch_args = parse_custom_launch_args(&settings.comfyui_custom_launch_args)?;
 
-    let mut cmd = std::process::Command::new(py_exe);
-    if !nerdstats_enabled() {
-        apply_background_command_flags(&mut cmd);
-    }
-    apply_cuda_runtime_env_for_root(&mut cmd, &root);
-    configure_python_runtime_env_for_root(&mut cmd, &root);
-
     let configured_root_matches = settings
         .comfyui_root
         .as_ref()
@@ -6052,7 +6125,12 @@ fn start_comfyui_root_impl(
             _ => detect_launch_attention_backend_for_root(&root),
         }
     };
-    cmd.arg("-W").arg("ignore::FutureWarning").arg(main_py);
+    let main_py_string = main_py.to_string_lossy().to_string();
+    let mut args_owned = vec![
+        "-W".to_string(),
+        "ignore::FutureWarning".to_string(),
+        main_py_string,
+    ];
     let launch_args = comfyui_launch_args(
         settings.comfyui_listen_enabled,
         settings.comfyui_pinned_memory_enabled,
@@ -6071,8 +6149,18 @@ fn start_comfyui_root_impl(
             effective_attention.as_deref().unwrap_or("PyTorch attention")
         ),
     );
-    cmd.args(launch_args);
-    cmd.current_dir(root);
+    for arg in launch_args {
+        args_owned.push(arg);
+    }
+    let arg_refs: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+    let py_exe_string = py_exe.to_string_lossy().to_string();
+    let python_envs = python_runtime_env_for_root(&root);
+    let env_refs: Vec<(&str, &str)> = python_envs
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    let mut cmd = build_command(&py_exe_string, &arg_refs, Some(&root), &env_refs)?;
+
     if nerdstats_enabled() {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else if settings.comfyui_show_runtime_logs {
@@ -6238,6 +6326,17 @@ fn comfyui_process_running(state: &AppState) -> bool {
 
 fn comfyui_external_running(state: &AppState) -> bool {
     let _ = state;
+    let addr = ("127.0.0.1", 8188)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut iter| iter.next());
+    let Some(addr) = addr else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(180)).is_ok()
+}
+
+fn comfyui_listener_running() -> bool {
     let addr = ("127.0.0.1", 8188)
         .to_socket_addrs()
         .ok()
@@ -6506,35 +6605,131 @@ fn normalize_release_version(input: &str) -> Option<String> {
     Some(format!("{major}.{minor}.{patch}"))
 }
 
-fn git_latest_release_tag(root: &Path) -> Option<(String, String)> {
-    let (stdout, _) = run_command_capture("git", &["ls-remote", "--tags", "--refs", "origin"], Some(root)).ok()?;
+#[derive(Debug, Deserialize)]
+struct GithubTagEntry {
+    name: String,
+}
+
+fn comfyui_origin_github_repo(root: &Path) -> Option<(String, String)> {
+    let config = std::fs::read_to_string(root.join(".git").join("config")).ok()?;
+    let mut in_origin = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[remote ") {
+            in_origin = trimmed == r#"[remote "origin"]"#;
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        if let Some(url) = trimmed.strip_prefix("url =") {
+            return parse_github_repo_from_url(url.trim());
+        }
+    }
+
+    None
+}
+
+fn parse_github_repo_from_url(url: &str) -> Option<(String, String)> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let path = if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("http://github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("ssh://git@github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest
+    } else {
+        return None;
+    };
+
+    let mut parts = path.trim_end_matches(".git").split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+fn github_latest_release_tag(owner: &str, repo: &str) -> Option<(String, String)> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!(
+            "ArcticDownloader/{} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_NAME")
+        ))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+
     let mut best: Option<((u64, u64, u64), String, String)> = None;
-
-    for line in stdout.lines() {
-        let mut cols = line.split_whitespace();
-        let Some(_sha) = cols.next() else {
-            continue;
-        };
-        let Some(ref_name) = cols.next() else {
-            continue;
-        };
-        let Some(tag) = ref_name.strip_prefix("refs/tags/") else {
-            continue;
-        };
-        let Some(version) = normalize_release_version(tag) else {
-            continue;
-        };
-        let Some(parsed) = parse_semver_triplet(&version) else {
-            continue;
-        };
-
-        match &best {
-            Some((current, _, _)) if *current >= parsed => {}
-            _ => best = Some((parsed, tag.to_string(), version)),
+    for page in 1..=5 {
+        let url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/tags?per_page=100&page={page}"
+        );
+        let response = client.get(&url).send().ok()?.error_for_status().ok()?;
+        let tags: Vec<GithubTagEntry> = response.json().ok()?;
+        if tags.is_empty() {
+            break;
+        }
+        for entry in tags {
+            let tag = entry.name;
+            let Some(version) = normalize_release_version(&tag) else {
+                continue;
+            };
+            let Some(parsed) = parse_semver_triplet(&version) else {
+                continue;
+            };
+            match &best {
+                Some((current, _, _)) if *current >= parsed => {}
+                _ => best = Some((parsed, tag, version)),
+            }
         }
     }
 
     best.map(|(_, tag, version)| (tag, version))
+}
+
+fn git_latest_release_tag(root: &Path) -> Option<(String, String)> {
+    if let Ok((stdout, _)) =
+        run_command_capture("git", &["ls-remote", "--tags", "--refs", "origin"], Some(root))
+    {
+        let mut best: Option<((u64, u64, u64), String, String)> = None;
+
+        for line in stdout.lines() {
+            let mut cols = line.split_whitespace();
+            let Some(_sha) = cols.next() else {
+                continue;
+            };
+            let Some(ref_name) = cols.next() else {
+                continue;
+            };
+            let Some(tag) = ref_name.strip_prefix("refs/tags/") else {
+                continue;
+            };
+            let Some(version) = normalize_release_version(tag) else {
+                continue;
+            };
+            let Some(parsed) = parse_semver_triplet(&version) else {
+                continue;
+            };
+
+            match &best {
+                Some((current, _, _)) if *current >= parsed => {}
+                _ => best = Some((parsed, tag.to_string(), version)),
+            }
+        }
+        if let Some((_, tag, version)) = best {
+            return Some((tag, version));
+        }
+    }
+
+    let (owner, repo) = comfyui_origin_github_repo(root)
+        .unwrap_or_else(|| ("comfyanonymous".to_string(), "ComfyUI".to_string()));
+    github_latest_release_tag(&owner, &repo)
 }
 
 fn git_current_branch(root: &Path) -> Option<String> {
@@ -6555,6 +6750,80 @@ fn git_commit_for_ref(root: &Path, git_ref: &str) -> Option<String> {
         Some(commit)
     } else {
         None
+    }
+}
+
+fn host_comfyui_running_for_needle(needle: &str) -> bool {
+    match run_command_capture("pgrep", &["-f", needle], None) {
+        Ok((stdout, _)) => stdout.lines().any(|line| !line.trim().is_empty()),
+        Err(_) => false,
+    }
+}
+
+fn signal_host_pids(pids: &[String], signal: &str) {
+    for pid in pids {
+        let _ = run_command_capture("kill", &[signal, pid.as_str()], None);
+    }
+}
+
+fn kill_host_comfyui_for_root(root: &Path) -> Result<bool, String> {
+    let main_py = root.join("main.py");
+    if !main_py.exists() {
+        return Ok(false);
+    }
+    let needle = main_py.to_string_lossy().to_string();
+    let (stdout, _) = match run_command_capture("pgrep", &["-f", &needle], None) {
+        Ok(output) => output,
+        Err(_) => return Ok(false),
+    };
+
+    let pids: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    if pids.is_empty() {
+        return Ok(false);
+    }
+
+    signal_host_pids(&pids, "-TERM");
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let still_running = host_comfyui_running_for_needle(&needle);
+        if !still_running || !comfyui_listener_running() {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    let remaining: Vec<String> = match run_command_capture("pgrep", &["-f", &needle], None) {
+        Ok((stdout, _)) => stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    if remaining.is_empty() || !comfyui_listener_running() {
+        return Ok(true);
+    }
+
+    signal_host_pids(&remaining, "-KILL");
+    let force_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if !host_comfyui_running_for_needle(&needle) || !comfyui_listener_running() {
+            return Ok(true);
+        }
+        if Instant::now() >= force_deadline {
+            return Err("Failed to stop host ComfyUI process cleanly.".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -7694,6 +7963,7 @@ async fn update_selected_comfyui(
 
 fn stop_comfyui_root_impl(state: &AppState) -> Result<bool, String> {
     let mut stopped_any = false;
+    let configured_root = state.context.config.settings().comfyui_root;
 
     let mut guard = state
         .comfyui_process
@@ -7709,10 +7979,14 @@ fn stop_comfyui_root_impl(state: &AppState) -> Result<bool, String> {
     }
     drop(guard);
 
-    // After app restart, we may no longer have a child handle but ComfyUI can still
-    // be running and listening on 8188. In that case, stop the listener process.
-    if comfyui_external_running(state) {
-        let _ = state;
+    // After app restart, or when Flatpak launches ComfyUI on the host, we may no
+    // longer have a child handle that can stop the real server process. In that case,
+    // stop the host listener process by its selected ComfyUI root.
+    if let Some(root) = configured_root {
+        let root = normalize_canonical_path(&std::fs::canonicalize(&root).unwrap_or(root));
+        if kill_host_comfyui_for_root(&root)? {
+            stopped_any = true;
+        }
     }
 
     Ok(stopped_any)
@@ -7740,28 +8014,49 @@ fn main_window_icon() -> Option<Image<'static>> {
         .clone()
 }
 
+#[cfg(feature = "desktop-tray")]
 fn stopped_tray_icon() -> Option<Image<'static>> {
     static STOPPED_ICON: OnceLock<Option<Image<'static>>> = OnceLock::new();
     STOPPED_ICON
         .get_or_init(|| {
-            Image::from_bytes(include_bytes!("../icons/favicon.ico"))
-                .ok()
-                .or_else(|| Image::from_bytes(include_bytes!("../icons/icon.ico")).ok())
+            #[cfg(target_os = "linux")]
+            {
+                Image::from_bytes(include_bytes!("../icons/icon-32.png")).ok()
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                Image::from_bytes(include_bytes!("../icons/favicon.ico"))
+                    .ok()
+                    .or_else(|| Image::from_bytes(include_bytes!("../icons/icon.ico")).ok())
+            }
         })
         .clone()
 }
 
+#[cfg(feature = "desktop-tray")]
 fn started_tray_icon() -> Option<Image<'static>> {
     static STARTED_ICON: OnceLock<Option<Image<'static>>> = OnceLock::new();
     STARTED_ICON
         .get_or_init(|| {
-            Image::from_bytes(include_bytes!("../icons/started.ico"))
-                .ok()
-                .or_else(|| Image::from_bytes(include_bytes!("../icons/icon.ico")).ok())
+            #[cfg(target_os = "linux")]
+            {
+                Image::from_bytes(include_bytes!("../icons/started-32.png"))
+                    .ok()
+                    .or_else(|| Image::from_bytes(include_bytes!("../icons/icon-32.png")).ok())
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                Image::from_bytes(include_bytes!("../icons/started.ico"))
+                    .ok()
+                    .or_else(|| Image::from_bytes(include_bytes!("../icons/icon.ico")).ok())
+            }
         })
         .clone()
 }
 
+#[cfg(feature = "desktop-tray")]
 fn update_tray_comfy_status(app: &AppHandle, running: bool) {
     if let Some(tray) = app.tray_by_id("arctic_tray") {
         let tooltip = if running {
@@ -7791,6 +8086,10 @@ fn update_tray_comfy_status(app: &AppHandle, running: bool) {
     }
 }
 
+#[cfg(not(feature = "desktop-tray"))]
+fn update_tray_comfy_status(_app: &AppHandle, _running: bool) {}
+
+#[cfg(feature = "desktop-tray")]
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "tray_show", "Show App", true, None::<&str>)?;
     let start_item = MenuItem::with_id(app, "tray_start", "Start ComfyUI", true, None::<&str>)?;
@@ -7883,6 +8182,20 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
         });
 
+    #[cfg(target_os = "linux")]
+    if running_in_flatpak() {
+        if let Some(home) = std::env::var_os("HOME") {
+            let tray_dir = PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("ArcticComfyUIHelper")
+                .join("tray-icons");
+            if std::fs::create_dir_all(&tray_dir).is_ok() {
+                builder = builder.temp_dir_path(&tray_dir);
+            }
+        }
+    }
+
     if let Some(icon) = stopped_tray_icon().or_else(|| app.default_window_icon().cloned()) {
         builder = builder.icon(icon);
     }
@@ -7891,6 +8204,11 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let state = app.state::<AppState>();
     let running = comfyui_runtime_running(&state);
     update_tray_comfy_status(app, running);
+    Ok(())
+}
+
+#[cfg(not(feature = "desktop-tray"))]
+fn setup_tray(_app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
@@ -8097,6 +8415,12 @@ fn main() {
 }
 
 fn tray_enabled_for_platform() -> bool {
+    #[cfg(not(feature = "desktop-tray"))]
+    {
+        return false;
+    }
+
+    #[cfg(feature = "desktop-tray")]
     #[cfg(target_os = "linux")]
     {
         match std::env::var("ARCTIC_ENABLE_TRAY") {
@@ -8108,6 +8432,7 @@ fn tray_enabled_for_platform() -> bool {
         }
     }
 
+    #[cfg(feature = "desktop-tray")]
     #[cfg(not(target_os = "linux"))]
     {
         true
