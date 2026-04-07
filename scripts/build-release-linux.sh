@@ -469,12 +469,12 @@ echo "  Output: $OUT_ABS_DIR"
 echo "  Manifest: $manifest"
 echo "  Checksums: $OUT_ABS_DIR/SHA256SUMS"
 
-if ((PUBLISH_GITHUB == 1)); then
+  if ((PUBLISH_GITHUB == 1)); then
   echo "Publishing GitHub release '$TAG' to '$REPOSITORY' ..."
   if ((ARCH_AUR_ONLY == 1)); then
     mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f -name '*.pkg.tar.*' | sort)
   else
-    mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' -o -name 'SHA256SUMS' \) | sort)
+    mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' -o -name 'SHA256SUMS' -o -name 'linux-release.json' \) | sort)
   fi
   if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
     gh release upload "$TAG" "${release_files[@]}" --repo "$REPOSITORY" --clobber

@@ -114,3 +114,6 @@ Entries:
     - Replaced `pkgconfig(ayatana-appindicator3-0.1)` with `pkgconfig(appindicator3-0.1)` in the RPM build requirements.
 - Fedora RPM packaging now uses the Ayatana AppIndicator development/runtime packages that Tauri's Linux tray dependency actually requires, and the distrobox bootstrap now explicitly checks for and installs `libayatana-appindicator-gtk3-devel` before building.
 - Flatpak packaging now exports the app on the `stable` branch before bundling, fixing the `Refspec 'app/io.github.ArcticHelper/x86_64/stable' not found` error at the final `flatpak build-bundle` step.
+- Fixed the Linux GitHub publish path so `linux-release.json` is uploaded alongside the package assets and `SHA256SUMS`, which restores the in-app Linux update check.
+- Added a manual `Refresh Catalog` action in the app header so the running app can pull the latest remote catalog without needing a full restart.
+- Models that only define `always` artifacts and no VRAM variants now appear in the Models list and can be selected/downloaded through an `Always Artifacts Only` path.

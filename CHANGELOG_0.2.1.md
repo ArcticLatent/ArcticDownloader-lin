@@ -24,3 +24,6 @@
 - The Flatpak release flow produces a single-file `.flatpak` bundle alongside the existing Arch, Debian, and RPM artifacts.
 - Fixed Fedora RPM packaging to depend on the Ayatana AppIndicator development/runtime packages required by the Tauri tray build, and tightened the Fedora distrobox bootstrap so the needed devel package is always installed before `rpmbuild`.
 - Fixed Flatpak bundling to export and bundle the app on the same `stable` branch, resolving the final `Refspec ... stable not found` failure after a successful Flatpak build.
+- Fixed the Linux GitHub release publish path so `linux-release.json` is uploaded with the release assets, restoring the in-app Linux update check instead of returning a 404.
+- Added a manual `Refresh Catalog` action so the running app can reload the remote model catalog without a full restart.
+- Models with no variants but with `always` artifacts, such as FlashVSR-style entries, now appear in the Models tab and can be downloaded through an `Always Artifacts Only` flow.
