@@ -2494,8 +2494,9 @@ function renderModelSelectionList() {
     box.checked = Boolean(currentVariantId && state.selectedModelVariants.has(model.id));
     box.disabled = !currentVariantId;
     box.addEventListener("change", () => {
-      if (box.checked && currentVariantId) {
-        state.selectedModelVariants.set(model.id, currentVariantId);
+      const activeVariantId = String(variantSelect.value || "").trim() || currentVariantId;
+      if (box.checked && activeVariantId) {
+        state.selectedModelVariants.set(model.id, activeVariantId);
       } else {
         state.selectedModelVariants.delete(model.id);
       }
