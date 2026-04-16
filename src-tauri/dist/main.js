@@ -1947,7 +1947,9 @@ function updateDownloadButtons() {
   } else {
     el.downloadModel.textContent = "Download Model Assets";
     el.downloadLora.textContent = "Download LoRA";
-    el.downloadWorkflow.textContent = "Download Workflow";
+    el.downloadWorkflow.textContent = workflowExternalUrl(selectedWorkflow())
+      ? "Open Workflow Link"
+      : "Download Workflow";
   }
 }
 
@@ -2887,14 +2889,52 @@ function refreshWorkflowSelectors() {
   if (!state.catalog) return;
   const family = el.workflowFamily.value || "all";
   const filtered = (state.catalog.workflows || []).filter((w) => family === "all" || w.family === family);
-  const options = filtered.map((w) => ({ value: w.id, label: w.display_name }));
+  const options = filtered.map((w) => ({ value: w.id, label: workflowDisplayName(w) }));
   setOptions(el.workflowId, options);
   loadWorkflowPreview();
 }
 
-function loadWorkflowPreview() {
+function workflowDisplayName(workflow) {
+  if (!workflow) return "Workflow";
+  return (
+    String(workflow.workflow_name || "").trim() ||
+    String(workflow.name || "").trim() ||
+    String(workflow.title || "").trim() ||
+    String(workflow.display_name || "").trim() ||
+    String(workflow.id || "").trim() ||
+    "Workflow"
+  );
+}
+
+function selectedWorkflow() {
   const selectedId = String(el.workflowId?.value || "").trim();
-  const workflow = (state.catalog?.workflows || []).find((w) => w.id === selectedId);
+  if (!selectedId) return null;
+  return (state.catalog?.workflows || []).find((w) => w.id === selectedId) || null;
+}
+
+function workflowExternalUrl(workflow) {
+  if (!workflow) return "";
+  const directLink =
+    String(workflow.patreon_url || "").trim() ||
+    String(workflow.workflow_url || "").trim() ||
+    String(workflow.workflow_link_url || "").trim();
+  if (directLink) return directLink;
+
+  const legacyUrl = String(workflow.workflow_json_url || "").trim();
+  if (!legacyUrl) return "";
+  try {
+    const parsed = new URL(legacyUrl);
+    const path = parsed.pathname.toLowerCase();
+    const host = parsed.hostname.toLowerCase();
+    if (host.includes("patreon.com") || !path.endsWith(".json")) {
+      return legacyUrl;
+    }
+  } catch (_) {}
+  return "";
+}
+
+function loadWorkflowPreview() {
+  const workflow = selectedWorkflow();
   if (!workflow) {
     if (el.workflowPreviewImage) {
       el.workflowPreviewImage.classList.add("hidden");
@@ -2910,6 +2950,7 @@ function loadWorkflowPreview() {
       el.workflowYoutubeLink.href = "#";
       el.workflowYoutubeLink.style.pointerEvents = "none";
     }
+    updateDownloadButtons();
     return;
   }
 
@@ -2922,6 +2963,7 @@ function loadWorkflowPreview() {
     if (el.workflowPreviewCaption) {
       el.workflowPreviewCaption.textContent = "No preview image available for this workflow.";
     }
+    updateDownloadButtons();
     return;
   }
 
@@ -2930,7 +2972,7 @@ function loadWorkflowPreview() {
     el.workflowPreviewImage.classList.remove("hidden");
   }
   if (el.workflowPreviewCaption) {
-    el.workflowPreviewCaption.textContent = workflow.display_name || "Workflow preview";
+    el.workflowPreviewCaption.textContent = workflowDisplayName(workflow);
   }
 
   const ytUrl = String(workflow.youtube_url || "").trim();
@@ -2941,6 +2983,7 @@ function loadWorkflowPreview() {
     el.workflowYoutubeLink.href = ytUrl || "#";
     el.workflowYoutubeLink.style.pointerEvents = ytUrl ? "auto" : "none";
   }
+  updateDownloadButtons();
 }
 
 async function loadLoraMetadata() {
@@ -4295,14 +4338,25 @@ el.downloadWorkflow?.addEventListener("click", async () => {
     await requestCancelDownload();
     return;
   }
-  if (!el.workflowId.value) {
+  const workflow = selectedWorkflow();
+  if (!workflow) {
     logLine("Select a workflow first.");
+    return;
+  }
+  const externalUrl = workflowExternalUrl(workflow);
+  if (externalUrl) {
+    try {
+      await invoke("open_external_url", { url: externalUrl });
+      logLine("Opened workflow link in browser.");
+    } catch (err) {
+      logLine(`Open workflow link failed: ${err}`);
+    }
     return;
   }
   beginBusyDownload("Starting workflow download...");
   try {
     await invoke("download_workflow_asset", {
-      workflowId: el.workflowId.value,
+      workflowId: workflow.id,
       comfyuiRoot: el.comfyRootWorkflow?.value || el.comfyRoot.value,
     });
     logLine("Workflow download started.");

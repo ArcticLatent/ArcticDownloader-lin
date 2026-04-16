@@ -10,6 +10,18 @@ Format:
 - Notes
 
 Entries:
+- 2026-04-16
+  - Updated workflow catalog handling so workflow rows can open external links instead of always downloading JSON files.
+  - Files changed:
+    - src/model.rs
+    - src-tauri/dist/main.js
+    - CHANGELOG_0.2.3.md
+    - version0.2.3_updates
+  - Notes:
+    - Workflow catalog entries can now include optional `patreon_url`, `workflow_url`, or `workflow_link_url` fields.
+    - `workflow_json_url` is now serde-defaulted so link-only workflow entries can load without a JSON download URL.
+    - The workflow button label changes to `Open Workflow Link` for link-style entries and opens the URL through the existing external browser command.
+    - Workflow dropdown labels now prefer full-name fields such as `workflow_name`, `name`, or `title` before falling back to `display_name`.
 - 2026-04-15
   - Reworked the Models tab hardware sizing logic from broad range labels to fixed standard hardware-size mappings.
   - Files changed:

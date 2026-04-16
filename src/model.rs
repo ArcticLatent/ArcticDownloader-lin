@@ -295,7 +295,20 @@ pub struct WorkflowDefinition {
     pub id: String,
     pub display_name: String,
     pub family: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default)]
     pub workflow_json_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_link_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patreon_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_image_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

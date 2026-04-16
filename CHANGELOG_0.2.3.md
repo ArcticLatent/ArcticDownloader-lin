@@ -14,7 +14,10 @@
 - Clip and text encoder groups now appear first in the Selected Queue's Always Artifacts list.
 - Model artifacts can now use `ram_bucket` for exact RAM-bucket alternatives, such as one text encoder per RAM tier.
 - RAM artifact requirements now behave as true minimums, so higher RAM tiers satisfy lower RAM-tier artifact requirements.
+- Workflow entries can now open external links such as Patreon pages from the workflow button instead of requiring a downloadable JSON file.
+- Workflow dropdowns now prefer full workflow name fields from the catalog before falling back to short display names.
 
 ## Notes
 
 - The fixed-size selectors still map to the existing catalog tier system internally, so current model catalog entries continue to work without schema changes.
+- Workflow catalog entries remain compatible with the existing `workflow_json_url` download flow, while link-style entries can use fields such as `patreon_url`, `workflow_url`, or `workflow_link_url`.
