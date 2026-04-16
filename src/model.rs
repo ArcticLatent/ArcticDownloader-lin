@@ -359,6 +359,8 @@ pub struct ModelArtifact {
     #[serde(default)]
     pub license_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_bucket: Option<RamTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_ram_tier: Option<RamTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_url: Option<String>,
@@ -373,6 +375,9 @@ impl ModelArtifact {
     }
 
     pub fn is_supported_on_ram(&self, available: Option<RamTier>) -> bool {
+        if let Some(bucket) = self.ram_bucket {
+            return available.map(|tier| tier == bucket).unwrap_or(false);
+        }
         match self.min_ram_tier {
             None => true,
             Some(required) => available

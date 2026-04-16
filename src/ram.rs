@@ -47,9 +47,9 @@ impl RamTier {
 
     pub fn description(self) -> &'static str {
         match self {
-            RamTier::TierA => "Tier A (64 GB+)",
-            RamTier::TierB => "Tier B (32-63 GB)",
-            RamTier::TierC => "Tier C (<32 GB)",
+            RamTier::TierA => "Tier A (64, 96, or 128 GB)",
+            RamTier::TierB => "Tier B (32 GB)",
+            RamTier::TierC => "Tier C (8 or 16 GB)",
         }
     }
 
@@ -97,7 +97,7 @@ impl RamTier {
     }
 
     pub fn satisfies(self, requirement: RamTier) -> bool {
-        self == requirement
+        self.index() <= requirement.index()
     }
 }
 

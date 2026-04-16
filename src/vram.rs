@@ -71,10 +71,10 @@ impl VramTier {
 
     pub fn description(self) -> &'static str {
         match self {
-            VramTier::TierS => "Tier S (32 GB+)",
-            VramTier::TierA => "Tier A (16-31 GB)",
-            VramTier::TierB => "Tier B (12-15 GB)",
-            VramTier::TierC => "Tier C (<12 GB)",
+            VramTier::TierS => "Tier S (32, 48, 80, or 96 GB)",
+            VramTier::TierA => "Tier A (16 or 24 GB)",
+            VramTier::TierB => "Tier B (12 GB)",
+            VramTier::TierC => "Tier C (8 GB)",
         }
     }
 

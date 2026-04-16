@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.2.3-1) unstable; urgency=medium
+
+  * Changed the Models tab GPU VRAM and RAM selectors to fixed standard hardware-size choices.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Wed, 15 Apr 2026 14:49:56 -0400
+
 arctic-comfyui-helper (0.2.2-1) unstable; urgency=medium
 
   * Added a manual `Refresh Catalog` action so the running app can reload the remote model catalog without a full restart.

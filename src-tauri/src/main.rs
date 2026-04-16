@@ -3,13 +3,13 @@ use arctic_downloader::{
     config::AppSettings,
     download::{CivitaiPreview, DownloadSignal, DownloadStatus},
     env_flags::auto_update_enabled,
-    model::{LoraDefinition, ModelCatalog, WorkflowDefinition},
+    model::{LoraDefinition, ModelArtifact, ModelCatalog, ResolvedModel, WorkflowDefinition},
     ram::{detect_ram_profile, RamTier},
     vram::VramTier,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     io::BufRead,
     io::IsTerminal,
     net::{TcpStream, ToSocketAddrs},
@@ -21,13 +21,13 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 #[cfg(feature = "desktop-tray")]
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 use tokio_util::sync::CancellationToken;
 
@@ -75,6 +75,8 @@ struct HfXetPreflightResponse {
 struct BatchModelDownloadItem {
     model_id: String,
     variant_id: String,
+    #[serde(default)]
+    selected_artifact_keys: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -341,7 +343,9 @@ fn detect_linux_distro_family() -> String {
         "arch".to_string()
     } else if haystack.contains("debian") || haystack.contains("ubuntu") {
         "debian".to_string()
-    } else if haystack.contains("fedora") || haystack.contains("rhel") || haystack.contains("centos")
+    } else if haystack.contains("fedora")
+        || haystack.contains("rhel")
+        || haystack.contains("centos")
     {
         "fedora".to_string()
     } else {
@@ -846,7 +850,11 @@ fn rocm_runtime_ready() -> (bool, bool, Vec<String>) {
     let runtime_partially_present = has_rocminfo_bin || has_dev_kfd;
     let requires_relogin = runtime_partially_present && (!render_ok || !video_ok);
 
-    (has_rocminfo_bin && has_dev_kfd && rocminfo_ok, requires_relogin, notes)
+    (
+        has_rocminfo_bin && has_dev_kfd && rocminfo_ok,
+        requires_relogin,
+        notes,
+    )
 }
 
 fn dri_render_nodes() -> Vec<PathBuf> {
@@ -886,7 +894,8 @@ fn xpu_runtime_ready_for_distro(distro: &str) -> (bool, bool, Vec<String>) {
     let runtime_packages_ready = match distro {
         "arch" => {
             let compute = linux_package_installed("arch", "intel-compute-runtime");
-            let level_zero = linux_package_installed_any("arch", &["level-zero-loader", "level-zero"]);
+            let level_zero =
+                linux_package_installed_any("arch", &["level-zero-loader", "level-zero"]);
             if !compute {
                 notes.push("`intel-compute-runtime` is not installed.".to_string());
             }
@@ -1039,7 +1048,11 @@ fn run_command_streaming_with_env(
     working_dir: Option<&Path>,
     envs: &[(&str, &str)],
 ) -> Result<(), String> {
-    log::debug!("run_command_streaming_with_env: {} {}", program, args.join(" "));
+    log::debug!(
+        "run_command_streaming_with_env: {} {}",
+        program,
+        args.join(" ")
+    );
     let mut cmd = build_command(program, args, working_dir, envs)?;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
@@ -1047,12 +1060,14 @@ fn run_command_streaming_with_env(
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
 
     let tail = std::sync::Arc::new(Mutex::new(VecDeque::<String>::new()));
-    let stdout_handle = child.stdout.take().map(|stdout| {
-        stream_command_output(app, phase, "stdout", stdout, tail.clone())
-    });
-    let stderr_handle = child.stderr.take().map(|stderr| {
-        stream_command_output(app, phase, "stderr", stderr, tail.clone())
-    });
+    let stdout_handle = child
+        .stdout
+        .take()
+        .map(|stdout| stream_command_output(app, phase, "stdout", stdout, tail.clone()));
+    let stderr_handle = child
+        .stderr
+        .take()
+        .map(|stderr| stream_command_output(app, phase, "stderr", stderr, tail.clone()));
 
     let status = child
         .wait()
@@ -1120,7 +1135,9 @@ fn install_rocm_guided_internal(app: &AppHandle) -> Result<RocmGuidedStatus, Str
             gpu_name,
             ready: false,
             requires_relogin: false,
-            detail: "Fake AMD mode is active. UI testing is enabled, but guided ROCm setup is disabled.".to_string(),
+            detail:
+                "Fake AMD mode is active. UI testing is enabled, but guided ROCm setup is disabled."
+                    .to_string(),
         });
     }
 
@@ -1187,12 +1204,7 @@ fn install_rocm_guided_internal(app: &AppHandle) -> Result<RocmGuidedStatus, Str
             );
             let deb_path = "/tmp/amdgpu-install_6.4.60404-1_all.deb";
             emit_rocm_guided_event(app, "step", "Downloading AMD amdgpu-install package...");
-            run_command_with_retry(
-                "wget",
-                &["-O", deb_path, &installer_url],
-                None,
-                2,
-            )?;
+            run_command_with_retry("wget", &["-O", deb_path, &installer_url], None, 2)?;
             let mut steps = vec![
                 "echo Refreshing apt package metadata for ROCm setup...".to_string(),
                 "apt update".to_string(),
@@ -1239,7 +1251,8 @@ fn install_rocm_guided_internal(app: &AppHandle) -> Result<RocmGuidedStatus, Str
         "ROCm packages installed. Log out and back in, or reboot, then run the ROCm check again."
             .to_string()
     } else if notes.is_empty() {
-        "ROCm guided setup finished. Log out and back in, then run the ROCm check again.".to_string()
+        "ROCm guided setup finished. Log out and back in, then run the ROCm check again."
+            .to_string()
     } else {
         format!(
             "ROCm guided setup finished. Log out and back in, then run the ROCm check again. {}",
@@ -1320,7 +1333,8 @@ fn install_xpu_guided_internal(app: &AppHandle) -> Result<XpuGuidedStatus, Strin
                 "echo Refreshing pacman package metadata for Intel XPU setup...".to_string(),
                 "pacman -Sy".to_string(),
                 "echo Installing Intel XPU runtime packages with pacman...".to_string(),
-                "pacman -S --needed --noconfirm intel-compute-runtime level-zero-loader".to_string(),
+                "pacman -S --needed --noconfirm intel-compute-runtime level-zero-loader"
+                    .to_string(),
             ];
             if let Ok(user) = std::env::var("USER") {
                 if !user.trim().is_empty() {
@@ -1386,7 +1400,8 @@ fn install_xpu_guided_internal(app: &AppHandle) -> Result<XpuGuidedStatus, Strin
     } else if requires_relogin {
         "Intel GPU packages installed. Log out and back in, or reboot, then run the Intel XPU check again.".to_string()
     } else if notes.is_empty() {
-        "Intel guided setup finished. Log out and back in, then run the Intel XPU check again.".to_string()
+        "Intel guided setup finished. Log out and back in, then run the Intel XPU check again."
+            .to_string()
     } else {
         format!(
             "Intel guided setup finished. Log out and back in, then run the Intel XPU check again. {}",
@@ -1937,8 +1952,7 @@ fn nerdstats_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn try_attach_parent_console() {
-}
+fn try_attach_parent_console() {}
 
 fn ensure_git_available(app: &AppHandle) -> Result<(), String> {
     let _ = app;
@@ -2089,10 +2103,7 @@ fn ensure_hf_xet_runtime_installed(always_upgrade: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_hf_xet_enabled(
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<AppSettings, String> {
+fn set_hf_xet_enabled(state: State<'_, AppState>, enabled: bool) -> Result<AppSettings, String> {
     if enabled {
         ensure_hf_xet_runtime_installed(true)?;
     }
@@ -2272,26 +2283,11 @@ fn run_comfyui_preflight(
 
     let hf_xet = get_hf_xet_preflight_internal(state.context.config.settings().hf_xet_enabled);
     if !hf_xet.hf_cli_available {
-        push_preflight(
-            &mut items,
-            "warn",
-            "HF/Xet acceleration",
-            hf_xet.detail,
-        );
+        push_preflight(&mut items, "warn", "HF/Xet acceleration", hf_xet.detail);
     } else if hf_xet.hf_xet_installed && hf_xet.xet_enabled {
-        push_preflight(
-            &mut items,
-            "pass",
-            "HF/Xet acceleration",
-            hf_xet.detail,
-        );
+        push_preflight(&mut items, "pass", "HF/Xet acceleration", hf_xet.detail);
     } else {
-        push_preflight(
-            &mut items,
-            "warn",
-            "HF/Xet acceleration",
-            hf_xet.detail,
-        );
+        push_preflight(&mut items, "warn", "HF/Xet acceleration", hf_xet.detail);
     }
 
     match get_linux_prereq_cache_or_scan() {
@@ -2395,12 +2391,7 @@ fn run_comfyui_preflight(
     if torch_profile_is_rocm(&selected_profile) {
         let status = get_rocm_guided_status();
         if status.ready {
-            push_preflight(
-                &mut items,
-                "pass",
-                "ROCm runtime",
-                status.detail,
-            );
+            push_preflight(&mut items, "pass", "ROCm runtime", status.detail);
         } else if status.requires_relogin {
             ok = false;
             push_preflight(
@@ -2411,12 +2402,7 @@ fn run_comfyui_preflight(
             );
         } else {
             ok = false;
-            push_preflight(
-                &mut items,
-                "fail",
-                "ROCm runtime",
-                status.detail,
-            );
+            push_preflight(&mut items, "fail", "ROCm runtime", status.detail);
         }
     }
     if torch_profile_is_xpu(&selected_profile) {
@@ -2677,7 +2663,6 @@ fn download_http_file(url: &str, out_file: &Path) -> Result<(), String> {
     Ok(())
 }
 
-
 fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Result<(), String> {
     log::debug!("run_command: {} {}", program, args.join(" "));
     let mut cmd = build_command(program, args, working_dir, &[])?;
@@ -2688,6 +2673,61 @@ fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Resu
         return Err(format!("Command failed: {} {}", program, args.join(" ")));
     }
     Ok(())
+}
+
+fn model_artifact_selection_key(artifact: &ModelArtifact) -> String {
+    [
+        artifact.target_category.slug(),
+        artifact.repo.trim(),
+        artifact.path.trim(),
+        artifact
+            .direct_url
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default(),
+        artifact.file_name(),
+    ]
+    .join("::")
+}
+
+fn filter_selected_model_artifacts(
+    artifacts: Vec<ModelArtifact>,
+    selected_keys: Option<&Vec<String>>,
+) -> Vec<ModelArtifact> {
+    let Some(selected_keys) = selected_keys else {
+        return artifacts;
+    };
+    let selected: HashSet<&str> = selected_keys.iter().map(String::as_str).collect();
+    artifacts
+        .into_iter()
+        .filter(|artifact| selected.contains(model_artifact_selection_key(artifact).as_str()))
+        .collect()
+}
+
+fn model_artifacts_for_download_request(
+    resolved: &ResolvedModel,
+    ram_tier: Option<RamTier>,
+    selected_keys: Option<&Vec<String>>,
+) -> Vec<ModelArtifact> {
+    let artifacts = if selected_keys.is_some() {
+        let mut artifacts = Vec::new();
+        for group in &resolved.master.always {
+            for artifact in &group.artifacts {
+                if artifact.ram_bucket.is_some() || artifact.is_supported_on_ram(ram_tier) {
+                    artifacts.push(artifact.clone());
+                }
+            }
+        }
+        for artifact in &resolved.variant.artifacts {
+            if artifact.is_supported_on_ram(ram_tier) {
+                artifacts.push(artifact.clone());
+            }
+        }
+        artifacts
+    } else {
+        resolved.artifacts_for_download(ram_tier)
+    };
+    filter_selected_model_artifacts(artifacts, selected_keys)
 }
 
 fn run_command_with_env(
@@ -2836,8 +2876,7 @@ fn run_privileged_shell_streaming(
 
     Err(format!(
         "Privilege escalation failed for guided ROCm setup. sudo: {} pkexec: {}",
-        sudo_err,
-        pkexec_err
+        sudo_err, pkexec_err
     ))
 }
 
@@ -2928,13 +2967,7 @@ fn pip_uninstall_best_effort(root: &Path, py_path: &str, packages: &[&str]) {
     let uv_bin = discover_uv_binary();
     for package in packages {
         if let Some(uv) = uv_bin.as_deref() {
-            let _ = run_uv_pip_strict(
-                uv,
-                py_path,
-                &["uninstall", package],
-                Some(root),
-                &[],
-            );
+            let _ = run_uv_pip_strict(uv, py_path, &["uninstall", package], Some(root), &[]);
         } else {
             let _ = run_command_capture(
                 py_path,
@@ -3046,7 +3079,10 @@ fn force_cleanup_attention_backends(root: &Path, py_path: &str) -> Result<(), St
 
     let mut parts: Vec<String> = Vec::new();
     if !lingering.is_empty() {
-        parts.push(format!("packages still installed: {}", lingering.join(", ")));
+        parts.push(format!(
+            "packages still installed: {}",
+            lingering.join(", ")
+        ));
     }
     if !lingering_modules.is_empty() {
         parts.push(format!(
@@ -3055,7 +3091,10 @@ fn force_cleanup_attention_backends(root: &Path, py_path: &str) -> Result<(), St
         ));
     }
     if !lingering_nodes.is_empty() {
-        parts.push(format!("nodes still present: {}", lingering_nodes.join(", ")));
+        parts.push(format!(
+            "nodes still present: {}",
+            lingering_nodes.join(", ")
+        ));
     }
     Err(format!(
         "Failed to fully remove previous attention backends ({}). Stop ComfyUI and retry.",
@@ -3282,7 +3321,6 @@ fn profile_from_torch_env(root: &Path) -> Result<String, String> {
     ))
 }
 
-
 fn write_install_summary(install_root: &Path, items: &[InstallSummaryItem]) {
     let path = install_root.join("install-summary.json");
     if let Ok(data) = serde_json::to_vec_pretty(items) {
@@ -3356,11 +3394,36 @@ fn torch_profile_to_packages_linux(
     profile: &str,
 ) -> (&'static str, &'static str, &'static str, &'static str) {
     match profile {
-        "torch271_cu128" => ("2.7.1", "0.22.1", "2.7.1", "https://download.pytorch.org/whl/cu128"),
-        "torch291_rocm64" => ("2.9.1", "0.24.1", "2.9.1", "https://download.pytorch.org/whl/rocm6.4"),
-        "torch291_xpu" => ("2.9.1", "0.24.1", "2.9.1", "https://download.pytorch.org/whl/xpu"),
-        "torch291_cu130" => ("2.9.1", "0.24.1", "2.9.1", "https://download.pytorch.org/whl/cu130"),
-        _ => ("2.8.0", "0.23.0", "2.8.0", "https://download.pytorch.org/whl/cu128"),
+        "torch271_cu128" => (
+            "2.7.1",
+            "0.22.1",
+            "2.7.1",
+            "https://download.pytorch.org/whl/cu128",
+        ),
+        "torch291_rocm64" => (
+            "2.9.1",
+            "0.24.1",
+            "2.9.1",
+            "https://download.pytorch.org/whl/rocm6.4",
+        ),
+        "torch291_xpu" => (
+            "2.9.1",
+            "0.24.1",
+            "2.9.1",
+            "https://download.pytorch.org/whl/xpu",
+        ),
+        "torch291_cu130" => (
+            "2.9.1",
+            "0.24.1",
+            "2.9.1",
+            "https://download.pytorch.org/whl/cu130",
+        ),
+        _ => (
+            "2.8.0",
+            "0.23.0",
+            "2.8.0",
+            "https://download.pytorch.org/whl/cu128",
+        ),
     }
 }
 
@@ -3685,7 +3748,11 @@ fn collect_cuda_runtime_library_paths(root: &Path) -> Vec<PathBuf> {
         }
     };
 
-    for sys in ["/opt/cuda/lib64", "/usr/local/cuda/lib64", "/usr/lib/wsl/lib"] {
+    for sys in [
+        "/opt/cuda/lib64",
+        "/usr/local/cuda/lib64",
+        "/usr/lib/wsl/lib",
+    ] {
         push_unique(PathBuf::from(sys));
     }
 
@@ -3797,8 +3864,7 @@ fm._load_fontmanager(try_read_cache=False)",
 
 fn python_module_importable(root: &Path, module: &str) -> bool {
     let mut cmd = python_for_root(root);
-    cmd.arg("-c")
-        .arg(format!("import {module}"));
+    cmd.arg("-c").arg(format!("import {module}"));
     cmd.current_dir(root);
     apply_cuda_runtime_env_for_root(&mut cmd, root);
     configure_python_runtime_env_for_root(&mut cmd, root);
@@ -4049,11 +4115,8 @@ fn run_comfyui_install_linux(
                 extra_root.display()
             ),
         );
-        let config_path = write_extra_model_paths_yaml(
-            &comfy_dir,
-            extra_root,
-            request.extra_model_use_default,
-        )?;
+        let config_path =
+            write_extra_model_paths_yaml(&comfy_dir, extra_root, request.extra_model_use_default)?;
         summary.push(InstallSummaryItem {
             name: "extra_model_paths".to_string(),
             status: "ok".to_string(),
@@ -4126,7 +4189,11 @@ fn run_comfyui_install_linux(
     run_uv_pip_strict(
         &uv_bin,
         &py_exe.to_string_lossy(),
-        &["install", "-r", &comfy_dir.join("requirements.txt").to_string_lossy()],
+        &[
+            "install",
+            "-r",
+            &comfy_dir.join("requirements.txt").to_string_lossy(),
+        ],
         Some(&comfy_dir),
         &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
@@ -4170,7 +4237,12 @@ fn run_comfyui_install_linux(
         } else {
             emit_install_event(app, "step", "Installing InsightFace...");
         }
-        install_insightface(&comfy_dir, &uv_bin, &py_exe.to_string_lossy(), &python_store_s)?;
+        install_insightface(
+            &comfy_dir,
+            &uv_bin,
+            &py_exe.to_string_lossy(),
+            &python_store_s,
+        )?;
     }
 
     if request.include_flash_attention {
@@ -4501,7 +4573,11 @@ fn run_comfyui_install_linux(
     // Final guard: custom-node requirements can drift torch deps.
     // Re-assert the selected stack before first launch.
     write_install_state(&install_root, "in_progress", "finalize_torch_stack");
-    emit_install_event(app, "step", "Finalizing Torch stack for selected profile...");
+    emit_install_event(
+        app,
+        "step",
+        "Finalizing Torch stack for selected profile...",
+    );
     enforce_torch_profile_linux(
         &uv_bin,
         &py_exe.to_string_lossy(),
@@ -4552,24 +4628,25 @@ async fn start_comfyui_install(
                     .unwrap_or_else(|| comfy_root.clone());
                 let managed = app_for_task.state::<AppState>();
                 let normalized_shared_models =
-                    normalize_optional_path(request.extra_model_root.as_deref()).ok().flatten();
-                let _ = managed.context.config.update_settings(|settings| {
-                    settings.comfyui_root = Some(comfy_root.clone());
-                    settings.comfyui_last_install_dir = Some(install_dir.clone());
-                    settings.comfyui_pinned_memory_enabled = request.include_pinned_memory;
-                    settings.comfyui_torch_profile = Some(
-                        request
-                            .torch_profile
-                            .clone()
-                            .unwrap_or_else(|| get_comfyui_install_recommendation().torch_profile),
-                    );
-                    settings.comfyui_attention_backend =
-                        Some(selected_attention_backend(&request).to_string());
-                    settings.shared_models_root = normalized_shared_models.clone();
-                    settings.shared_models_use_default = normalized_shared_models
-                        .as_ref()
-                        .is_some_and(|_| request.extra_model_use_default);
-                });
+                    normalize_optional_path(request.extra_model_root.as_deref())
+                        .ok()
+                        .flatten();
+                let _ =
+                    managed.context.config.update_settings(|settings| {
+                        settings.comfyui_root = Some(comfy_root.clone());
+                        settings.comfyui_last_install_dir = Some(install_dir.clone());
+                        settings.comfyui_pinned_memory_enabled = request.include_pinned_memory;
+                        settings.comfyui_torch_profile =
+                            Some(request.torch_profile.clone().unwrap_or_else(|| {
+                                get_comfyui_install_recommendation().torch_profile
+                            }));
+                        settings.comfyui_attention_backend =
+                            Some(selected_attention_backend(&request).to_string());
+                        settings.shared_models_root = normalized_shared_models.clone();
+                        settings.shared_models_use_default = normalized_shared_models
+                            .as_ref()
+                            .is_some_and(|_| request.extra_model_use_default);
+                    });
                 let _ = app_for_task.emit(
                     "comfyui-install-progress",
                     DownloadProgressEvent {
@@ -4654,9 +4731,9 @@ fn set_comfyui_root(
             &std::fs::canonicalize(&path).unwrap_or(path),
         ))
     };
-    let detected_attention = normalized
-        .as_ref()
-        .map(|root| detect_launch_attention_backend_for_root(root).unwrap_or_else(|| "none".to_string()));
+    let detected_attention = normalized.as_ref().map(|root| {
+        detect_launch_attention_backend_for_root(root).unwrap_or_else(|| "none".to_string())
+    });
     let detected_profile = normalized
         .as_ref()
         .and_then(|root| detect_torch_profile_for_root(root));
@@ -4691,10 +4768,7 @@ fn set_comfyui_install_base(
         }
         let resolved = normalize_canonical_path(&std::fs::canonicalize(&path).unwrap_or(path));
         if is_forbidden_install_path(&resolved) {
-            return Err(
-                "Install base folder is blocked. Avoid system directories."
-                    .to_string(),
-            );
+            return Err("Install base folder is blocked. Avoid system directories.".to_string());
         }
         Some(resolved)
     };
@@ -4773,8 +4847,7 @@ fn set_comfyui_extra_model_config(
         .config
         .update_settings(|settings| {
             settings.shared_models_root = normalized_extra.clone();
-            settings.shared_models_use_default =
-                normalized_extra.is_some() && use_as_default;
+            settings.shared_models_use_default = normalized_extra.is_some() && use_as_default;
         })
         .map_err(|err| err.to_string())
 }
@@ -4940,6 +5013,7 @@ async fn download_model_assets(
     variant_id: String,
     ram_tier: Option<String>,
     vram_tier: Option<String>,
+    selected_artifact_keys: Option<Vec<String>>,
     comfyui_root: Option<String>,
 ) -> Result<(), String> {
     let root = resolve_root_path(&state.context, comfyui_root)?;
@@ -4955,9 +5029,10 @@ async fn download_model_assets(
         .as_deref()
         .and_then(parse_ram_tier)
         .or_else(|| state.context.ram_tier());
-    let planned = resolved.artifacts_for_download(tier);
+    let planned =
+        model_artifacts_for_download_request(&resolved, tier, selected_artifact_keys.as_ref());
     if planned.is_empty() {
-        return Err("No artifacts match the selected RAM tier.".to_string());
+        return Err("No model files are selected for download.".to_string());
     }
 
     let cancel = CancellationToken::new();
@@ -5095,10 +5170,14 @@ async fn download_model_assets_batch(
                 )
             })?;
 
-        let planned = resolved.artifacts_for_download(tier);
+        let planned = model_artifacts_for_download_request(
+            &resolved,
+            tier,
+            item.selected_artifact_keys.as_ref(),
+        );
         if planned.is_empty() {
             return Err(format!(
-                "No artifacts match the selected RAM tier for {}.",
+                "No model files are selected for {}.",
                 resolved.master.display_name
             ));
         }
@@ -5240,11 +5319,13 @@ async fn download_lora_asset(
     }
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let handle =
-        state
-            .context
-            .downloads
-            .download_lora_with_cancel(effective_root, lora, token, tx, Some(cancel));
+    let handle = state.context.downloads.download_lora_with_cancel(
+        effective_root,
+        lora,
+        token,
+        tx,
+        Some(cancel),
+    );
     if let Ok(mut abort) = state.active_abort.lock() {
         *abort = Some(handle.abort_handle());
     }
@@ -5823,11 +5904,8 @@ fn inspect_comfyui_path(path: String) -> Result<ComfyPathInspection, String> {
     }
     let normalized = std::fs::canonicalize(&selected_path).unwrap_or(selected_path.clone());
     let normalized = normalize_canonical_path(&normalized).to_path_buf();
-    let detected_root = detect_existing_comfyui_root(&normalized).map(|p| {
-        normalize_canonical_path(&p)
-            .to_string_lossy()
-            .to_string()
-    });
+    let detected_root = detect_existing_comfyui_root(&normalized)
+        .map(|p| normalize_canonical_path(&p).to_string_lossy().to_string());
     Ok(ComfyPathInspection {
         selected: normalize_canonical_path(&normalized)
             .to_string_lossy()
@@ -6066,8 +6144,7 @@ fn start_comfyui_root_impl(
         .as_ref()
         .map(|configured_root| {
             normalize_canonical_path(
-                &std::fs::canonicalize(configured_root)
-                    .unwrap_or_else(|_| configured_root.clone()),
+                &std::fs::canonicalize(configured_root).unwrap_or_else(|_| configured_root.clone()),
             ) == root
         })
         .unwrap_or(false);
@@ -6146,7 +6223,9 @@ fn start_comfyui_root_impl(
         "launch_args",
         format!(
             "Launching with attention backend: {}",
-            effective_attention.as_deref().unwrap_or("PyTorch attention")
+            effective_attention
+                .as_deref()
+                .unwrap_or("PyTorch attention")
         ),
     );
     for arg in launch_args {
@@ -6667,9 +6746,8 @@ fn github_latest_release_tag(owner: &str, repo: &str) -> Option<(String, String)
 
     let mut best: Option<((u64, u64, u64), String, String)> = None;
     for page in 1..=5 {
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/tags?per_page=100&page={page}"
-        );
+        let url =
+            format!("https://api.github.com/repos/{owner}/{repo}/tags?per_page=100&page={page}");
         let response = client.get(&url).send().ok()?.error_for_status().ok()?;
         let tags: Vec<GithubTagEntry> = response.json().ok()?;
         if tags.is_empty() {
@@ -6694,9 +6772,11 @@ fn github_latest_release_tag(owner: &str, repo: &str) -> Option<(String, String)
 }
 
 fn git_latest_release_tag(root: &Path) -> Option<(String, String)> {
-    if let Ok((stdout, _)) =
-        run_command_capture("git", &["ls-remote", "--tags", "--refs", "origin"], Some(root))
-    {
+    if let Ok((stdout, _)) = run_command_capture(
+        "git",
+        &["ls-remote", "--tags", "--refs", "origin"],
+        Some(root),
+    ) {
         let mut best: Option<((u64, u64, u64), String, String)> = None;
 
         for line in stdout.lines() {
@@ -6879,11 +6959,10 @@ fn get_comfyui_addon_state(
 ) -> Result<ComfyAddonState, String> {
     let root = resolve_root_path(&state.context, comfyui_root)?;
     let settings = state.context.config.settings();
-    let same_as_configured_root = settings
-        .comfyui_root
-        .as_ref()
-        .map(|p| normalize_canonical_path(&std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
-        == Some(root.clone());
+    let same_as_configured_root =
+        settings.comfyui_root.as_ref().map(|p| {
+            normalize_canonical_path(&std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        }) == Some(root.clone());
     let has_sage3 = python_module_importable(&root, "sageattn3");
     let has_sage_pkg = python_module_importable(&root, "sageattention");
     let has_sage = has_sage_pkg && !has_sage3;
@@ -6899,7 +6978,8 @@ fn get_comfyui_addon_state(
             Some("sage3") if has_sage3 => "sage3".to_string(),
             Some("sage") if has_sage_pkg || has_sage3 => "sage".to_string(),
             Some("nunchaku") if has_nunchaku => "nunchaku".to_string(),
-            _ => detect_launch_attention_backend_for_root(&root).unwrap_or_else(|| "none".to_string()),
+            _ => detect_launch_attention_backend_for_root(&root)
+                .unwrap_or_else(|| "none".to_string()),
         }
     } else {
         detect_launch_attention_backend_for_root(&root).unwrap_or_else(|| "none".to_string())
@@ -7048,14 +7128,7 @@ fn apply_attention_backend_change(
                 Some(&root),
                 &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
             )?;
-            install_linux_wheel_for_profile(
-                &root,
-                &py_path,
-                &profile,
-                "sage3",
-                hopper_sm90,
-                true,
-            )?;
+            install_linux_wheel_for_profile(&root, &py_path, &profile, "sage3", hopper_sm90, true)?;
             // Keep sageattention installed for ComfyUI --use-sage-attention compatibility checks.
             install_sageattention_linux(&root, &py_path, &profile, hopper_sm90)?;
         }
@@ -7155,13 +7228,10 @@ fn apply_attention_backend_change(
         "nunchaku" => Some("nunchaku".to_string()),
         _ => Some("none".to_string()),
     };
-    let _ = state
-        .context
-        .config
-        .update_settings(|settings| {
-            settings.comfyui_attention_backend = target_setting;
-            settings.comfyui_torch_profile = Some(profile.clone());
-        });
+    let _ = state.context.config.update_settings(|settings| {
+        settings.comfyui_attention_backend = target_setting;
+        settings.comfyui_torch_profile = Some(profile.clone());
+    });
 
     restart_comfyui_after_mutation(&app, &state, was_running)?;
     Ok(format!("Applied attention backend: {target}"))
@@ -7286,8 +7356,7 @@ fn uninstall_insightface(
         || pip_has_package(root, "filterpywhl")
     {
         return Err(
-            "Failed to fully remove InsightFace dependencies. Stop ComfyUI and retry."
-                .to_string(),
+            "Failed to fully remove InsightFace dependencies. Stop ComfyUI and retry.".to_string(),
         );
     }
     Ok(())
@@ -7346,7 +7415,12 @@ fn install_trellis2(
         run_uv_pip_strict(
             uv_bin,
             py_path,
-            &["install", "-r", &geometry_req.to_string_lossy(), "--no-deps"],
+            &[
+                "install",
+                "-r",
+                &geometry_req.to_string_lossy(),
+                "--no-deps",
+            ],
             Some(root),
             &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
         )?;
@@ -7370,7 +7444,12 @@ fn install_trellis2(
         run_uv_pip_strict(
             uv_bin,
             py_path,
-            &["install", "-r", &ultrashape_req.to_string_lossy(), "--no-deps"],
+            &[
+                "install",
+                "-r",
+                &ultrashape_req.to_string_lossy(),
+                "--no-deps",
+            ],
             Some(&ultrashape_dir),
             &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
         )?;
@@ -7530,7 +7609,9 @@ async fn apply_comfyui_component_toggle(
                 state
                     .context
                     .config
-                    .update_settings(|settings| settings.comfyui_disable_smart_memory_enabled = enabled)
+                    .update_settings(|settings| {
+                        settings.comfyui_disable_smart_memory_enabled = enabled
+                    })
                     .map_err(|err| err.to_string())?;
                 if enabled {
                     Ok("ComfyUI will start with --disable-smart-memory enabled.".to_string())
@@ -7765,9 +7846,7 @@ fn get_comfyui_update_status(
             head_matches_latest_tag: true,
             update_available: false,
             checked: true,
-            detail: format!(
-                "ComfyUI is up to date by release tags (HEAD matches {latest_tag})."
-            ),
+            detail: format!("ComfyUI is up to date by release tags (HEAD matches {latest_tag})."),
         });
     }
 
@@ -7855,8 +7934,8 @@ async fn update_selected_comfyui(
     let Some((latest_tag, latest_version)) = git_latest_release_tag(&root) else {
         return Err("Could not resolve latest ComfyUI release tag from remote.".to_string());
     };
-    let installed_version_norm = read_comfyui_installed_version(&root)
-        .and_then(|v| normalize_release_version(&v));
+    let installed_version_norm =
+        read_comfyui_installed_version(&root).and_then(|v| normalize_release_version(&v));
     if let Some(current) = installed_version_norm {
         let current_triplet = parse_semver_triplet(&current);
         let latest_triplet = parse_semver_triplet(&latest_version);
@@ -8072,7 +8151,8 @@ fn update_tray_comfy_status(app: &AppHandle, running: bool) {
             if let Some(icon) = started_tray_icon() {
                 let _ = tray.set_icon(Some(icon));
             }
-        } else if let Some(icon) = stopped_tray_icon().or_else(|| app.default_window_icon().cloned())
+        } else if let Some(icon) =
+            stopped_tray_icon().or_else(|| app.default_window_icon().cloned())
         {
             let _ = tray.set_icon(Some(icon));
         }
@@ -8255,9 +8335,13 @@ fn main() {
     }
 
     let args: Vec<String> = std::env::args().collect();
-    let nerdstats = args.iter().any(|arg| arg.eq_ignore_ascii_case("--nerdstats"));
+    let nerdstats = args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("--nerdstats"));
     let fakeamd = args.iter().any(|arg| arg.eq_ignore_ascii_case("--fakeamd"));
-    let fakeintel = args.iter().any(|arg| arg.eq_ignore_ascii_case("--fakeintel"));
+    let fakeintel = args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("--fakeintel"));
     let fakeamd_allow_rocm_setup = args
         .iter()
         .any(|arg| arg.eq_ignore_ascii_case("--fakeamd-allow-rocm-setup"));
@@ -8296,20 +8380,18 @@ fn main() {
     }
     if fakeamd {
         if fakeamd_allow_rocm_setup {
-            log::info!(
-                "Fake AMD mode enabled with real guided ROCm setup allowed for testing."
-            );
+            log::info!("Fake AMD mode enabled with real guided ROCm setup allowed for testing.");
         } else {
             log::info!("Fake AMD mode enabled (UI simulation only; guided ROCm setup disabled).");
         }
     }
     if fakeintel {
         if fakeintel_allow_xpu_setup {
-            log::info!(
-                "Fake Intel mode enabled with real guided Intel setup allowed for testing."
-            );
+            log::info!("Fake Intel mode enabled with real guided Intel setup allowed for testing.");
         } else {
-            log::info!("Fake Intel mode enabled (UI simulation only; guided Intel setup disabled).");
+            log::info!(
+                "Fake Intel mode enabled (UI simulation only; guided Intel setup disabled)."
+            );
         }
     }
 
