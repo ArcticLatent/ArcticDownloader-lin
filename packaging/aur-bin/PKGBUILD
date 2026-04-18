@@ -11,6 +11,7 @@ depends=(
   'gtk3'
   'webkit2gtk-4.1'
   'libayatana-appindicator'
+  'xdg-desktop-portal-gtk'
 )
 provides=('arctic-comfyui-helper')
 conflicts=('arctic-comfyui-helper')

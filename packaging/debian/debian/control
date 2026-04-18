@@ -22,7 +22,8 @@ Depends:
  ${shlibs:Depends},
  libgtk-3-0,
  libwebkit2gtk-4.1-0,
- libayatana-appindicator3-1 | libappindicator3-1
+ libayatana-appindicator3-1 | libappindicator3-1,
+ xdg-desktop-portal-gtk
 Description: ComfyUI installer and model manager
  Native Linux desktop app for installing and managing ComfyUI,
  models, and custom nodes.

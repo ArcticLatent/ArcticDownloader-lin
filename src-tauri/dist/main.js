@@ -3374,7 +3374,7 @@ el.saveRoot.addEventListener("click", async () => {
 
 el.chooseRoot.addEventListener("click", async () => {
   try {
-    const selected = await invoke("pick_folder");
+    const selected = await invoke("pick_folder", { title: "Choose ComfyUI folder" });
     if (!selected) return;
     el.comfyRoot.value = selected;
     await invoke("set_comfyui_root", { comfyuiRoot: selected });
@@ -3413,7 +3413,7 @@ el.saveRootLora.addEventListener("click", async () => {
 
 el.chooseRootLora.addEventListener("click", async () => {
   try {
-    const selected = await invoke("pick_folder");
+    const selected = await invoke("pick_folder", { title: "Choose ComfyUI folder" });
     if (!selected) return;
     el.comfyRootLora.value = selected;
     await invoke("set_comfyui_root", { comfyuiRoot: selected });
@@ -3450,7 +3450,7 @@ el.saveRootWorkflow?.addEventListener("click", async () => {
 
 el.chooseRootWorkflow?.addEventListener("click", async () => {
   try {
-    const selected = await invoke("pick_folder");
+    const selected = await invoke("pick_folder", { title: "Choose ComfyUI folder" });
     if (!selected) return;
     el.comfyRootWorkflow.value = selected;
     await invoke("set_comfyui_root", { comfyuiRoot: selected });
@@ -3482,7 +3482,7 @@ el.saveInstallRoot.addEventListener("click", async () => {
 
 el.chooseInstallRoot.addEventListener("click", async () => {
   try {
-    const selected = await invoke("pick_folder");
+    const selected = await invoke("pick_folder", { title: "Choose ComfyUI base folder" });
     if (!selected) return;
     await syncComfyInstallSelection(selected, true);
     logComfyLine("ComfyUI install folder selected.");
@@ -3494,7 +3494,7 @@ el.chooseInstallRoot.addEventListener("click", async () => {
 
 el.chooseExtraModelRoot?.addEventListener("click", async () => {
   try {
-    const selected = await invoke("pick_folder");
+    const selected = await invoke("pick_folder", { title: "Choose shared models folder" });
     if (!selected) return;
     if (el.comfyExtraModelRoot) {
       el.comfyExtraModelRoot.value = selected;

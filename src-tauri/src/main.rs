@@ -8293,8 +8293,12 @@ fn setup_tray(_app: &AppHandle) -> tauri::Result<()> {
 }
 
 #[tauri::command]
-fn pick_folder() -> Option<String> {
-    rfd::FileDialog::new()
+fn pick_folder(title: Option<String>) -> Option<String> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(title) = title.filter(|value| !value.trim().is_empty()) {
+        dialog = dialog.set_title(title);
+    }
+    dialog
         .pick_folder()
         .map(|path| path.to_string_lossy().to_string())
 }

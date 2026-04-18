@@ -19,6 +19,7 @@ BuildRequires:  openssl-devel
 Requires:       gtk3
 Requires:       webkit2gtk4.1
 Requires:       libayatana-appindicator-gtk3
+Requires:       xdg-desktop-portal-gtk
 
 %description
 Native Linux desktop app for installing and managing ComfyUI,
