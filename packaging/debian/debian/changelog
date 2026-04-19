@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.2.4-1) unstable; urgency=medium
+
+  * Linux packages now depend on the GTK XDG Desktop Portal backend so folder selection uses the desktop-native GTK picker instead of falling back to the simpler Zenity dialog.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Sat, 18 Apr 2026 19:45:18 -0400
+
 arctic-comfyui-helper (0.2.3-1) unstable; urgency=medium
 
   * Changed the Models tab GPU VRAM and RAM selectors to fixed standard hardware-size choices.
