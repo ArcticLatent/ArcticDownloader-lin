@@ -11,6 +11,17 @@ pub struct ModelCatalog {
     pub workflows: Vec<WorkflowDefinition>,
 }
 
+impl Default for ModelCatalog {
+    fn default() -> Self {
+        Self {
+            catalog_version: 1,
+            models: Vec::new(),
+            loras: Vec::new(),
+            workflows: Vec::new(),
+        }
+    }
+}
+
 impl ModelCatalog {
     pub fn find_model(&self, id: &str) -> Option<&MasterModel> {
         self.models.iter().find(|model| model.id == id)
@@ -54,7 +65,10 @@ impl ModelCatalog {
     }
 
     pub fn find_workflow(&self, id: &str) -> Option<WorkflowDefinition> {
-        self.workflows.iter().find(|workflow| workflow.id == id).cloned()
+        self.workflows
+            .iter()
+            .find(|workflow| workflow.id == id)
+            .cloned()
     }
 }
 

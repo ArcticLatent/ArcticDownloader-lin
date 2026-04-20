@@ -5,6 +5,8 @@ const PATH_SEP = "/";
 const ALWAYS_ONLY_VARIANT_ID = "__always_only__";
 const state = {
   catalog: null,
+  catalogLoading: true,
+  catalogError: "",
   settings: null,
   activeTab: "comfyui",
   transfers: new Map(),
@@ -210,6 +212,7 @@ const el = {
   modelSelectionList: document.getElementById("model-selection-list"),
   modelSelectionSummary: document.getElementById("model-selection-summary"),
   selectedModelQueue: document.getElementById("selected-model-queue"),
+  modelCatalogStatus: document.getElementById("model-catalog-status"),
   effectiveDownloadDestination: document.getElementById("effective-download-destination"),
   modelSearch: document.getElementById("model-search"),
   selectVisibleModels: document.getElementById("select-visible-models"),
@@ -219,11 +222,13 @@ const el = {
 
   loraFamily: document.getElementById("lora-family"),
   loraId: document.getElementById("lora-id"),
+  loraCatalogStatus: document.getElementById("lora-catalog-status"),
   civitaiToken: document.getElementById("civitai-token"),
   saveToken: document.getElementById("save-token"),
   downloadLora: document.getElementById("download-lora"),
   workflowFamily: document.getElementById("workflow-family"),
   workflowId: document.getElementById("workflow-id"),
+  workflowCatalogStatus: document.getElementById("workflow-catalog-status"),
   downloadWorkflow: document.getElementById("download-workflow"),
 
   metaCreator: document.getElementById("meta-creator"),
@@ -2091,6 +2096,80 @@ function setOptions(select, options, selectedValue = null) {
   }
 }
 
+function catalogCounts(catalog = state.catalog) {
+  return {
+    models: Array.isArray(catalog?.models) ? catalog.models.length : 0,
+    loras: Array.isArray(catalog?.loras) ? catalog.loras.length : 0,
+    workflows: Array.isArray(catalog?.workflows) ? catalog.workflows.length : 0,
+  };
+}
+
+function catalogHasContent(catalog = state.catalog) {
+  const counts = catalogCounts(catalog);
+  return counts.models > 0 || counts.loras > 0 || counts.workflows > 0;
+}
+
+function updateCatalogStatusElement(target, text, mode = "loading") {
+  if (!target) return;
+  if (!text) {
+    target.classList.add("hidden");
+    target.classList.remove("error", "ready");
+    target.textContent = "";
+    return;
+  }
+  target.textContent = text;
+  target.classList.remove("hidden", "error", "ready");
+  if (mode === "error") {
+    target.classList.add("error");
+  } else if (mode === "ready") {
+    target.classList.add("ready");
+  }
+}
+
+function renderCatalogStatus() {
+  if (state.catalogLoading) {
+    updateCatalogStatusElement(el.modelCatalogStatus, "Loading models from the cloud catalog...");
+    updateCatalogStatusElement(el.loraCatalogStatus, "Loading LoRAs from the cloud catalog...");
+    updateCatalogStatusElement(el.workflowCatalogStatus, "Loading workflows from the cloud catalog...");
+    return;
+  }
+
+  if (state.catalogError) {
+    const message = state.catalogError;
+    updateCatalogStatusElement(el.modelCatalogStatus, message, "error");
+    updateCatalogStatusElement(el.loraCatalogStatus, message, "error");
+    updateCatalogStatusElement(el.workflowCatalogStatus, message, "error");
+    return;
+  }
+
+  const counts = catalogCounts();
+  updateCatalogStatusElement(
+    el.modelCatalogStatus,
+    counts.models ? "" : "No models are available in the cloud catalog.",
+    counts.models ? "ready" : "error",
+  );
+  updateCatalogStatusElement(
+    el.loraCatalogStatus,
+    counts.loras ? "" : "No LoRAs are available in the cloud catalog.",
+    counts.loras ? "ready" : "error",
+  );
+  updateCatalogStatusElement(
+    el.workflowCatalogStatus,
+    counts.workflows ? "" : "No workflows are available in the cloud catalog.",
+    counts.workflows ? "ready" : "error",
+  );
+}
+
+function setCatalogLoading(loading, message = "") {
+  state.catalogLoading = Boolean(loading);
+  if (loading) {
+    state.catalogError = "";
+  } else if (message) {
+    state.catalogError = message;
+  }
+  renderCatalogStatus();
+}
+
 function comfyTorchProfileOptionsForDetectedGpu() {
   const vendor = String(state.comfyDetectedGpuVendor || "").toLowerCase();
   if (vendor === "amd") {
@@ -2451,6 +2530,11 @@ function isTextEncoderProjectionArtifact(artifact) {
   return /(?:^|[_\s\-/])(m?m?proj|projection)(?:$|[_\s\-.])/i.test(artifactSearchText(artifact));
 }
 
+function isClipLTextEncoderArtifact(artifact) {
+  if (!isTextEncoderArtifact(artifact) || isTextEncoderProjectionArtifact(artifact)) return false;
+  return /(?:^|[_\s\-/.])clip[_\s\-.]?l(?:$|[_\s\-.])/i.test(artifactSearchText(artifact));
+}
+
 function isQuantizedTextEncoderArtifact(artifact) {
   if (!isTextEncoderArtifact(artifact) || isTextEncoderProjectionArtifact(artifact)) return false;
   const text = artifactSearchText(artifact);
@@ -2580,6 +2664,9 @@ function artifactDefaultSupportedOnRam(artifact, ramTier) {
 function artifactDefaultChecked(artifact, ramTier, group = null) {
   const preferredTierATextEncoderKey = groupPreferredTierATextEncoderKey(group, ramTier);
   if (preferredTierATextEncoderKey && isTextEncoderArtifact(artifact) && !isTextEncoderProjectionArtifact(artifact)) {
+    if (isClipLTextEncoderArtifact(artifact)) {
+      return artifactDefaultSupportedOnRam(artifact, ramTier);
+    }
     return artifactChoiceKey(artifact) === preferredTierATextEncoderKey;
   }
   return artifactDefaultSupportedOnRam(artifact, ramTier);
@@ -2908,9 +2995,30 @@ function renderSelectedModelQueue() {
 
 function renderModelSelectionList() {
   if (!el.modelSelectionList) return;
+  el.modelSelectionList.innerHTML = "";
+
+  if (state.catalogLoading && !catalogHasContent()) {
+    const empty = document.createElement("div");
+    empty.className = "empty-msg";
+    empty.textContent = "Loading models from the cloud catalog...";
+    el.modelSelectionList.appendChild(empty);
+    updateModelSelectionSummary();
+    renderSelectedModelQueue();
+    return;
+  }
+
+  if (state.catalogError && !catalogHasContent()) {
+    const empty = document.createElement("div");
+    empty.className = "empty-msg";
+    empty.textContent = "Catalog unavailable. Check your connection and Supabase configuration.";
+    el.modelSelectionList.appendChild(empty);
+    updateModelSelectionSummary();
+    renderSelectedModelQueue();
+    return;
+  }
+
   const models = filteredModelsForCurrentSelection();
   const tier = selectedVramTierValue();
-  el.modelSelectionList.innerHTML = "";
 
   if (!String(el.modelFamily.value || "").trim() && !String(el.modelSearch?.value || "").trim()) {
     const empty = document.createElement("div");
@@ -3039,18 +3147,40 @@ async function refreshEffectiveDownloadDestination() {
 
 function refreshLoraSelectors() {
   if (!state.catalog) return;
+  if (state.catalogLoading && !catalogHasContent()) {
+    setOptions(el.loraFamily, [{ value: "", label: "Loading LoRAs...", disabled: true }], "");
+    setOptions(el.loraId, [{ value: "", label: "Loading LoRAs...", disabled: true }], "");
+    return;
+  }
+  if (state.catalogError && !catalogHasContent()) {
+    setOptions(el.loraFamily, [{ value: "", label: "Catalog unavailable", disabled: true }], "");
+    setOptions(el.loraId, [{ value: "", label: "Catalog unavailable", disabled: true }], "");
+    return;
+  }
   const family = el.loraFamily.value || "all";
   const filtered = state.catalog.loras.filter((l) => family === "all" || l.family === family);
   const options = filtered.map((l) => ({ value: l.id, label: l.display_name }));
-  setOptions(el.loraId, options);
+  setOptions(el.loraId, options.length ? options : [{ value: "", label: "No LoRAs available", disabled: true }]);
 }
 
 function refreshWorkflowSelectors() {
   if (!state.catalog) return;
+  if (state.catalogLoading && !catalogHasContent()) {
+    setOptions(el.workflowFamily, [{ value: "", label: "Loading workflows...", disabled: true }], "");
+    setOptions(el.workflowId, [{ value: "", label: "Loading workflows...", disabled: true }], "");
+    loadWorkflowPreview();
+    return;
+  }
+  if (state.catalogError && !catalogHasContent()) {
+    setOptions(el.workflowFamily, [{ value: "", label: "Catalog unavailable", disabled: true }], "");
+    setOptions(el.workflowId, [{ value: "", label: "Catalog unavailable", disabled: true }], "");
+    loadWorkflowPreview();
+    return;
+  }
   const family = el.workflowFamily.value || "all";
   const filtered = (state.catalog.workflows || []).filter((w) => family === "all" || w.family === family);
   const options = filtered.map((w) => ({ value: w.id, label: workflowDisplayName(w) }));
-  setOptions(el.workflowId, options);
+  setOptions(el.workflowId, options.length ? options : [{ value: "", label: "No workflows available", disabled: true }]);
   loadWorkflowPreview();
 }
 
@@ -3205,6 +3335,7 @@ async function bootstrap() {
     return;
   }
   setStartupStatus("Loading settings and catalog...");
+  setCatalogLoading(true);
   const [settings, catalog] = await Promise.all([
     invoke("get_settings"),
     invoke("get_catalog"),
@@ -3437,6 +3568,10 @@ async function bootstrap() {
 
 function applyCatalogSnapshot(catalog, { resetSelectors = false } = {}) {
   state.catalog = catalog;
+  state.catalogLoading = false;
+  state.catalogError = catalogHasContent(catalog)
+    ? ""
+    : "Catalog unavailable. Check your connection and Supabase configuration.";
   const currentModelFamily = resetSelectors ? "" : String(el.modelFamily?.value || "").trim();
   const currentVramTier = resetSelectors ? "" : String(el.vramTier?.value || "").trim();
   const currentLoraFamily = resetSelectors ? null : String(el.loraFamily?.value || "").trim();
@@ -3456,6 +3591,7 @@ function applyCatalogSnapshot(catalog, { resetSelectors = false } = {}) {
 
   setOptions(el.workflowFamily, workflowFamilyOptions(catalog.workflows || []), currentWorkflowFamily);
   refreshWorkflowSelectors();
+  renderCatalogStatus();
 
   logLine(`Loaded ${catalog.models?.length || 0} models, ${catalog.loras?.length || 0} LoRAs, and ${catalog.workflows?.length || 0} workflows.`);
 }
@@ -3489,14 +3625,22 @@ el.clearModelSelection?.addEventListener("click", () => {
 });
 el.refreshCatalog?.addEventListener("click", async () => {
   if (!invoke) return;
+  const originalLabel = el.refreshCatalog.textContent;
   try {
+    setCatalogLoading(true);
+    el.refreshCatalog.textContent = "Refreshing...";
+    el.refreshCatalog.disabled = true;
     showBlockingOverlay("Refreshing catalog...");
     const catalog = await invoke("refresh_catalog");
     applyCatalogSnapshot(catalog);
-    logLine("Catalog refreshed from remote.");
+    logLine("Catalog refreshed from Supabase.");
   } catch (err) {
+    setCatalogLoading(false, "Catalog refresh failed. Check your connection and Supabase configuration.");
+    renderModelSelectionList();
     logLine(`Catalog refresh failed: ${err}`);
   } finally {
+    el.refreshCatalog.textContent = originalLabel;
+    el.refreshCatalog.disabled = false;
     hideStartupOverlay();
   }
 });

@@ -12,3 +12,6 @@
 - The Selected Queue now labels support-file sections as Additional Model Files instead of Always Artifacts.
 - The Selected Queue now labels chosen variant files as Selected Model.
 - Models that only provide required support files now say All required files in the dropdown and queue.
+- Catalog refresh now reads from the Supabase `catalog_documents.main` row instead of the old GitHub-hosted JSON file.
+- Models, LoRAs, and Workflows now show cloud catalog loading and unavailable states during startup and refresh.
+- Flux.1 CLIP-L companion files now stay selected automatically when the recommended T5 text encoder is selected.

@@ -37,3 +37,25 @@ Entries:
     - Group headings such as LoRAs and Upscale Models now come from `target_category` instead of catalog note-style label text.
     - The profile labels avoid implying that file size directly equals a hard system RAM requirement.
     - Projection/support files such as BF16 mproj or text projection files remain checked by default.
+
+- 2026-04-20
+  - Switched catalog refresh from the old GitHub-hosted JSON file to the Supabase `catalog_documents.main` JSON document.
+  - Removed the bundled `data/catalog.json` catalog source so Supabase is the only live catalog source, with the local cache used only for offline startup after a successful refresh.
+  - Removed persisted GitHub catalog endpoint/ETag settings from the app config model.
+  - Added per-tab cloud catalog loading and unavailable states for Models, LoRAs, and Workflows during startup and refresh.
+  - Kept Flux.1 CLIP-L companion text encoder files selected automatically while still selecting the recommended T5 text encoder variant.
+  - Files changed:
+    - src/catalog.rs
+    - src/config.rs
+    - src/model.rs
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - src-tauri/dist/styles.css
+    - README.md
+    - CHANGELOG_0.2.5.md
+    - version0.2.5_updates
+    - data/catalog.json
+  - Notes:
+    - Catalog reads require `ARCTIC_SUPABASE_URL` plus `ARCTIC_SUPABASE_ANON_KEY` or `ARCTIC_SUPABASE_PUBLISHABLE_KEY`.
+    - The Supabase `catalog_documents` table needs a safe public read policy for the `main` row when using an anon/publishable key.
+    - CLIP-L is treated as a required text encoder companion instead of a mutually exclusive T5 alternative.

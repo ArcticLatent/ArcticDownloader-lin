@@ -51,10 +51,12 @@ ComfyUI install mode behavior:
 ## Catalog and Downloading
 
 Catalog source behavior:
-- Bundled fallback: `data/catalog.json`
-- Remote default:
-  `https://raw.githubusercontent.com/ArcticLatent/Arctic-Helper/refs/heads/main/assets/catalog.json`
-- ETag-based refresh and cache write are supported
+- Supabase Postgres is the catalog source of truth.
+- Runtime configuration:
+  - `ARCTIC_SUPABASE_URL`
+  - `ARCTIC_SUPABASE_ANON_KEY` or `ARCTIC_SUPABASE_PUBLISHABLE_KEY`
+- The app reads `public.catalog_documents` where `catalog_key = 'main'` and uses the `catalog` JSON document.
+- The last successful catalog is cached locally for offline startup.
 
 Model/LoRA downloader:
 - Resolves target ComfyUI subfolders automatically

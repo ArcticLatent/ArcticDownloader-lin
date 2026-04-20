@@ -4,6 +4,7 @@
 **/*.rs.bk
 .DS_Store
 .vscode/
+.env
 .flatpak-builder/
 build-dir/
 repo/
@@ -25,6 +26,3 @@ repo/
 # already existing elements were commented out
 
 #/target
-
-# Local Codex handoff notes
-WINDOWS_AGENT_HANDOFF_2026-02-22.md

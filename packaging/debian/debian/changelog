@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.2.5-1) unstable; urgency=medium
+
+  * On high-RAM systems, text encoder support-file defaults now select the largest full non-quantized Tier A encoder when catalog file sizes are available, leaving other Tier A encoder alternatives unchecked unless selected manually.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Sun, 19 Apr 2026 21:30:57 -0400
+
 arctic-comfyui-helper (0.2.4-1) unstable; urgency=medium
 
   * Linux packages now depend on the GTK XDG Desktop Portal backend so folder selection uses the desktop-native GTK picker instead of falling back to the simpler Zenity dialog.
