@@ -456,6 +456,11 @@ input[type="checkbox"] {
   gap: 8px;
   align-items: start;
 }
+.queue-note {
+  font-size: 0.76rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
 .queue-item-title {
   font-size: 0.84rem;
   color: var(--text);

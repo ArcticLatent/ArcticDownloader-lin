@@ -368,6 +368,8 @@ pub struct ModelArtifact {
     pub sha256: Option<String>,
     #[serde(default)]
     pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_estimate: Option<MemoryEstimate>,
     pub target_category: TargetCategory,
     #[serde(default)]
     pub license_url: Option<String>,
@@ -377,6 +379,16 @@ pub struct ModelArtifact {
     pub min_ram_tier: Option<RamTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MemoryEstimate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_ram_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl ModelArtifact {
