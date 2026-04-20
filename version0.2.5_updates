@@ -44,6 +44,8 @@ Entries:
   - Removed persisted GitHub catalog endpoint/ETag settings from the app config model.
   - Added per-tab cloud catalog loading and unavailable states for Models, LoRAs, and Workflows during startup and refresh.
   - Kept Flux.1 CLIP-L companion text encoder files selected automatically while still selecting the recommended T5 text encoder variant.
+  - Added Linux release packaging fallbacks that retry Debian/RPM builds in temporary Podman containers when Distrobox setup fails.
+  - Excluded the local `.env` file from RPM source archives.
   - Files changed:
     - src/catalog.rs
     - src/config.rs
@@ -51,6 +53,8 @@ Entries:
     - src-tauri/dist/index.html
     - src-tauri/dist/main.js
     - src-tauri/dist/styles.css
+    - scripts/build-release-linux.sh
+    - packaging/build-packages.sh
     - README.md
     - CHANGELOG_0.2.5.md
     - version0.2.5_updates

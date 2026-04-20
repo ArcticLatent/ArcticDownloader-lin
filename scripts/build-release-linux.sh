@@ -249,6 +249,68 @@ prepend_debian_changelog() {
   mv "$tmp" "$file"
 }
 
+build_deb_with_podman() {
+  require_cmd podman
+  echo "Distrobox Debian build failed; retrying in a temporary Ubuntu Podman container ..."
+  podman run --rm \
+    --name "arctic-deb-build-$VERSION" \
+    --volume "$ROOT_DIR:/work:rw" \
+    --workdir /work \
+    --env HOME=/root \
+    docker.io/library/ubuntu:24.04 \
+    bash -lc '
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y \
+        build-essential devscripts pkg-config \
+        debhelper-compat cargo rustc \
+        libssl-dev \
+        libgtk-3-dev libwebkit2gtk-4.1-dev \
+        libayatana-appindicator3-dev \
+        ca-certificates curl
+
+      if ! command -v rustup >/dev/null 2>&1; then
+        curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+      fi
+      export PATH="$HOME/.cargo/bin:$PATH"
+      rustup toolchain install stable --profile minimal >/dev/null
+      rustup default stable >/dev/null
+
+      bash packaging/build-packages.sh deb
+    '
+}
+
+build_rpm_with_podman() {
+  require_cmd podman
+  echo "Distrobox RPM build failed; retrying in a temporary Fedora Podman container ..."
+  podman run --rm \
+    --name "arctic-rpm-build-$VERSION" \
+    --volume "$ROOT_DIR:/work:rw" \
+    --workdir /work \
+    --env HOME=/root \
+    registry.fedoraproject.org/fedora:latest \
+    bash -lc '
+      set -euo pipefail
+      dnf install -y \
+        rpm-build rpmdevtools \
+        rust cargo openssl-devel \
+        gcc gcc-c++ make pkgconf-pkg-config \
+        gtk3-devel webkit2gtk4.1-devel \
+        libayatana-appindicator-gtk3-devel \
+        ca-certificates curl
+
+      if ! command -v rustup >/dev/null 2>&1; then
+        curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+      fi
+      export PATH="$HOME/.cargo/bin:$PATH"
+      rustup toolchain install stable --profile minimal >/dev/null
+      rustup default stable >/dev/null
+
+      bash packaging/build-packages.sh rpm
+    '
+}
+
 summary_note="Release v$VERSION"
 if [[ -n "$NOTES_FILE" ]]; then
   first_line="$(extract_summary_note "$NOTES_FILE" || true)"
@@ -279,7 +341,7 @@ echo "Building Arch package on host ..."
 
 if ((ARCH_AUR_ONLY == 0)); then
 echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
-distrobox enter "$DEB_DISTROBOX" -- bash -lc "
+if ! distrobox enter "$DEB_DISTROBOX" -- bash -lc "
   set -euo pipefail
   SUDO_PASSWORD='${DEB_SUDO_PASSWORD//\'/\'\"\'\"\'}'
   as_root() {
@@ -343,10 +405,12 @@ distrobox enter "$DEB_DISTROBOX" -- bash -lc "
   as_root apt autoremove -y || true
   cd '$ROOT_DIR'
   bash packaging/build-packages.sh deb
-"
+"; then
+  build_deb_with_podman
+fi
 
 echo "Building RPM package in distrobox '$RPM_DISTROBOX' ..."
-distrobox enter "$RPM_DISTROBOX" -- bash -lc "
+if ! distrobox enter "$RPM_DISTROBOX" -- bash -lc "
   set -euo pipefail
   SUDO_PASSWORD='${RPM_SUDO_PASSWORD//\'/\'\"\'\"\'}'
   as_root() {
@@ -411,7 +475,9 @@ distrobox enter "$RPM_DISTROBOX" -- bash -lc "
   as_root dnf remove -y arctic-comfyui-helper || true
   cd '$ROOT_DIR'
   bash packaging/build-packages.sh rpm
-"
+"; then
+  build_rpm_with_podman
+fi
 
 echo "Building Flatpak bundle on host ..."
 (cd "$ROOT_DIR" && bash packaging/build-packages.sh flatpak)

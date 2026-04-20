@@ -15,3 +15,4 @@
 - Catalog refresh now reads from the Supabase `catalog_documents.main` row instead of the old GitHub-hosted JSON file.
 - Models, LoRAs, and Workflows now show cloud catalog loading and unavailable states during startup and refresh.
 - Flux.1 CLIP-L companion files now stay selected automatically when the recommended T5 text encoder is selected.
+- Linux release packaging now falls back to temporary Podman containers when Distrobox setup fails and excludes local `.env` secrets from RPM source archives.

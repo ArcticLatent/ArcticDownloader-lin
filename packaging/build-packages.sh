@@ -125,6 +125,7 @@ build_rpm() {
     tar \
       --exclude-vcs \
       --exclude='./.flatpak-builder' \
+      --exclude='./.env' \
       --exclude='./build-dir' \
       --exclude='./repo' \
       --exclude='./dist' \
