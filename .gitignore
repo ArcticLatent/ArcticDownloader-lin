@@ -1,6 +1,7 @@
 /target
 /src-tauri/target
 /src-tauri/gen
+/src-tauri/home/
 **/*.rs.bk
 .DS_Store
 .vscode/
