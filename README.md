@@ -81,7 +81,7 @@ Primary model:
 - uv-managed Python (`3.12.10`) and per-install `.venv`
 - Detected-GPU selector for mixed NVIDIA/AMD/Intel systems; Automatic prefers NVIDIA
 - Torch profile is recalculated from the selected GPU and the choice is persisted
-- Manual Torch profile override remains available
+- Manual Torch profile override remains available within the selected GPU backend
 
 Current torch profiles:
 - `torch271_cu128`

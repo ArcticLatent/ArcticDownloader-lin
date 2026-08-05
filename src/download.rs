@@ -2599,12 +2599,15 @@ fn find_strength_in_value(value: &Value, model_version_id: u64) -> Option<f64> {
     let mut queue: VecDeque<&Value> = VecDeque::new();
     queue.push_back(value);
     let mut visited = 0usize;
-    const MAX_VISITED: usize = 500;
+    // Current Civitai __NEXT_DATA__ payloads routinely contain thousands of
+    // JSON values. This traversal is iterative, so a realistic work budget is
+    // sufficient without risking recursive stack growth.
+    const MAX_VISITED: usize = 100_000;
 
     while let Some(current) = queue.pop_front() {
         visited += 1;
         if visited > MAX_VISITED {
-            warn!("Aborting HTML strength scan after {MAX_VISITED} nodes to avoid stack overflow.");
+            log::debug!("Stopping Civitai strength metadata scan after {MAX_VISITED} JSON values.");
             break;
         }
 
@@ -2639,6 +2642,29 @@ fn find_strength_in_value(value: &Value, model_version_id: u64) -> Option<f64> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod strength_scan_tests {
+    use super::find_strength_in_value;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn finds_strength_beyond_the_old_500_value_limit() {
+        let model_version_id = 987_654;
+        let mut values: Vec<Value> = (0..750)
+            .map(|index| json!({ "unrelated": index }))
+            .collect();
+        values.push(json!({
+            "id": model_version_id,
+            "settings": { "strength": 0.85 }
+        }));
+
+        assert_eq!(
+            find_strength_in_value(&Value::Array(values), model_version_id),
+            Some(0.85)
+        );
+    }
 }
 
 #[derive(Debug, Deserialize)]

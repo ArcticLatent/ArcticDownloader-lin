@@ -7315,12 +7315,7 @@ fn get_comfyui_runtime_status(state: State<'_, AppState>) -> ComfyRuntimeStatus 
     }
 }
 
-#[tauri::command]
-fn get_comfyui_update_status(
-    state: State<'_, AppState>,
-    comfyui_root: Option<String>,
-) -> Result<ComfyUiUpdateStatus, String> {
-    let root = resolve_root_path(&state.context, comfyui_root)?;
+fn get_comfyui_update_status_blocking(root: PathBuf) -> Result<ComfyUiUpdateStatus, String> {
     let installed_version = read_comfyui_installed_version(&root);
 
     if !root.join(".git").exists() {
@@ -7395,6 +7390,17 @@ fn get_comfyui_update_status(
             ),
         }),
     }
+}
+
+#[tauri::command]
+async fn get_comfyui_update_status(
+    state: State<'_, AppState>,
+    comfyui_root: Option<String>,
+) -> Result<ComfyUiUpdateStatus, String> {
+    let root = resolve_root_path(&state.context, comfyui_root)?;
+    tauri::async_runtime::spawn_blocking(move || get_comfyui_update_status_blocking(root))
+        .await
+        .map_err(|err| format!("ComfyUI update check task failed: {err}"))?
 }
 
 #[tauri::command]
