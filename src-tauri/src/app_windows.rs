@@ -1,5 +1,5 @@
 use arctic_downloader::{
-    app::{build_context, AppContext},
+    app::{build_context, drain_lossy_lines, AppContext},
     config::AppSettings,
     download::{CivitaiPreview, DownloadSignal, DownloadStatus},
     env_flags::auto_update_enabled,
@@ -496,28 +496,56 @@ fn windows_xpu_supported_gpu(name: &str) -> bool {
 }
 
 #[tauri::command]
-fn get_comfyui_install_recommendation() -> ComfyInstallRecommendation {
+fn get_comfyui_install_recommendation(
+    gpu_selection: Option<String>,
+) -> ComfyInstallRecommendation {
+    let selection = gpu_selection.unwrap_or_else(|| "auto".to_string());
+    let selection = selection.trim().to_ascii_lowercase();
     let gpu = detect_nvidia_gpu_details();
     let gpu_name = gpu.name.clone().unwrap_or_default().to_ascii_lowercase();
-    if let Some(amd_name) = detect_amd_gpu_name() {
-        let reason = if windows_rocm_supported_gpu(&amd_name) {
-            "Detected supported AMD GPU; selecting Windows ROCm install profile.".to_string()
-        } else {
-            "Detected AMD GPU. Windows ROCm support is limited to specific Radeon and Ryzen AI hardware."
-                .to_string()
-        };
-        return ComfyInstallRecommendation {
-            gpu_name: Some(amd_name),
-            driver_version: None,
-            torch_profile: "torch291_rocm72".to_string(),
-            torch_label: "Torch 2.9.1 + ROCm SDK 7.2".to_string(),
-            reason,
-        };
+    let amd_name = detect_amd_gpu_name();
+    let intel_name = detect_intel_gpu_name();
+    if selection == "amd" || (selection == "auto" && gpu.name.is_none()) {
+        if let Some(amd_name) = amd_name.clone() {
+            let reason = if windows_rocm_supported_gpu(&amd_name) {
+                if selection == "amd" {
+                    "Selected supported AMD GPU; using Windows ROCm install profile.".to_string()
+                } else {
+                    "Detected supported AMD GPU; selecting Windows ROCm install profile."
+                        .to_string()
+                }
+            } else {
+                "Selected AMD GPU. Windows ROCm support is limited to specific Radeon and Ryzen AI hardware."
+                    .to_string()
+            };
+            return ComfyInstallRecommendation {
+                gpu_name: Some(amd_name),
+                driver_version: None,
+                torch_profile: "torch291_rocm72".to_string(),
+                torch_label: "Torch 2.9.1 + ROCm SDK 7.2".to_string(),
+                reason,
+            };
+        }
+        if selection == "amd" {
+            return ComfyInstallRecommendation {
+                gpu_name: None,
+                driver_version: None,
+                torch_profile: "torch291_rocm72".to_string(),
+                torch_label: "Torch 2.9.1 + ROCm SDK 7.2".to_string(),
+                reason: "Selected AMD GPU is still being detected.".to_string(),
+            };
+        }
     }
-    if gpu_name.is_empty() {
-        if let Some(intel_name) = detect_intel_gpu_name() {
+    if selection == "intel"
+        || (selection == "auto" && gpu.name.is_none() && amd_name.is_none())
+    {
+        if let Some(intel_name) = intel_name {
             let reason = if windows_xpu_supported_gpu(&intel_name) {
-                "Detected Intel GPU; selecting PyTorch XPU Nightly install profile.".to_string()
+                if selection == "intel" {
+                    "Selected Intel GPU; using PyTorch XPU Nightly install profile.".to_string()
+                } else {
+                    "Detected Intel GPU; selecting PyTorch XPU Nightly install profile.".to_string()
+                }
             } else {
                 "Detected Intel GPU. Windows XPU support works best on Intel Arc and newer Intel integrated GPUs."
                     .to_string()
@@ -528,6 +556,15 @@ fn get_comfyui_install_recommendation() -> ComfyInstallRecommendation {
                 torch_profile: "torchxpu_nightly".to_string(),
                 torch_label: "PyTorch XPU Nightly".to_string(),
                 reason,
+            };
+        }
+        if selection == "intel" {
+            return ComfyInstallRecommendation {
+                gpu_name: None,
+                driver_version: None,
+                torch_profile: "torchxpu_nightly".to_string(),
+                torch_label: "PyTorch XPU Nightly".to_string(),
+                reason: "Selected Intel GPU is still being detected.".to_string(),
             };
         }
     }
@@ -585,6 +622,25 @@ fn get_comfyui_install_recommendation() -> ComfyInstallRecommendation {
         torch_label: "Torch 2.8.0 + cu128".to_string(),
         reason: "Unknown or non-NVIDIA GPU; using default recommendation.".to_string(),
     }
+}
+
+#[tauri::command]
+fn set_comfyui_gpu_selection(
+    state: State<'_, AppState>,
+    gpu_selection: String,
+) -> Result<AppSettings, String> {
+    let normalized = gpu_selection.trim().to_ascii_lowercase();
+    if !matches!(normalized.as_str(), "auto" | "nvidia" | "amd" | "intel") {
+        return Err("Unknown GPU selection.".to_string());
+    }
+    state
+        .context
+        .config
+        .update_settings(|settings| {
+            settings.comfyui_gpu_selection =
+                (normalized != "auto").then(|| normalized.clone());
+        })
+        .map_err(|err| err.to_string())
 }
 
 fn normalize_path(raw: &str) -> Result<PathBuf, String> {
@@ -1470,7 +1526,7 @@ fn run_comfyui_preflight(
     }
 
     if request.include_trellis2 {
-        let recommendation = get_comfyui_install_recommendation();
+        let recommendation = get_comfyui_install_recommendation(None);
         let selected_profile = request
             .torch_profile
             .clone()
@@ -3020,7 +3076,7 @@ fn run_comfyui_install(
         .map_err(|err| err.to_string())?;
     let _ = writeln!(log_file, "Starting install");
 
-    let recommendation = get_comfyui_install_recommendation();
+    let recommendation = get_comfyui_install_recommendation(None);
     let selected_profile = request
         .torch_profile
         .clone()
@@ -5436,6 +5492,8 @@ fn start_comfyui_root_impl(
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else if settings.comfyui_show_runtime_logs {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    } else {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
 
     let mut child = cmd
@@ -5696,14 +5754,9 @@ fn spawn_comfyui_runtime_log_stream(
     reader: impl std::io::Read + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        let buffered = std::io::BufReader::new(reader);
-        for line in std::io::BufRead::lines(buffered).map_while(Result::ok) {
-            let text = line.trim_end().to_string();
-            if text.is_empty() {
-                continue;
-            }
-            emit_comfyui_runtime_log_event(&app, stream_name, text);
-        }
+        let _ = drain_lossy_lines(reader, |text| {
+            emit_comfyui_runtime_log_event(&app, stream_name, text)
+        });
     });
 }
 
@@ -7825,6 +7878,7 @@ pub fn run() {
             inspect_comfyui_path,
             list_comfyui_installations,
             get_comfyui_install_recommendation,
+            set_comfyui_gpu_selection,
             get_comfyui_resume_state,
             get_comfyui_addon_state,
             apply_attention_backend_change,

@@ -42,6 +42,12 @@
 
       <section class="panel" id="tab-content-comfyui">
         <div class="row torch-row">
+          <select id="comfy-gpu-selection">
+            <option value="auto">GPU: Automatic</option>
+          </select>
+          <span id="comfy-gpu-selection-help">Platform: Linux • Automatically selects the best detected GPU.</span>
+        </div>
+        <div class="row torch-row">
           <select id="comfy-torch-profile"></select>
           <span id="comfy-torch-recommended">Recommended: Detecting...</span>
         </div>

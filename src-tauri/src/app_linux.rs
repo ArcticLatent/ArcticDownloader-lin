@@ -1,5 +1,5 @@
 use arctic_downloader::{
-    app::{build_context, AppContext},
+    app::{build_context, drain_lossy_lines, AppContext},
     config::AppSettings,
     download::{CivitaiPreview, DownloadSignal, DownloadStatus},
     env_flags::{auto_update_enabled, external_package_manager},
@@ -1313,9 +1313,9 @@ fn install_rocm_guided_internal(app: &AppHandle) -> Result<RocmGuidedStatus, Str
                 ));
             }
             let installer_url = format!(
-                "https://repo.radeon.com/amdgpu-install/6.4.4/ubuntu/{ubuntu_code}/amdgpu-install_6.4.60404-1_all.deb"
+                "https://repo.radeon.com/amdgpu-install/7.2.3/ubuntu/{ubuntu_code}/amdgpu-install_7.2.3.70203-1_all.deb"
             );
-            let deb_path = "/tmp/amdgpu-install_6.4.60404-1_all.deb";
+            let deb_path = "/tmp/amdgpu-install_7.2.3.70203-1_all.deb";
             emit_rocm_guided_event(app, "step", "Downloading AMD amdgpu-install package...");
             run_command_with_retry("wget", &["-O", deb_path, &installer_url], None, 2)?;
             let mut steps = vec![
@@ -1655,7 +1655,9 @@ async fn install_xpu_guided(app: AppHandle) -> Result<XpuGuidedStatus, String> {
 }
 
 #[tauri::command]
-fn get_comfyui_install_recommendation() -> ComfyInstallRecommendation {
+fn get_comfyui_install_recommendation(
+    gpu_selection: Option<String>,
+) -> ComfyInstallRecommendation {
     let mut gpu = detect_nvidia_gpu_details();
     let mut amd_name = detect_amd_gpu_name();
     let mut intel_name = detect_intel_gpu_name();
@@ -1671,34 +1673,74 @@ fn get_comfyui_install_recommendation() -> ComfyInstallRecommendation {
             intel_name = detect_intel_gpu_name();
         }
     }
-    comfy_install_recommendation_for(gpu, amd_name, intel_name, detection_pending)
+    comfy_install_recommendation_for(
+        gpu,
+        amd_name,
+        intel_name,
+        gpu_selection.as_deref(),
+        detection_pending,
+    )
 }
 
 fn comfy_install_recommendation_for(
     gpu: NvidiaGpuDetails,
     amd_name: Option<String>,
     intel_name: Option<String>,
+    gpu_selection: Option<&str>,
     detection_pending: bool,
 ) -> ComfyInstallRecommendation {
+    let selection = gpu_selection.unwrap_or("auto").trim().to_ascii_lowercase();
     let gpu_name = gpu.name.clone().unwrap_or_default().to_ascii_lowercase();
-    if gpu.name.is_none() {
-        if let Some(amd_name) = amd_name {
+    if selection == "amd" || (selection == "auto" && gpu.name.is_none()) {
+        if let Some(amd_name) = amd_name.clone() {
             return ComfyInstallRecommendation {
                 gpu_name: Some(amd_name),
                 driver_version: None,
-                torch_profile: "torch291_rocm64".to_string(),
-                torch_label: "Torch 2.9.1 + ROCm 6.4".to_string(),
-                reason: "Detected AMD GPU; selecting ROCm install profile.".to_string(),
+                torch_profile: "torch211_rocm72".to_string(),
+                torch_label: "Torch 2.11.0 + ROCm 7.2".to_string(),
+                reason: if selection == "amd" {
+                    "Selected AMD GPU; using ROCm install profile.".to_string()
+                } else {
+                    "Detected AMD GPU; selecting ROCm install profile.".to_string()
+                },
                 detection_pending,
             };
         }
+        if selection == "amd" {
+            return ComfyInstallRecommendation {
+                gpu_name: None,
+                driver_version: None,
+                torch_profile: "torch211_rocm72".to_string(),
+                torch_label: "Torch 2.11.0 + ROCm 7.2".to_string(),
+                reason: "Selected AMD GPU is still being detected.".to_string(),
+                detection_pending,
+            };
+        }
+    }
+    if selection == "intel"
+        || (selection == "auto" && gpu.name.is_none() && amd_name.is_none())
+    {
         if let Some(intel_name) = intel_name {
             return ComfyInstallRecommendation {
                 gpu_name: Some(intel_name),
                 driver_version: None,
                 torch_profile: "torch291_xpu".to_string(),
                 torch_label: "Torch 2.9.1 + XPU".to_string(),
-                reason: "Detected Intel GPU; selecting XPU install profile.".to_string(),
+                reason: if selection == "intel" {
+                    "Selected Intel GPU; using XPU install profile.".to_string()
+                } else {
+                    "Detected Intel GPU; selecting XPU install profile.".to_string()
+                },
+                detection_pending,
+            };
+        }
+        if selection == "intel" {
+            return ComfyInstallRecommendation {
+                gpu_name: None,
+                driver_version: None,
+                torch_profile: "torch291_xpu".to_string(),
+                torch_label: "Torch 2.9.1 + XPU".to_string(),
+                reason: "Selected Intel GPU is still being detected.".to_string(),
                 detection_pending,
             };
         }
@@ -1716,7 +1758,7 @@ fn comfy_install_recommendation_for(
             driver_version: gpu.driver_version,
             torch_profile: "torch271_cu128".to_string(),
             torch_label: "Torch 2.7.1 + cu128".to_string(),
-            reason: "Detected RTX 3000 series (Ampere).".to_string(),
+            reason: "Selected NVIDIA RTX 3000 series (Ampere).".to_string(),
             detection_pending,
         };
     }
@@ -1727,7 +1769,7 @@ fn comfy_install_recommendation_for(
             driver_version: gpu.driver_version,
             torch_profile: "torch280_cu128".to_string(),
             torch_label: "Torch 2.8.0 + cu128".to_string(),
-            reason: "Detected RTX 4000 series (Ada).".to_string(),
+            reason: "Selected NVIDIA RTX 4000 series (Ada).".to_string(),
             detection_pending,
         };
     }
@@ -1739,7 +1781,7 @@ fn comfy_install_recommendation_for(
                 driver_version: gpu.driver_version,
                 torch_profile: "torch291_cu130".to_string(),
                 torch_label: "Torch 2.9.1 + cu130".to_string(),
-                reason: "Detected RTX 5000 series with driver >= 580.".to_string(),
+                reason: "Selected NVIDIA RTX 5000 series with driver >= 580.".to_string(),
                 detection_pending,
             };
         }
@@ -1749,7 +1791,8 @@ fn comfy_install_recommendation_for(
             driver_version: gpu.driver_version,
             torch_profile: "torch280_cu128".to_string(),
             torch_label: "Torch 2.8.0 + cu128".to_string(),
-            reason: "Detected RTX 5000 series with older driver; using safer fallback.".to_string(),
+            reason: "Selected NVIDIA RTX 5000 series with older driver; using safer fallback."
+                .to_string(),
             detection_pending,
         };
     }
@@ -1767,6 +1810,25 @@ fn comfy_install_recommendation_for(
         reason,
         detection_pending,
     }
+}
+
+#[tauri::command]
+fn set_comfyui_gpu_selection(
+    state: State<'_, AppState>,
+    gpu_selection: String,
+) -> Result<AppSettings, String> {
+    let normalized = gpu_selection.trim().to_ascii_lowercase();
+    if !matches!(normalized.as_str(), "auto" | "nvidia" | "amd" | "intel") {
+        return Err("Unknown GPU selection.".to_string());
+    }
+    state
+        .context
+        .config
+        .update_settings(|settings| {
+            settings.comfyui_gpu_selection =
+                (normalized != "auto").then(|| normalized.clone());
+        })
+        .map_err(|err| err.to_string())
 }
 
 fn normalize_path(raw: &str) -> Result<PathBuf, String> {
@@ -2537,7 +2599,7 @@ fn run_comfyui_preflight(
     let selected_profile = request
         .torch_profile
         .clone()
-        .unwrap_or_else(|| get_comfyui_install_recommendation().torch_profile);
+        .unwrap_or_else(|| get_comfyui_install_recommendation(None).torch_profile);
     if torch_profile_is_rocm(&selected_profile) {
         let status = get_rocm_guided_status();
         if status.ready {
@@ -3556,6 +3618,12 @@ fn torch_profile_to_packages_linux(
             "2.9.1",
             "https://download.pytorch.org/whl/rocm6.4",
         ),
+        "torch211_rocm72" => (
+            "2.11.0",
+            "0.26.0",
+            "2.11.0",
+            "https://download.pytorch.org/whl/rocm7.2",
+        ),
         "torch291_xpu" => (
             "2.9.1",
             "0.24.1",
@@ -3588,6 +3656,9 @@ fn torch_profile_from_versions(torch_v: &str, cuda_v: &str) -> Option<String> {
     }
     if t.starts_with("2.9") && c.starts_with("6.4") {
         return Some("torch291_rocm64".to_string());
+    }
+    if t.starts_with("2.11") && c.starts_with("7.2") {
+        return Some("torch211_rocm72".to_string());
     }
     if t.starts_with("2.9") && c == "xpu" {
         return Some("torch291_xpu".to_string());
@@ -3727,6 +3798,9 @@ fn infer_torch_profile_from_installed_packages(root: &Path) -> Option<String> {
     if ta_v.starts_with("2.9") && cuda_v.starts_with("6.4") {
         return Some("torch291_rocm64".to_string());
     }
+    if ta_v.starts_with("2.11") && cuda_v.starts_with("7.2") {
+        return Some("torch211_rocm72".to_string());
+    }
     if ta_v.starts_with("2.9") && cuda_v == "xpu" {
         return Some("torch291_xpu".to_string());
     }
@@ -3757,7 +3831,7 @@ fn resolve_desired_torch_profile(settings: &AppSettings, root: &Path) -> String 
                 .clone()
                 .ok_or_else(|| "no saved profile".to_string())
         })
-        .unwrap_or_else(|_| get_comfyui_install_recommendation().torch_profile)
+        .unwrap_or_else(|_| get_comfyui_install_recommendation(None).torch_profile)
 }
 
 fn install_custom_node(
@@ -4319,7 +4393,7 @@ fn run_comfyui_install_linux(
         &[("UV_PYTHON_INSTALL_DIR", &python_store_s)],
     )?;
 
-    let recommendation = get_comfyui_install_recommendation();
+    let recommendation = get_comfyui_install_recommendation(None);
     let selected_profile = request
         .torch_profile
         .clone()
@@ -4788,7 +4862,7 @@ async fn start_comfyui_install(
                         settings.comfyui_pinned_memory_enabled = request.include_pinned_memory;
                         settings.comfyui_torch_profile =
                             Some(request.torch_profile.clone().unwrap_or_else(|| {
-                                get_comfyui_install_recommendation().torch_profile
+                                get_comfyui_install_recommendation(None).torch_profile
                             }));
                         settings.comfyui_attention_backend =
                             Some(selected_attention_backend(&request).to_string());
@@ -6414,6 +6488,8 @@ fn start_comfyui_root_impl(
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else if settings.comfyui_show_runtime_logs {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    } else {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
 
     let mut child = cmd
@@ -6688,14 +6764,9 @@ fn spawn_comfyui_runtime_log_stream(
     reader: impl std::io::Read + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        let buffered = std::io::BufReader::new(reader);
-        for line in buffered.lines().map_while(Result::ok) {
-            let text = line.trim_end().to_string();
-            if text.is_empty() {
-                continue;
-            }
-            emit_comfyui_runtime_log_event(&app, stream_name, text);
-        }
+        let _ = drain_lossy_lines(reader, |text| {
+            emit_comfyui_runtime_log_event(&app, stream_name, text)
+        });
     });
 }
 
@@ -8627,6 +8698,7 @@ pub fn run() {
             inspect_comfyui_path,
             list_comfyui_installations,
             get_comfyui_install_recommendation,
+            set_comfyui_gpu_selection,
             get_rocm_guided_status,
             install_rocm_guided,
             get_xpu_guided_status,
@@ -8770,6 +8842,7 @@ mod gpu_detection_tests {
             },
             Some("AMD Radeon RX 6700 XT".to_string()),
             None,
+            None,
             false,
         );
 
@@ -8779,5 +8852,44 @@ mod gpu_detection_tests {
         );
         assert_eq!(recommendation.torch_profile, "torch291_cu130");
         assert!(!recommendation.detection_pending);
+    }
+
+    #[test]
+    fn explicit_amd_selection_uses_rocm_on_mixed_gpu_system() {
+        let recommendation = comfy_install_recommendation_for(
+            NvidiaGpuDetails {
+                name: Some("NVIDIA GeForce RTX 5060 Ti".to_string()),
+                vram_mb: Some(16_384),
+                driver_version: Some("580.95.05".to_string()),
+                compute_capability: Some("12.0".to_string()),
+            },
+            Some("AMD Radeon RX 6700 XT".to_string()),
+            None,
+            Some("amd"),
+            false,
+        );
+
+        assert_eq!(
+            recommendation.gpu_name.as_deref(),
+            Some("AMD Radeon RX 6700 XT")
+        );
+        assert_eq!(recommendation.torch_profile, "torch211_rocm72");
+    }
+
+    #[test]
+    fn rocm72_profile_uses_matching_pytorch_packages_and_is_detectable() {
+        assert_eq!(
+            torch_profile_to_packages_linux("torch211_rocm72"),
+            (
+                "2.11.0",
+                "0.26.0",
+                "2.11.0",
+                "https://download.pytorch.org/whl/rocm7.2",
+            )
+        );
+        assert_eq!(
+            torch_profile_from_versions("2.11.0+rocm7.2", "7.2.41134").as_deref(),
+            Some("torch211_rocm72")
+        );
     }
 }

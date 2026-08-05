@@ -79,12 +79,16 @@ Model/LoRA downloader:
 Primary model:
 - PowerShell/orchestrated from inside app (no external installer UI required)
 - uv-managed Python (`3.12.10`) and per-install `.venv`
-- Torch profile auto-recommendation by GPU + manual override dropdown
+- Detected-GPU selector for mixed NVIDIA/AMD/Intel systems; Automatic prefers NVIDIA
+- Torch profile is recalculated from the selected GPU and the choice is persisted
+- Manual Torch profile override remains available
 
 Current torch profiles:
 - `torch271_cu128`
 - `torch280_cu128`
 - `torch291_cu130`
+- Linux: `torch211_rocm72` (recommended), `torch291_rocm64` (compatibility), `torch291_xpu`
+- Windows: `torch291_rocm72`, `torchxpu_nightly`
 
 Add-ons (checkbox-managed):
 - SageAttention

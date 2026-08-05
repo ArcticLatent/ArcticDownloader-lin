@@ -45,10 +45,13 @@ const state = {
   comfyTorchProfileLocked: false,
   comfyAddonLoadSeq: 0,
   comfyDetectedGpuVendor: "",
+  comfyGpuSelection: "auto",
+  detectedGpus: [],
+  comfyRefreshRecommendation: null,
   detectedRamGb: null,
   detectedRamTier: "",
   detectedVramTier: "",
-  comfyTorchRecommendedBase: "Recommended 'Torch 2.8.0 + cu128' for your GPU",
+  comfyTorchRecommendedBase: "Windows recommendation: detecting the selected GPU...",
   sharedModelsRootDefault: "",
   sharedModelsUseDefault: false,
   selectedModelVariants: new Map(),
@@ -99,10 +102,52 @@ const tierStrength = {
 const comfyTorchProfiles = [
   { value: "torch271_cu128", label: "Torch 2.7.1 + cu128" },
   { value: "torch280_cu128", label: "Torch 2.8.0 + cu128" },
-  { value: "torch291_rocm72", label: "Torch 2.9.1 + ROCm SDK 7.2" },
+  { value: "torch291_rocm72", label: "Torch 2.9.1 + ROCm SDK 7.2 (Windows)" },
   { value: "torch291_cu130", label: "Torch 2.9.1 + cu130" },
   { value: "torchxpu_nightly", label: "PyTorch XPU Nightly" },
 ];
+
+function gpuOptionsFromSnapshot(snapshot) {
+  const options = [];
+  const nvidiaName = String(snapshot?.nvidia_gpu_name || "").trim();
+  const amdName = String(snapshot?.amd_gpu_name || "").trim();
+  const intelName = String(snapshot?.intel_gpu_name || "").trim();
+  if (nvidiaName) {
+    const vram = formatVramMbToGb(snapshot?.nvidia_gpu_vram_mb);
+    options.push({ value: "nvidia", vendor: "nvidia", name: nvidiaName, label: `NVIDIA: ${nvidiaName}${vram ? ` (${vram})` : ""}` });
+  }
+  if (amdName) options.push({ value: "amd", vendor: "amd", name: amdName, label: `AMD: ${amdName}` });
+  if (intelName) options.push({ value: "intel", vendor: "intel", name: intelName, label: `Intel: ${intelName}` });
+  return options;
+}
+
+function selectedGpuVendor() {
+  if (state.comfyGpuSelection !== "auto") return state.comfyGpuSelection;
+  return state.detectedGpus.find((gpu) => gpu.vendor === "nvidia")?.vendor
+    || state.detectedGpus[0]?.vendor
+    || "";
+}
+
+function refreshGpuSelectionOptions(snapshot) {
+  state.detectedGpus = gpuOptionsFromSnapshot(snapshot);
+  const options = [{ value: "auto", label: "GPU: Automatic (recommended)" }]
+    .concat(state.detectedGpus.map((gpu) => ({ value: gpu.value, label: gpu.label })));
+  if (state.comfyGpuSelection !== "auto" && !state.detectedGpus.some((gpu) => gpu.value === state.comfyGpuSelection)) {
+    options.push({
+      value: state.comfyGpuSelection,
+      label: `${state.comfyGpuSelection.toUpperCase()}: Not currently detected`,
+    });
+  }
+  setOptions(el.comfyGpuSelection, options, state.comfyGpuSelection);
+  el.comfyGpuSelection.value = state.comfyGpuSelection;
+  state.comfyDetectedGpuVendor = selectedGpuVendor();
+  const selected = state.detectedGpus.find((gpu) => gpu.value === state.comfyGpuSelection);
+  if (el.comfyGpuSelectionHelp) {
+    el.comfyGpuSelectionHelp.textContent = state.comfyGpuSelection === "auto"
+      ? "Platform: Windows • Automatically selects NVIDIA first, then another available GPU."
+      : (selected ? `Platform: Windows • Torch will be configured for ${selected.label}.` : "Platform: Windows • Selected GPU is not currently detected.");
+  }
+}
 
 const el = {
   version: document.getElementById("version"),
@@ -131,6 +176,8 @@ const el = {
 
   comfyTorchProfile: document.getElementById("comfy-torch-profile"),
   comfyTorchRecommended: document.getElementById("comfy-torch-recommended"),
+  comfyGpuSelection: document.getElementById("comfy-gpu-selection"),
+  comfyGpuSelectionHelp: document.getElementById("comfy-gpu-selection-help"),
   comfyMode: document.getElementById("comfy-mode"),
   comfyModeHelp: document.getElementById("comfy-mode-help"),
   comfyExistingRow: document.getElementById("comfy-existing-row"),
@@ -3304,6 +3351,7 @@ async function bootstrap() {
 
   state.settings = settings;
   state.catalog = catalog;
+  state.comfyGpuSelection = String(settings.comfyui_gpu_selection || "auto").trim().toLowerCase();
 
   state.appVersion = settings?.last_installed_version || state.appVersion || "";
   state.titleSystemText = "Loading system info...";
@@ -3321,7 +3369,7 @@ async function bootstrap() {
         const amdGpu = String(snapshot.amd_gpu_name || "").trim();
         const nvidiaGpu = String(snapshot.nvidia_gpu_name || "").trim();
         const intelGpu = String(snapshot.intel_gpu_name || "").trim();
-        state.comfyDetectedGpuVendor = nvidiaGpu ? "nvidia" : (amdGpu ? "amd" : (intelGpu ? "intel" : ""));
+        refreshGpuSelectionOptions(snapshot);
         const gpuText = nvidiaGpu
           ? `${nvidiaGpu}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
           : (amdGpu
@@ -3409,6 +3457,7 @@ async function bootstrap() {
   if (
     savedTorchProfile
     && comfyTorchProfiles.some((x) => x.value === savedTorchProfile)
+    && state.comfyGpuSelection === "auto"
     && state.comfyDetectedGpuVendor !== "amd"
     && state.comfyDetectedGpuVendor !== "intel"
   ) {
@@ -3417,16 +3466,13 @@ async function bootstrap() {
   }
 
   const refreshRecommendation = (attempt = 0) => {
-    invoke("get_comfyui_install_recommendation")
+    invoke("get_comfyui_install_recommendation", {
+      gpuSelection: state.comfyGpuSelection === "auto" ? null : state.comfyGpuSelection,
+    })
       .then((reco) => {
-        const recoReason = String(reco.reason || "").toLowerCase();
-        state.comfyTorchRecommendedBase = recoReason.includes("supported amd gpu")
-          ? "Detected supported AMD GPU. Auto-selected 'Torch 2.9.1 + ROCm SDK 7.2'."
-          : (recoReason.includes("detected amd gpu")
-            ? "Detected AMD GPU. Windows ROCm support is limited to specific Radeon and Ryzen AI hardware."
-            : (recoReason.includes("detected intel gpu")
-              ? "Detected Intel GPU. Auto-selected 'PyTorch XPU Nightly'."
-              : `Recommended '${reco.torch_label}' for your GPU`));
+        state.comfyTorchRecommendedBase = reco.gpu_name
+          ? `Windows recommendation: '${reco.torch_label}' for ${reco.gpu_name}`
+          : `Windows recommendation: '${reco.torch_label}' for the selected GPU`;
         setTorchRecommendedDetecting(false);
         state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
         if (
@@ -3444,7 +3490,7 @@ async function bootstrap() {
         }
       })
       .catch((err) => {
-        state.comfyTorchRecommendedBase = "Recommended 'Torch 2.8.0 + cu128' for your GPU";
+        state.comfyTorchRecommendedBase = "Windows recommendation unavailable. Choose the Torch profile manually.";
         setTorchRecommendedDetecting(false);
         if (state.comfyDetectedGpuVendor === "amd") {
           applyComfyTorchProfileOptions("torch291_rocm72");
@@ -3460,6 +3506,7 @@ async function bootstrap() {
         logComfyLine(`Recommendation detection failed: ${err}`);
       });
   };
+  state.comfyRefreshRecommendation = refreshRecommendation;
   refreshRecommendation();
 
   const initialInstallRoot = String(el.comfyInstallRoot?.value || "").trim();
@@ -3817,6 +3864,25 @@ el.comfyExtraModelRoot?.addEventListener("change", async () => {
     await persistComfyExtraModelConfigForRoot(el.comfyExistingInstall?.value || el.comfyRoot.value);
   }
   await refreshEffectiveDownloadDestination();
+});
+
+el.comfyGpuSelection?.addEventListener("change", async () => {
+  const previous = state.comfyGpuSelection;
+  const selected = String(el.comfyGpuSelection.value || "auto").trim().toLowerCase();
+  state.comfyGpuSelection = selected;
+  state.comfyDetectedGpuVendor = selectedGpuVendor();
+  state.comfyTorchProfileLocked = false;
+  try {
+    state.settings = await invoke("set_comfyui_gpu_selection", { gpuSelection: selected });
+    applyComfyTorchProfileOptions();
+    state.comfyRefreshRecommendation?.(0);
+    applyComfyAddonRules();
+  } catch (err) {
+    state.comfyGpuSelection = previous;
+    el.comfyGpuSelection.value = previous;
+    state.comfyDetectedGpuVendor = selectedGpuVendor();
+    logComfyLine(`GPU selection failed: ${err}`);
+  }
 });
 
 el.comfyMode?.addEventListener("change", async () => {

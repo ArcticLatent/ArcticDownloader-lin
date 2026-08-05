@@ -44,10 +44,13 @@ const state = {
   comfyTorchProfileLocked: false,
   comfyAddonLoadSeq: 0,
   comfyDetectedGpuVendor: "",
+  comfyGpuSelection: "auto",
+  detectedGpus: [],
+  comfyRefreshRecommendation: null,
   detectedRamGb: null,
   detectedRamTier: "",
   detectedVramTier: "",
-  comfyTorchRecommendedBase: "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected.",
+  comfyTorchRecommendedBase: "Linux recommendation: detecting the selected GPU...",
   rocmGuidedBusy: false,
   rocmGuidedStatus: null,
   sharedModelsRootDefault: "",
@@ -97,7 +100,8 @@ const tierStrength = {
 const comfyTorchProfiles = [
   { value: "torch271_cu128", label: "Torch 2.7.1 + cu128" },
   { value: "torch280_cu128", label: "Torch 2.8.0 + cu128" },
-  { value: "torch291_rocm64", label: "Torch 2.9.1 + ROCm 6.4" },
+  { value: "torch211_rocm72", label: "Torch 2.11.0 + ROCm 7.2 (Linux)" },
+  { value: "torch291_rocm64", label: "Torch 2.9.1 + ROCm 6.4 (Linux compatibility)" },
   { value: "torch291_xpu", label: "Torch 2.9.1 + XPU" },
   { value: "torch291_cu130", label: "Torch 2.9.1 + cu130" },
 ];
@@ -105,6 +109,52 @@ const comfyTorchProfiles = [
 function torchProfileLabel(profile) {
   const value = String(profile || "").trim();
   return comfyTorchProfiles.find((item) => item.value === value)?.label || value || "Unknown profile";
+}
+
+function isRocmTorchProfile(profile) {
+  return String(profile || "").includes("_rocm");
+}
+
+function gpuOptionsFromSnapshot(snapshot) {
+  const options = [];
+  const nvidiaName = String(snapshot?.nvidia_gpu_name || "").trim();
+  const amdName = String(snapshot?.amd_gpu_name || "").trim();
+  const intelName = String(snapshot?.intel_gpu_name || "").trim();
+  if (nvidiaName) {
+    const vram = formatVramMbToGb(snapshot?.nvidia_gpu_vram_mb);
+    options.push({ value: "nvidia", vendor: "nvidia", name: nvidiaName, label: `NVIDIA: ${nvidiaName}${vram ? ` (${vram})` : ""}` });
+  }
+  if (amdName) options.push({ value: "amd", vendor: "amd", name: amdName, label: `AMD: ${amdName}` });
+  if (intelName) options.push({ value: "intel", vendor: "intel", name: intelName, label: `Intel: ${intelName}` });
+  return options;
+}
+
+function selectedGpuVendor() {
+  if (state.comfyGpuSelection !== "auto") return state.comfyGpuSelection;
+  return state.detectedGpus.find((gpu) => gpu.vendor === "nvidia")?.vendor
+    || state.detectedGpus[0]?.vendor
+    || "";
+}
+
+function refreshGpuSelectionOptions(snapshot) {
+  state.detectedGpus = gpuOptionsFromSnapshot(snapshot);
+  const options = [{ value: "auto", label: "GPU: Automatic (recommended)" }]
+    .concat(state.detectedGpus.map((gpu) => ({ value: gpu.value, label: gpu.label })));
+  if (state.comfyGpuSelection !== "auto" && !state.detectedGpus.some((gpu) => gpu.value === state.comfyGpuSelection)) {
+    options.push({
+      value: state.comfyGpuSelection,
+      label: `${state.comfyGpuSelection.toUpperCase()}: Not currently detected`,
+    });
+  }
+  setOptions(el.comfyGpuSelection, options, state.comfyGpuSelection);
+  el.comfyGpuSelection.value = state.comfyGpuSelection;
+  state.comfyDetectedGpuVendor = selectedGpuVendor();
+  const selected = state.detectedGpus.find((gpu) => gpu.value === state.comfyGpuSelection);
+  if (el.comfyGpuSelectionHelp) {
+    el.comfyGpuSelectionHelp.textContent = state.comfyGpuSelection === "auto"
+      ? "Platform: Linux • Automatically selects NVIDIA first, then another available GPU."
+      : (selected ? `Platform: Linux • Torch will be configured for ${selected.label}.` : "Platform: Linux • Selected GPU is not currently detected.");
+  }
 }
 
 const el = {
@@ -134,6 +184,8 @@ const el = {
 
   comfyTorchProfile: document.getElementById("comfy-torch-profile"),
   comfyTorchRecommended: document.getElementById("comfy-torch-recommended"),
+  comfyGpuSelection: document.getElementById("comfy-gpu-selection"),
+  comfyGpuSelectionHelp: document.getElementById("comfy-gpu-selection-help"),
   rocmGuidedRow: document.getElementById("rocm-guided-row"),
   rocmGuidedActions: document.getElementById("rocm-guided-actions"),
   rocmGuidedStatus: document.getElementById("rocm-guided-status"),
@@ -635,7 +687,7 @@ function setTorchRecommendedDetecting(detecting) {
 
 function currentGuidedAccelTarget() {
   const profile = String(el.comfyTorchProfile?.value || "").trim();
-  if (profile === "torch291_rocm64") {
+  if (isRocmTorchProfile(profile)) {
     return {
       key: "rocm",
       statusLabel: "ROCm status",
@@ -1664,7 +1716,7 @@ async function startComfyInstall(forceFresh) {
 
 function applyComfyAddonRules() {
   const profile = String(el.comfyTorchProfile?.value || "").trim();
-  const nonCudaSelected = profile === "torch291_rocm64" || profile === "torch291_xpu";
+  const nonCudaSelected = isRocmTorchProfile(profile) || profile === "torch291_xpu";
 
   if (el.addonSageAttention3) {
     const wasChecked = el.addonSageAttention3.checked;
@@ -3308,6 +3360,7 @@ async function bootstrap() {
 
   state.settings = settings;
   state.catalog = catalog;
+  state.comfyGpuSelection = String(settings.comfyui_gpu_selection || "auto").trim().toLowerCase();
 
   state.appVersion = settings?.last_installed_version || "0.1.0";
   state.titleSystemText = "Loading system info...";
@@ -3326,7 +3379,7 @@ async function bootstrap() {
         const amdGpu = String(snapshot.amd_gpu_name || "").trim();
         const nvidiaGpu = String(snapshot.nvidia_gpu_name || "").trim();
         const intelGpu = String(snapshot.intel_gpu_name || "").trim();
-        state.comfyDetectedGpuVendor = nvidiaGpu ? "nvidia" : (amdGpu ? "amd" : (intelGpu ? "intel" : ""));
+        refreshGpuSelectionOptions(snapshot);
         const detectedGpus = [];
         if (nvidiaGpu) {
           const vram = formatVramMbToGb(snapshot.nvidia_gpu_vram_mb);
@@ -3341,7 +3394,7 @@ async function bootstrap() {
         applyComfyAddonRules();
         updateRocmGuidedUi();
         if ((amdGpu || intelGpu
-          || String(el.comfyTorchProfile?.value || "").trim() === "torch291_rocm64"
+          || isRocmTorchProfile(el.comfyTorchProfile?.value)
           || String(el.comfyTorchProfile?.value || "").trim() === "torch291_xpu") && !state.rocmGuidedStatus) {
           refreshRocmGuidedStatus(false).catch(() => {});
         }
@@ -3421,6 +3474,7 @@ async function bootstrap() {
   if (
     savedTorchProfile
     && comfyTorchProfiles.some((x) => x.value === savedTorchProfile)
+    && state.comfyGpuSelection === "auto"
   ) {
     el.comfyTorchProfile.value = savedTorchProfile;
     state.comfyTorchProfileLocked = true;
@@ -3428,16 +3482,13 @@ async function bootstrap() {
   updateRocmGuidedUi();
 
   const refreshRecommendation = (attempt = 0) => {
-    invoke("get_comfyui_install_recommendation")
+    invoke("get_comfyui_install_recommendation", {
+      gpuSelection: state.comfyGpuSelection === "auto" ? null : state.comfyGpuSelection,
+    })
       .then((reco) => {
-        const recoReason = String(reco.reason || "").toLowerCase();
-        state.comfyTorchRecommendedBase = recoReason.includes("detected amd gpu")
-          ? "Detected AMD GPU. Auto-selected 'Torch 2.9.1 + ROCm 6.4'."
-          : (recoReason.includes("detected intel gpu")
-            ? "Detected Intel GPU. Auto-selected 'Torch 2.9.1 + XPU'."
-          : (recoReason.includes("non-nvidia")
-            ? "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected."
-            : `Recommended '${reco.torch_label}' for your GPU`));
+        state.comfyTorchRecommendedBase = reco.gpu_name
+          ? `Linux recommendation: '${reco.torch_label}' for ${reco.gpu_name}`
+          : `Linux recommendation: '${reco.torch_label}' for the selected GPU`;
         setTorchRecommendedDetecting(false);
         state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
         if (
@@ -3453,11 +3504,11 @@ async function bootstrap() {
         }
       })
       .catch((err) => {
-        state.comfyTorchRecommendedBase = "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected.";
+        state.comfyTorchRecommendedBase = "Linux recommendation unavailable. Choose the Torch profile manually.";
         setTorchRecommendedDetecting(false);
         if (state.comfyDetectedGpuVendor === "amd") {
-          applyComfyTorchProfileOptions("torch291_rocm64");
-          el.comfyTorchProfile.value = "torch291_rocm64";
+          applyComfyTorchProfileOptions("torch211_rocm72");
+          el.comfyTorchProfile.value = "torch211_rocm72";
         } else if (!state.comfyTorchProfileLocked) {
           el.comfyTorchProfile.value = "torch280_cu128";
         }
@@ -3466,6 +3517,7 @@ async function bootstrap() {
         logComfyLine(`Recommendation detection failed: ${err}`);
       });
   };
+  state.comfyRefreshRecommendation = refreshRecommendation;
   refreshRecommendation();
 
   const initialInstallRoot = String(el.comfyInstallRoot?.value || "").trim();
@@ -3829,8 +3881,28 @@ el.comfyTorchProfile?.addEventListener("change", async () => {
   state.comfyTorchProfileLocked = true;
   applyComfyAddonRules();
   updateRocmGuidedUi();
-  if (["torch291_rocm64", "torch291_xpu"].includes(String(el.comfyTorchProfile.value || "").trim())) {
+  if (isRocmTorchProfile(el.comfyTorchProfile.value) || String(el.comfyTorchProfile.value || "").trim() === "torch291_xpu") {
     await refreshRocmGuidedStatus(false);
+  }
+});
+
+el.comfyGpuSelection?.addEventListener("change", async () => {
+  const previous = state.comfyGpuSelection;
+  const selected = String(el.comfyGpuSelection.value || "auto").trim().toLowerCase();
+  state.comfyGpuSelection = selected;
+  state.comfyDetectedGpuVendor = selectedGpuVendor();
+  state.comfyTorchProfileLocked = false;
+  try {
+    state.settings = await invoke("set_comfyui_gpu_selection", { gpuSelection: selected });
+    applyComfyTorchProfileOptions();
+    state.comfyRefreshRecommendation?.(0);
+    applyComfyAddonRules();
+    updateRocmGuidedUi();
+  } catch (err) {
+    state.comfyGpuSelection = previous;
+    el.comfyGpuSelection.value = previous;
+    state.comfyDetectedGpuVendor = selectedGpuVendor();
+    logComfyLine(`GPU selection failed: ${err}`);
   }
 });
 
@@ -3841,8 +3913,8 @@ el.comfyMode?.addEventListener("change", async () => {
     const savedTorchProfile = String(state.settings?.comfyui_torch_profile || "").trim();
     if (state.comfyDetectedGpuVendor === "amd") {
       state.comfyTorchProfileLocked = false;
-      applyComfyTorchProfileOptions("torch291_rocm64");
-      el.comfyTorchProfile.value = "torch291_rocm64";
+      applyComfyTorchProfileOptions("torch211_rocm72");
+      el.comfyTorchProfile.value = "torch211_rocm72";
     } else if (state.comfyDetectedGpuVendor === "intel") {
       state.comfyTorchProfileLocked = false;
       applyComfyTorchProfileOptions("torch291_xpu");

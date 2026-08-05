@@ -131,6 +131,8 @@ pub struct AppSettings {
     pub comfyui_attention_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comfyui_torch_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comfyui_gpu_selection: Option<String>,
     #[serde(default)]
     pub hf_xet_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,6 +172,7 @@ impl Default for AppSettings {
             comfyui_disable_smart_memory_enabled: false,
             comfyui_attention_backend: None,
             comfyui_torch_profile: None,
+            comfyui_gpu_selection: None,
             hf_xet_enabled: false,
             shared_models_root: None,
             shared_models_use_default: false,
