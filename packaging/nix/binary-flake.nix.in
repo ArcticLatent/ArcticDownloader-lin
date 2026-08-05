@@ -1,0 +1,26 @@
+{
+  description = "Arctic ComfyUI Helper @VERSION@ binary package";
+
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+  outputs = { self, nixpkgs }:
+    let
+      system = "x86_64-linux";
+      pkgs = import nixpkgs {
+        inherit system;
+        config.allowUnfree = true;
+      };
+      package = pkgs.callPackage ./package.nix { };
+    in {
+      packages.${system} = {
+        arctic-comfyui-helper = package;
+        default = package;
+      };
+
+      apps.${system}.default = {
+        type = "app";
+        program = "${package}/bin/arctic-comfyui-helper";
+        meta.description = "Run Arctic ComfyUI Helper";
+      };
+    };
+}

@@ -2,7 +2,7 @@ use arctic_downloader::{
     app::{build_context, AppContext},
     config::AppSettings,
     download::{CivitaiPreview, DownloadSignal, DownloadStatus},
-    env_flags::auto_update_enabled,
+    env_flags::{auto_update_enabled, external_package_manager},
     model::{LoraDefinition, ModelArtifact, ModelCatalog, ResolvedModel, WorkflowDefinition},
     ram::{detect_ram_profile, RamTier},
     vram::VramTier,
@@ -339,7 +339,9 @@ fn detect_linux_distro_family() -> String {
     let id = os_release.id;
     let id_like = os_release.id_like;
     let haystack = format!("{id} {id_like}");
-    if haystack.contains("arch") {
+    if haystack.contains("nixos") {
+        "nixos".to_string()
+    } else if haystack.contains("arch") {
         "arch".to_string()
     } else if haystack.contains("debian") || haystack.contains("ubuntu") {
         "debian".to_string()
@@ -390,6 +392,12 @@ fn detect_linux_os_release() -> LinuxOsRelease {
 
 fn linux_package_sets(distro: &str) -> (Vec<&'static str>, Vec<&'static str>) {
     match distro {
+        "nixos" => (
+            vec![
+                "git", "curl", "wget", "python3", "gcc", "make", "cmake", "ninja",
+            ],
+            Vec::new(),
+        ),
         "arch" => (
             vec![
                 "git",
@@ -437,6 +445,20 @@ fn linux_package_installed(distro: &str, package: &str) -> bool {
         return true;
     }
     let probe = match distro {
+        "nixos" => {
+            let args: &[&str] = match package {
+                "git" => &["--version"],
+                "curl" => &["--version"],
+                "wget" => &["--version"],
+                "python3" => &["--version"],
+                "gcc" => &["--version"],
+                "make" => &["--version"],
+                "cmake" => &["--version"],
+                "ninja" => &["--version"],
+                _ => return false,
+            };
+            return command_available(package, args);
+        }
         "arch" => run_command_capture("pacman", &["-Q", package], None),
         "debian" => run_command_capture("dpkg", &["-s", package], None),
         "fedora" => run_command_capture("rpm", &["-q", package], None),
@@ -513,6 +535,12 @@ fn install_missing_linux_prereqs(scan: &LinuxPrereqScan) -> Result<(), String> {
             run_privileged_command("dnf", &args, None)?;
         }
         _ => {
+            if scan.distro == "nixos" {
+                return Err(
+                    "This NixOS package supplies the required tools through its wrapper. Reinstall or update the Arctic Helper Nix package instead of installing system packages imperatively."
+                        .to_string(),
+                );
+            }
             return Err(
                 "Unsupported Linux distribution for automatic package install. Install required packages manually."
                     .to_string(),
@@ -4902,6 +4930,16 @@ fn save_civitai_token(state: State<'_, AppState>, token: String) -> Result<AppSe
 
 #[tauri::command]
 async fn check_updates_now(state: State<'_, AppState>) -> Result<UpdateCheckResponse, String> {
+    if let Some(manager) = external_package_manager() {
+        return Ok(UpdateCheckResponse {
+            available: false,
+            version: None,
+            notes: Some(format!(
+                "Updates are managed by {manager}. Update this application through your package manager."
+            )),
+        });
+    }
+
     let updater = state.context.updater.clone();
     let result = updater.check_for_update().await;
 
@@ -4926,6 +4964,16 @@ async fn auto_update_startup(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateCheckResponse, String> {
+    if let Some(manager) = external_package_manager() {
+        return Ok(UpdateCheckResponse {
+            available: false,
+            version: None,
+            notes: Some(format!(
+                "Updates are managed by {manager}. Update this application through your package manager."
+            )),
+        });
+    }
+
     if !auto_update_enabled() {
         return Ok(UpdateCheckResponse {
             available: false,

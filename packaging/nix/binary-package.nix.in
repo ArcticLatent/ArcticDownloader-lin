@@ -1,0 +1,111 @@
+{
+  lib,
+  stdenv,
+  fetchurl,
+  wrapGAppsHook3,
+  makeWrapper,
+  gtk3,
+  webkitgtk_4_1,
+  libayatana-appindicator,
+  glib-networking,
+  gst_all_1,
+  git,
+  curl,
+  wget,
+  python3,
+  gcc,
+  gnumake,
+  cmake,
+  ninja,
+  coreutils,
+  findutils,
+  gnugrep,
+  gnused,
+  pciutils,
+  procps,
+  util-linux,
+  xdg-utils,
+}:
+
+stdenv.mkDerivation {
+  pname = "arctic-comfyui-helper";
+  version = "@VERSION@";
+
+  src = fetchurl {
+    url = "@NATIVE_URL@";
+    sha256 = "@NATIVE_SHA256@";
+  };
+
+  nativeBuildInputs = [
+    wrapGAppsHook3
+    makeWrapper
+  ];
+
+  buildInputs = [
+    gtk3
+    webkitgtk_4_1
+    libayatana-appindicator
+    glib-networking
+    gst_all_1.gstreamer
+    gst_all_1.gst-plugins-base
+  ];
+
+  # The release archive deliberately places its four payload files at the
+  # archive root, so give Nix an explicit source directory to build from.
+  unpackPhase = ''
+    runHook preUnpack
+
+    mkdir source
+    tar -xzf "$src" -C source
+    cd source
+
+    runHook postUnpack
+  '';
+
+  installPhase = ''
+    runHook preInstall
+
+    install -Dm755 arctic-comfyui-helper "$out/bin/arctic-comfyui-helper"
+    install -Dm644 io.github.ArcticHelper.desktop \
+      "$out/share/applications/io.github.ArcticHelper.desktop"
+    install -Dm644 io.github.ArcticHelper.svg \
+      "$out/share/icons/hicolor/scalable/apps/io.github.ArcticHelper.svg"
+    install -Dm644 README.md \
+      "$out/share/doc/arctic-comfyui-helper/README.md"
+
+    runHook postInstall
+  '';
+
+  preFixup = ''
+    gappsWrapperArgs+=(
+      --prefix PATH : ${lib.makeBinPath [
+        git
+        curl
+        wget
+        python3
+        gcc
+        gnumake
+        cmake
+        ninja
+        coreutils
+        findutils
+        gnugrep
+        gnused
+        pciutils
+        procps
+        util-linux
+        xdg-utils
+      ]}
+      --set ARCTIC_PACKAGE_MANAGER nix
+      --set ARCTIC_SKIP_AUTO_UPDATE 1
+    )
+  '';
+
+  meta = {
+    description = "ComfyUI installer and model manager";
+    homepage = "https://github.com/ArcticLatent/Arctic-Helper";
+    license = lib.licenses.unfree;
+    mainProgram = "arctic-comfyui-helper";
+    platforms = [ "x86_64-linux" ];
+  };
+}

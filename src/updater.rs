@@ -455,7 +455,9 @@ fn detect_linux_distro_family() -> String {
         }
     }
     let haystack = format!("{id} {id_like}");
-    if haystack.contains("arch") {
+    if haystack.contains("nixos") {
+        "nixos".to_string()
+    } else if haystack.contains("arch") {
         "arch".to_string()
     } else if haystack.contains("debian") || haystack.contains("ubuntu") {
         "debian".to_string()
@@ -488,6 +490,10 @@ fn select_linux_release_asset(manifest: &LinuxReleaseManifest) -> Option<&LinuxR
         .collect();
 
     let preferred = match distro.as_str() {
+        "nixos" => candidates
+            .iter()
+            .find(|asset| asset.name.to_ascii_lowercase().contains("nix"))
+            .copied(),
         "arch" => candidates
             .iter()
             .find(|asset| asset.name.to_ascii_lowercase().contains(".pkg.tar"))

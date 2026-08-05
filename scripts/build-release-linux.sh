@@ -323,6 +323,7 @@ echo "Updating versions to $VERSION ..."
 update_simple_version "$ROOT_DIR/Cargo.toml" '0,/^version\s*=\s*"[^"]+"/{s//version = "'"$VERSION"'"/}'
 update_simple_version "$ROOT_DIR/src-tauri/Cargo.toml" '0,/^version\s*=\s*"[^"]+"/{s//version = "'"$VERSION"'"/}'
 update_simple_version "$ROOT_DIR/src-tauri/tauri.conf.json" '0,/"version"\s*:\s*"[^"]+"/{s//"version": "'"$VERSION"'"/}'
+update_simple_version "$PACKAGING_DIR/nix/source-package.nix" 's/^  version = "[^"]+";/  version = "'"$VERSION"'";/'
 update_simple_version "$PACKAGING_DIR/arch/PKGBUILD" 's/^pkgver=.*/pkgver='"$VERSION"'/'
 update_simple_version "$PACKAGING_DIR/fedora/arctic-comfyui-helper.spec" 's/^Version:\s*.*/Version:        '"$VERSION"'/'
 prepend_debian_changelog "$PACKAGING_DIR/debian/debian/changelog" "$VERSION" "$summary_note"
@@ -497,6 +498,15 @@ for f in "${artifacts[@]}"; do
   cp -f "$f" "$OUT_ABS_DIR/"
 done
 
+if ((ARCH_AUR_ONLY == 0)); then
+  echo "Creating NixOS binary flake ..."
+  (cd "$ROOT_DIR" && bash scripts/build-nix-release.sh \
+    --version "$VERSION" \
+    --repository "$REPOSITORY" \
+    --tag "$TAG" \
+    --output-dir "$OUTPUT_DIR")
+fi
+
 if [[ -n "$NOTES_FILE" ]]; then
   cp -f "$NOTES_FILE" "$OUT_ABS_DIR/release-notes-$TAG.md"
 fi
@@ -504,7 +514,7 @@ fi
 (
   cd "$OUT_ABS_DIR"
   rm -f SHA256SUMS
-  mapfile -t copied < <(find . -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' \) -printf '%f\n' | sort)
+  mapfile -t copied < <(find . -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' -o -name 'arctic-comfyui-helper-nix-*.tar.gz' -o -name 'arctic-comfyui-helper-*-nixos-*.tar.gz' \) -printf '%f\n' | sort)
   sha256sum "${copied[@]}" > SHA256SUMS
 )
 
@@ -515,7 +525,7 @@ manifest="$OUT_ABS_DIR/linux-release.json"
   echo "  \"tag\": \"$TAG\"," 
   echo "  \"repository\": \"$REPOSITORY\"," 
   echo "  \"assets\": ["
-  mapfile -t copied < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' \) -printf '%f\n' | sort)
+  mapfile -t copied < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' -o -name 'arctic-comfyui-helper-nix-*.tar.gz' -o -name 'arctic-comfyui-helper-*-nixos-*.tar.gz' \) -printf '%f\n' | sort)
   for i in "${!copied[@]}"; do
     name="${copied[$i]}"
     sha="$(sha256sum "$OUT_ABS_DIR/$name" | awk '{print $1}')"
@@ -540,7 +550,7 @@ echo "  Checksums: $OUT_ABS_DIR/SHA256SUMS"
   if ((ARCH_AUR_ONLY == 1)); then
     mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f -name '*.pkg.tar.*' | sort)
   else
-    mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' -o -name 'SHA256SUMS' -o -name 'linux-release.json' \) | sort)
+    mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' -o -name 'arctic-comfyui-helper-nix-*.tar.gz' -o -name 'arctic-comfyui-helper-*-nixos-*.tar.gz' -o -name 'SHA256SUMS' -o -name 'linux-release.json' \) | sort)
   fi
   if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
     gh release upload "$TAG" "${release_files[@]}" --repo "$REPOSITORY" --clobber

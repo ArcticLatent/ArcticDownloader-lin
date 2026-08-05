@@ -4254,9 +4254,9 @@ el.checkUpdates.addEventListener("click", async () => {
     } else {
       state.updateAvailable = false;
       state.updateVersion = null;
-      el.updateStatus.textContent = "Up to date";
+      el.updateStatus.textContent = result.notes ? "Managed externally" : "Up to date";
       updateUpdateButton();
-      logLine("No updates available.");
+      logLine(result.notes || "No updates available.");
     }
   } catch (err) {
     state.updateAvailable = false;
@@ -4697,6 +4697,10 @@ renderTransfers();
           } else {
             state.updateAvailable = false;
             state.updateVersion = null;
+            if (startup?.notes) {
+              el.updateStatus.textContent = "Managed externally";
+              logLine(startup.notes);
+            }
             updateUpdateButton();
           }
         })

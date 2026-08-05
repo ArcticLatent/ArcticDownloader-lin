@@ -26,3 +26,10 @@ pub fn auto_update_enabled() -> bool {
 
     parse_env_bool("ARCTIC_AUTO_UPDATE").unwrap_or(true)
 }
+
+pub fn external_package_manager() -> Option<String> {
+    std::env::var("ARCTIC_PACKAGE_MANAGER")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+}

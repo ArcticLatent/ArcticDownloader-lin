@@ -5,11 +5,13 @@
 <h1 align="center">Arctic ComfyUI Helper</h1>
 
 <p align="center">
-  A curated Windows companion for ComfyUI users who want the right models, LoRAs, and setup tools without guesswork.
+  A curated Windows and Linux companion for ComfyUI users who want the right models, LoRAs, and setup tools without guesswork.
 </p>
 
 <p align="center">
   <img alt="Windows" src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?style=for-the-badge&logo=windows&logoColor=white" />
+  <img alt="Linux" src="https://img.shields.io/badge/Platform-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" />
+  <img alt="NixOS" src="https://img.shields.io/badge/Package-NixOS-5277C3?style=for-the-badge&logo=nixos&logoColor=white" />
   <img alt="Rust" src="https://img.shields.io/badge/Built%20with-Rust-000000?style=for-the-badge&logo=rust" />
   <img alt="Tauri" src="https://img.shields.io/badge/Desktop-Tauri-24C8DB?style=for-the-badge&logo=tauri&logoColor=white" />
 </p>
@@ -73,14 +75,36 @@ Inside the **ComfyUI** tab, you can:
 
 ## 🚀 Getting Started
 
-1. Download the latest `Arctic-ComfyUI-Helper.exe` from this repo's **Releases** page.
-2. Run the app. This is a **standalone app** (no installer required).
+1. Download the package for your operating system from this repo's **Releases** page.
+2. Install or run the package.
 3. In **Models** / **LoRAs**, select your existing ComfyUI folder to download assets.
 4. In **ComfyUI** tab, use **Install New** (or **Manage Existing**) if you want the app to install/manage ComfyUI itself.
 5. Optional advanced logging: launch from terminal with  
    `.\Arctic-ComfyUI-Helper.exe --nerdstats`
 
 That is it. Pick your setup, click, and the app handles the rest.
+
+### NixOS / Nix
+
+Run without installing:
+
+```bash
+nix run 'tarball+https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/arctic-comfyui-helper-nix-x86_64.tar.gz'
+```
+
+Install into your user profile:
+
+```bash
+nix profile install 'tarball+https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/arctic-comfyui-helper-nix-x86_64.tar.gz'
+```
+
+Update a profile installation with `nix profile upgrade arctic-comfyui-helper`.
+For a declarative NixOS configuration, add the same tarball URL as a flake input
+and add `inputs.arctic-helper.packages.${pkgs.system}.default` to
+`environment.systemPackages`. Only `x86_64-linux` is currently supported.
+
+The in-app self-updater is disabled in the Nix package because the Nix store is
+immutable; use Nix to update the application.
 
 ---
 

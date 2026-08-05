@@ -238,9 +238,22 @@ bash ./scripts/verify-release-linux.sh --version 0.1.1 --tag v0.1.1 --repository
 Linux flow does:
 1. Bump versions in Rust/Tauri/package metadata.
 2. Update Debian changelog entry.
-3. Build Arch (`.pkg.tar.zst`), Debian (`.deb`), and Fedora/RPM (`.rpm`/`.src.rpm`) artifacts.
+3. Build Arch (`.pkg.tar.zst`), Debian (`.deb`), Fedora/RPM (`.rpm`/`.src.rpm`), Flatpak, and a binary Nix flake artifact.
 4. Generate `SHA256SUMS` + `linux-release.json`.
 5. Create/update GitHub release via `gh`.
+
+### Local NixOS build
+
+The repository flake builds directly from the private source tree:
+
+```bash
+nix build
+nix run
+```
+
+The release flow publishes a binary-only flake tarball. Nix-managed builds set
+`ARCTIC_PACKAGE_MANAGER=nix`, so application updates are performed through Nix
+instead of attempting to modify the immutable Nix store.
 
 ## Repo Notes
 
