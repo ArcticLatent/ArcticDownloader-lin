@@ -74,8 +74,8 @@ rustPlatform.buildRustPackage {
     gst_all_1.gst-plugins-base
   ];
 
-  # The application currently has no automated test suite. Running Cargo's
-  # empty test harness would needlessly rebuild the full Tauri application.
+  # CI runs the Rust test harness separately; avoid rebuilding the full Tauri
+  # application a second time in the package derivation.
   doCheck = false;
 
   installPhase = ''

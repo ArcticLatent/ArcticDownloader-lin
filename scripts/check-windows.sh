@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+target="x86_64-pc-windows-msvc"
+
+for command_name in rustup cargo cargo-xwin; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "Missing $command_name. Enter the Windows development shell first:" >&2
+    echo "  nix develop .#windows" >&2
+    exit 1
+  fi
+done
+
+rustup toolchain install stable --profile minimal --no-self-update
+rustup target add "$target" --toolchain stable
+
+cd "$repo_root"
+cargo +stable xwin check \
+  --locked \
+  --target "$target" \
+  --manifest-path src-tauri/Cargo.toml \
+  "$@"

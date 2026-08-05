@@ -170,9 +170,11 @@ dependencies = [
  "serde_json",
  "sha2",
  "sysinfo",
+ "tao",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
+ "wry",
 ]
 
 [[package]]

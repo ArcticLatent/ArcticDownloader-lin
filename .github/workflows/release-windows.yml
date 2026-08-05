@@ -12,7 +12,13 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  RELEASE_REPOSITORY: ArcticLatent/Arctic-Helper
+  WINDOWS_ASSET: Arctic-ComfyUI-Helper.exe
+  ARCTIC_SUPABASE_URL: ${{ secrets.ARCTIC_SUPABASE_URL }}
+  ARCTIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.ARCTIC_SUPABASE_PUBLISHABLE_KEY }}
 
 jobs:
   build-release:
@@ -25,12 +31,19 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Resolve Version
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            src-tauri
+
+      - name: Resolve version
         id: vars
         shell: powershell
         run: |
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $version = "${{ inputs.version }}"
+            $version = "${{ inputs.version }}".TrimStart("v")
             $tag = "v$version"
           } else {
             $tag = "${{ github.ref_name }}"
@@ -39,29 +52,54 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Build Standalone + Manifest
-        id: build
+      - name: Build standalone and update manifest
         shell: powershell
         run: |
           ./scripts/build-release.ps1 `
             -Version "${{ steps.vars.outputs.version }}" `
             -Tag "${{ steps.vars.outputs.tag }}" `
-            -Repository "${{ github.repository }}" `
-            -OutputDir "dist"
+            -Repository "$env:RELEASE_REPOSITORY" `
+            -OutputDir "dist" `
+            -AssetName "$env:WINDOWS_ASSET"
 
-      - name: Verify Release Artifacts
+      - name: Verify release artifacts
         shell: powershell
         run: |
           ./scripts/verify-release.ps1 `
             -Version "${{ steps.vars.outputs.version }}" `
             -Tag "${{ steps.vars.outputs.tag }}" `
-            -Repository "${{ github.repository }}" `
-            -OutputDir "dist"
+            -Repository "$env:RELEASE_REPOSITORY" `
+            -OutputDir "dist" `
+            -AssetName "$env:WINDOWS_ASSET"
 
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v2
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.vars.outputs.tag }}
-          files: |
-            dist/arctic-downloader-tauri.exe
+          name: arctic-comfyui-helper-windows-${{ steps.vars.outputs.version }}
+          path: |
+            dist/${{ env.WINDOWS_ASSET }}
             dist/update.json
+
+      - name: Publish to public release repository
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.ARCTIC_RELEASE_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+            throw "Configure the ARCTIC_RELEASE_TOKEN repository secret with Contents: write access to $env:RELEASE_REPOSITORY."
+          }
+
+          $tag = "${{ steps.vars.outputs.tag }}"
+          gh release view $tag --repo $env:RELEASE_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag `
+              --repo $env:RELEASE_REPOSITORY `
+              --title "Arctic ComfyUI Helper ${{ steps.vars.outputs.version }}" `
+              --notes "Arctic ComfyUI Helper $tag"
+          }
+
+          gh release upload $tag `
+            "dist/$env:WINDOWS_ASSET" `
+            "dist/update.json" `
+            --repo $env:RELEASE_REPOSITORY `
+            --clobber

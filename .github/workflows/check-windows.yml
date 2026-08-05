@@ -1,0 +1,33 @@
+name: Check Windows
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            src-tauri
+
+      - name: Check Windows application
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Test shared Rust library
+        run: cargo test --locked --lib

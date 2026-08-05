@@ -30,15 +30,16 @@ const state = {
   comfyInstallSwitchBusy: false,
   updateAvailable: false,
   updateVersion: null,
-  appVersion: "0.1.0",
-  updateChecking: false,
+  appVersion: "",
   updateInstalling: false,
+  updateChecking: false,
+  updateFlashLabel: "",
+  updateFlashTimer: null,
   selectedComfyVersion: null,
   titleSystemText: "Loading system info...",
   comfyUpdateAvailable: false,
   comfyUpdateChecked: false,
   comfyUpdateBusy: false,
-  comfyUpdateChecking: false,
   comfyLatestVersion: null,
   comfyLastUpdateDetailLogKey: "",
   comfyTorchProfileLocked: false,
@@ -47,9 +48,7 @@ const state = {
   detectedRamGb: null,
   detectedRamTier: "",
   detectedVramTier: "",
-  comfyTorchRecommendedBase: "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected.",
-  rocmGuidedBusy: false,
-  rocmGuidedStatus: null,
+  comfyTorchRecommendedBase: "Recommended 'Torch 2.8.0 + cu128' for your GPU",
   sharedModelsRootDefault: "",
   sharedModelsUseDefault: false,
   selectedModelVariants: new Map(),
@@ -59,6 +58,9 @@ const state = {
 };
 
 let progressSmoothTimer = null;
+const comfyUpdateStatusCache = new Map();
+const comfyUpdateStatusInflight = new Map();
+const COMFY_UPDATE_STATUS_CACHE_MS = 4000;
 
 const ramOptions = [
   { id: "ram_8", label: "8 GB RAM", gb: 8 },
@@ -97,15 +99,10 @@ const tierStrength = {
 const comfyTorchProfiles = [
   { value: "torch271_cu128", label: "Torch 2.7.1 + cu128" },
   { value: "torch280_cu128", label: "Torch 2.8.0 + cu128" },
-  { value: "torch291_rocm64", label: "Torch 2.9.1 + ROCm 6.4" },
-  { value: "torch291_xpu", label: "Torch 2.9.1 + XPU" },
+  { value: "torch291_rocm72", label: "Torch 2.9.1 + ROCm SDK 7.2" },
   { value: "torch291_cu130", label: "Torch 2.9.1 + cu130" },
+  { value: "torchxpu_nightly", label: "PyTorch XPU Nightly" },
 ];
-
-function torchProfileLabel(profile) {
-  const value = String(profile || "").trim();
-  return comfyTorchProfiles.find((item) => item.value === value)?.label || value || "Unknown profile";
-}
 
 const el = {
   version: document.getElementById("version"),
@@ -134,11 +131,6 @@ const el = {
 
   comfyTorchProfile: document.getElementById("comfy-torch-profile"),
   comfyTorchRecommended: document.getElementById("comfy-torch-recommended"),
-  rocmGuidedRow: document.getElementById("rocm-guided-row"),
-  rocmGuidedActions: document.getElementById("rocm-guided-actions"),
-  rocmGuidedStatus: document.getElementById("rocm-guided-status"),
-  rocmGuidedCheck: document.getElementById("rocm-guided-check"),
-  rocmGuidedInstall: document.getElementById("rocm-guided-install"),
   comfyMode: document.getElementById("comfy-mode"),
   comfyModeHelp: document.getElementById("comfy-mode-help"),
   comfyExistingRow: document.getElementById("comfy-existing-row"),
@@ -333,9 +325,7 @@ function ansiToHtml(text) {
 
 function detectRuntimeLogLevel(text) {
   const value = String(text || "").toLowerCase();
-  if (
-    /traceback|fatal|exception|error|failed|cannot|could not|invalid|denied/.test(value)
-  ) {
+  if (/traceback|fatal|exception|error|failed|cannot|could not|invalid|denied/.test(value)) {
     return "error";
   }
   if (/warn|warning|deprecated|retry|fallback|slow|stall/.test(value)) {
@@ -499,6 +489,10 @@ function waitForNextPaint() {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function setProgress(text) {
   el.progressLine.textContent = text || "Idle";
 }
@@ -534,8 +528,8 @@ function renderTitleMeta() {
 
 function renderAppVersionTag() {
   if (!el.appVersionTag) return;
-  const normalizeVersion = (value) => String(value || "0.1.0").trim().replace(/^v/i, "");
-  const current = normalizeVersion(state.appVersion || "0.1.0");
+  const normalizeVersion = (value) => String(value || "").trim().replace(/^v/i, "");
+  const current = normalizeVersion(state.appVersion || "");
   const latest = normalizeVersion(state.updateVersion || "");
   if (state.updateInstalling) {
     el.appVersionTag.textContent = "Updating...";
@@ -547,7 +541,7 @@ function renderAppVersionTag() {
     el.appVersionTag.classList.add("update-available");
     return;
   }
-  el.appVersionTag.textContent = current;
+  el.appVersionTag.textContent = current || "...";
   el.appVersionTag.classList.remove("update-available");
 }
 
@@ -559,24 +553,14 @@ function updateComfyUpdateButton() {
   btn.classList.remove("update-available");
   if (!hasSelection) return;
 
-  if (state.comfyInstallSwitchBusy) {
-    btn.textContent = "Switching...";
-    btn.disabled = true;
-    return;
-  }
-  if (state.comfyUpdateChecking) {
-    btn.textContent = "Checking...";
-    btn.disabled = true;
-    return;
-  }
   if (state.comfyUpdateBusy) {
     btn.textContent = "Updating...";
     btn.disabled = true;
     return;
   }
   if (!state.comfyUpdateChecked) {
-    btn.textContent = "Check ComfyUI";
-    btn.disabled = false;
+    btn.textContent = "Checking...";
+    btn.disabled = true;
     return;
   }
   if (state.comfyUpdateAvailable) {
@@ -633,97 +617,50 @@ function setTorchRecommendedDetecting(detecting) {
   }
 }
 
-function currentGuidedAccelTarget() {
-  const profile = String(el.comfyTorchProfile?.value || "").trim();
-  if (profile === "torch291_rocm64") {
-    return {
-      key: "rocm",
-      statusLabel: "ROCm status",
-      checkLabel: "Check ROCm",
-      installLabel: "Guided ROCm Setup",
-      checkCommand: "get_rocm_guided_status",
-      installCommand: "install_rocm_guided",
-      logPrefix: "ROCm",
-      detectedField: "amd_detected",
-    };
+function comfyTorchProfileOptionsForDetectedGpu() {
+  const vendor = String(state.comfyDetectedGpuVendor || "").toLowerCase();
+  if (vendor === "amd") {
+    return comfyTorchProfiles.map((item) => ({
+      ...item,
+      disabled: item.value !== "torch291_rocm72",
+    }));
   }
-  if (profile === "torch291_xpu") {
-    return {
-      key: "xpu",
-      statusLabel: "Intel XPU status",
-      checkLabel: "Check Intel XPU",
-      installLabel: "Guided Intel Setup",
-      checkCommand: "get_xpu_guided_status",
-      installCommand: "install_xpu_guided",
-      logPrefix: "Intel XPU",
-      detectedField: "intel_detected",
-    };
+  if (vendor === "intel") {
+    return comfyTorchProfiles.map((item) => ({
+      ...item,
+      disabled: item.value !== "torchxpu_nightly",
+    }));
   }
-  return null;
+  if (vendor === "nvidia") {
+    return comfyTorchProfiles.map((item) => ({
+      ...item,
+      disabled: item.value === "torch291_rocm72" || item.value === "torchxpu_nightly",
+    }));
+  }
+  return comfyTorchProfiles.map((item) => ({ ...item, disabled: false }));
 }
 
-function updateRocmGuidedUi() {
-  const target = currentGuidedAccelTarget();
-  const status = state.rocmGuidedStatus;
-  const statusMatchesTarget = status?.target === target?.key;
-  const show = Boolean(target) && !(statusMatchesTarget && status?.ready);
-  if (el.rocmGuidedRow) {
-    el.rocmGuidedRow.classList.toggle("hidden", !show);
-  }
-  if (el.rocmGuidedActions) {
-    el.rocmGuidedActions.classList.toggle("hidden", !show);
-  }
-  if (!show) {
-    return;
-  }
-  if (el.rocmGuidedStatus) {
-    el.rocmGuidedStatus.textContent = statusMatchesTarget && status?.detail
-      ? `${target.statusLabel}: ${status.detail}`
-      : `${target.statusLabel}: Not checked.`;
-  }
-  if (el.rocmGuidedCheck) {
-    el.rocmGuidedCheck.disabled = state.rocmGuidedBusy;
-    el.rocmGuidedCheck.textContent = state.rocmGuidedBusy ? "Checking..." : target.checkLabel;
-  }
-  if (el.rocmGuidedInstall) {
-    const gpuDetected = !statusMatchesTarget ? true : status?.[target.detectedField] !== false;
-    const installBlocked = state.rocmGuidedBusy || (statusMatchesTarget && status?.supported === false) || !gpuDetected;
-    el.rocmGuidedInstall.disabled = installBlocked;
-    el.rocmGuidedInstall.textContent = state.rocmGuidedBusy ? "Running Setup..." : target.installLabel;
-  }
-}
-
-async function refreshRocmGuidedStatus(logResult = false) {
-  if (!invoke) return null;
-  const target = currentGuidedAccelTarget();
-  if (!target) {
-    state.rocmGuidedStatus = null;
-    updateRocmGuidedUi();
-    return null;
-  }
-  state.rocmGuidedBusy = true;
-  updateRocmGuidedUi();
-  try {
-    const status = await invoke(target.checkCommand);
-    state.rocmGuidedStatus = status ? { ...status, target: target.key } : null;
-    if (logResult && status?.detail) {
-      logComfyLine(`${target.logPrefix} check: ${status.detail}`);
-    }
-    return status;
-  } catch (err) {
-    state.rocmGuidedStatus = {
-      detail: `Failed to check ${target.logPrefix} status: ${err}`,
-      supported: false,
-      [target.detectedField]: true,
-      target: target.key,
-    };
-    if (logResult) {
-      logComfyLine(String(state.rocmGuidedStatus.detail));
-    }
-    return null;
-  } finally {
-    state.rocmGuidedBusy = false;
-    updateRocmGuidedUi();
+function applyComfyTorchProfileOptions(selectedValue = null) {
+  if (!el.comfyTorchProfile) return;
+  const options = comfyTorchProfileOptionsForDetectedGpu();
+  const vendor = String(state.comfyDetectedGpuVendor || "").toLowerCase();
+  const forcedValue = vendor === "amd"
+    ? "torch291_rocm72"
+    : (vendor === "intel" ? "torchxpu_nightly" : selectedValue);
+  setOptions(el.comfyTorchProfile, options, forcedValue);
+  if (vendor === "amd") {
+    el.comfyTorchProfile.value = "torch291_rocm72";
+  } else if (vendor === "intel") {
+    el.comfyTorchProfile.value = "torchxpu_nightly";
+  } else if (
+    vendor === "nvidia"
+    && (el.comfyTorchProfile.value === "torch291_rocm72" || el.comfyTorchProfile.value === "torchxpu_nightly")
+  ) {
+    el.comfyTorchProfile.value = selectedValue
+      && selectedValue !== "torch291_rocm72"
+      && selectedValue !== "torchxpu_nightly"
+      ? selectedValue
+      : "torch280_cu128";
   }
 }
 
@@ -848,9 +785,6 @@ async function loadInstalledAddonState(comfyuiRoot) {
     if (installedTorchProfile && comfyTorchProfiles.some((x) => x.value === installedTorchProfile)) {
       el.comfyTorchProfile.value = installedTorchProfile;
       state.comfyTorchProfileLocked = true;
-      if (state.comfyMode === "manage") {
-        logComfyLine(`Selected install is using ${torchProfileLabel(installedTorchProfile)}.`);
-      }
     }
     if (el.addonSageAttention) el.addonSageAttention.checked = Boolean(installed?.sage_attention);
     if (el.addonSageAttention3) el.addonSageAttention3.checked = Boolean(installed?.sage_attention3);
@@ -860,7 +794,7 @@ async function loadInstalledAddonState(comfyuiRoot) {
     if (el.addonTrellis2) el.addonTrellis2.checked = Boolean(installed?.trellis2);
     if (el.flagSageAttention) {
       el.flagSageAttention.checked = Boolean(
-        installed?.launch_sage_attention || installed?.launch_sage_attention3
+        installed?.launch_sage_attention || installed?.launch_sage_attention3,
       );
     }
     if (el.flagFlashAttention) el.flagFlashAttention.checked = Boolean(installed?.launch_flash_attention);
@@ -868,7 +802,9 @@ async function loadInstalledAddonState(comfyuiRoot) {
     if (el.flagLowvram) el.flagLowvram.checked = Boolean(installed?.lowvram_enabled);
     if (el.flagBf16Unet) el.flagBf16Unet.checked = Boolean(installed?.bf16_unet_enabled);
     if (el.flagAsyncOffload) el.flagAsyncOffload.checked = Boolean(installed?.async_offload_enabled);
-    if (el.flagDisableSmartMemory) el.flagDisableSmartMemory.checked = Boolean(installed?.disable_smart_memory_enabled);
+    if (el.flagDisableSmartMemory) {
+      el.flagDisableSmartMemory.checked = Boolean(installed?.disable_smart_memory_enabled);
+    }
 
     if (el.nodeComfyuiManager) el.nodeComfyuiManager.checked = Boolean(installed?.node_comfyui_manager);
     if (el.nodeComfyuiEasyUse) el.nodeComfyuiEasyUse.checked = Boolean(installed?.node_comfyui_easy_use);
@@ -1096,7 +1032,16 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
 
   const enabling = Boolean(changedBox.checked);
   const action = (
-    component === "launch_listen" || component === "addon_launch_listen"
+    component === "launch_listen"
+      || component === "addon_launch_listen"
+      || component === "launch_lowvram"
+      || component === "addon_launch_lowvram"
+      || component === "launch_bf16_unet"
+      || component === "addon_launch_bf16_unet"
+      || component === "launch_async_offload"
+      || component === "addon_launch_async_offload"
+      || component === "launch_disable_smart_memory"
+      || component === "addon_launch_disable_smart_memory"
       ? (enabling ? "enable" : "disable")
       : (enabling ? "install" : "remove")
   );
@@ -1400,7 +1345,6 @@ async function applySelectedExistingInstallation(rootPath) {
 
 async function refreshComfyUiUpdateStatus(rootPath = null) {
   const root = normalizeSlashes(rootPath || el.comfyExistingInstall?.value || el.comfyRoot.value || "");
-  state.comfyUpdateChecking = true;
   state.comfyUpdateChecked = false;
   state.comfyUpdateAvailable = false;
   state.comfyLatestVersion = null;
@@ -1409,7 +1353,26 @@ async function refreshComfyUiUpdateStatus(rootPath = null) {
   renderTitleMeta();
   if (!root) return;
   try {
-    const status = await invoke("get_comfyui_update_status", { comfyuiRoot: root });
+    const cacheKey = normalizeSlashes(root);
+    const now = Date.now();
+    const cached = comfyUpdateStatusCache.get(cacheKey);
+    let status;
+    if (cached && (now - cached.at) < COMFY_UPDATE_STATUS_CACHE_MS) {
+      status = cached.status;
+    } else if (comfyUpdateStatusInflight.has(cacheKey)) {
+      status = await comfyUpdateStatusInflight.get(cacheKey);
+    } else {
+      const request = invoke("get_comfyui_update_status", { comfyuiRoot: root })
+        .then((result) => {
+          comfyUpdateStatusCache.set(cacheKey, { status: result, at: Date.now() });
+          return result;
+        })
+        .finally(() => {
+          comfyUpdateStatusInflight.delete(cacheKey);
+        });
+      comfyUpdateStatusInflight.set(cacheKey, request);
+      status = await request;
+    }
     state.comfyUpdateChecked = Boolean(status?.checked);
     state.comfyUpdateAvailable = Boolean(status?.update_available);
     state.comfyLatestVersion = status?.latest_version || null;
@@ -1429,15 +1392,14 @@ async function refreshComfyUiUpdateStatus(rootPath = null) {
       }
     }
   } catch (err) {
+    comfyUpdateStatusCache.delete(normalizeSlashes(root));
     state.comfyUpdateChecked = false;
     state.comfyUpdateAvailable = false;
     state.comfyLatestVersion = null;
     state.selectedComfyVersion = null;
+    updateComfyUpdateButton();
     renderTitleMeta();
     logComfyLine(`ComfyUI update check failed: ${err}`);
-  } finally {
-    state.comfyUpdateChecking = false;
-    updateComfyUpdateButton();
   }
 }
 
@@ -1534,14 +1496,13 @@ async function syncComfyInstallSelection(
 function renderPreflight(result) {
   if (!el.preflightList || !el.preflightSummary) return;
   const items = Array.isArray(result?.items) ? result.items : [];
-  const profileSummary = result?.torchProfileLabel ? `Profile: ${result.torchProfileLabel}.` : "";
   el.preflightList.innerHTML = "";
   if (!items.length) {
     const msg = document.createElement("div");
     msg.className = "empty-msg";
     msg.textContent = "No checks executed yet.";
     el.preflightList.appendChild(msg);
-    el.preflightSummary.textContent = profileSummary || "Not run yet.";
+    el.preflightSummary.textContent = "Not run yet.";
     state.comfyPreflightOk = null;
     return;
   }
@@ -1560,27 +1521,19 @@ function renderPreflight(result) {
   });
 
   state.comfyPreflightOk = Boolean(result?.ok);
-  const baseSummary = result?.summary || (state.comfyPreflightOk ? "Preflight passed." : "Preflight has issues.");
-  el.preflightSummary.textContent = profileSummary ? `${baseSummary} ${profileSummary}` : baseSummary;
+  el.preflightSummary.textContent = result?.summary || (state.comfyPreflightOk ? "Preflight passed." : "Preflight has issues.");
 }
 
 async function runComfyPreflight() {
   try {
     const request = buildComfyInstallRequest();
-    const profileLabel = torchProfileLabel(request.torchProfile);
-    logComfyLine(
-      state.comfyMode === "manage"
-        ? `Running preflight for the selected install using ${profileLabel}.`
-        : `Running preflight using ${profileLabel}.`,
-    );
     const result = await invoke("run_comfyui_preflight", { request });
-    renderPreflight({ ...result, torchProfileLabel: profileLabel });
+    renderPreflight(result);
     return result;
   } catch (err) {
     renderPreflight({
       ok: false,
       summary: "Preflight failed to run.",
-      torchProfileLabel: torchProfileLabel(el.comfyTorchProfile?.value || ""),
       items: [{ status: "fail", title: "Preflight runtime", detail: String(err) }],
     });
     return null;
@@ -1664,7 +1617,7 @@ async function startComfyInstall(forceFresh) {
 
 function applyComfyAddonRules() {
   const profile = String(el.comfyTorchProfile?.value || "").trim();
-  const nonCudaSelected = profile === "torch291_rocm64" || profile === "torch291_xpu";
+  const nonCudaSelected = profile === "torch291_rocm72" || profile === "torchxpu_nightly";
 
   if (el.addonSageAttention3) {
     const wasChecked = el.addonSageAttention3.checked;
@@ -1691,7 +1644,7 @@ function applyComfyAddonRules() {
   ].forEach((box) => {
     if (!box) return;
     const wasChecked = box.checked;
-    box.disabled = nonCudaSelected;
+    box.disabled = nonCudaSelected || box.disabled;
     if (nonCudaSelected && wasChecked) {
       box.checked = false;
     }
@@ -1894,6 +1847,16 @@ function renderOverallProgress() {
 
   el.overallProgress.classList.remove("hidden");
   el.overallProgressMeta.classList.remove("hidden");
+
+  const lead = active[0];
+  if (lead) {
+    const leadSize = Number(lead.size || 0);
+    const leadShown = leadSize > 0
+      ? Math.min(smoothedReceived(lead), leadSize)
+      : smoothedReceived(lead);
+    const leadPct = leadSize > 0 ? ` ${Math.round((leadShown / leadSize) * 100)}%` : "";
+    setProgress(`[${lead.kind || "download"}] ${lead.artifact || "file"}${leadPct}`);
+  }
 
   const known = active.filter((x) => Number(x.size || 0) > 0);
   if (!known.length) {
@@ -2170,19 +2133,6 @@ function setCatalogLoading(loading, message = "") {
   renderCatalogStatus();
 }
 
-function comfyTorchProfileOptionsForDetectedGpu() {
-  // Detection provides a recommendation, but users with mixed or passthrough
-  // GPU setups must always be able to choose the backend they intend to use.
-  return comfyTorchProfiles.map((item) => ({ ...item, disabled: false }));
-}
-
-function applyComfyTorchProfileOptions(selectedValue = null) {
-  if (!el.comfyTorchProfile) return;
-  const options = comfyTorchProfileOptionsForDetectedGpu();
-  setOptions(el.comfyTorchProfile, options, selectedValue);
-  updateRocmGuidedUi();
-}
-
 function switchTab(tab) {
   state.activeTab = tab;
   const comfyui = tab === "comfyui";
@@ -2358,11 +2308,21 @@ function formatRamGb(value) {
     : String(rounded.toFixed(1));
 }
 
-function ramTierForGb(gb) {
+function resolvedModelRamThresholds(model) {
+  const cfg = model?.ram_tier_thresholds || {};
+  return {
+    tier_a: Number.isFinite(Number(cfg.tier_a_min_gb)) ? Number(cfg.tier_a_min_gb) : 64,
+    tier_b: Number.isFinite(Number(cfg.tier_b_min_gb)) ? Number(cfg.tier_b_min_gb) : 32,
+    tier_c: Number.isFinite(Number(cfg.tier_c_min_gb)) ? Number(cfg.tier_c_min_gb) : 0,
+  };
+}
+
+function ramTierForGb(gb, thresholds = null) {
   const value = Number(gb);
   if (!Number.isFinite(value)) return "";
-  if (value >= 64) return "tier_a";
-  if (value >= 32) return "tier_b";
+  const mins = thresholds || { tier_a: 64, tier_b: 32, tier_c: 0 };
+  if (value >= Number(mins.tier_a || 64)) return "tier_a";
+  if (value >= Number(mins.tier_b || 32)) return "tier_b";
   return "tier_c";
 }
 
@@ -2396,12 +2356,12 @@ function selectedRamTierValue() {
   const selected = String(el.ramTier?.value || "").trim();
   if (!selected) {
     return Number.isFinite(state.detectedRamGb)
-      ? ramTierForGb(state.detectedRamGb)
+      ? ramTierForGb(state.detectedRamGb, ramThresholdsForDropdownContext())
       : state.detectedRamTier || "";
   }
   if (selected === "tier_a" || selected === "tier_b" || selected === "tier_c") return selected;
   const option = ramOptions.find((item) => item.id === selected);
-  return option ? ramTierForGb(option.gb) : "";
+  return option ? ramTierForGb(option.gb, ramThresholdsForDropdownContext()) : "";
 }
 
 function selectedVramTierValue() {
@@ -2411,15 +2371,53 @@ function selectedVramTierValue() {
   return vramOptions.find((item) => item.id === selected)?.tier || "";
 }
 
-function ramSizeRangeLabel(tierId) {
-  const mins = { tier_a: 64, tier_b: 32, tier_c: 0 };
+function customRamOptionLabel(tierId, thresholds) {
+  const mins = thresholds || { tier_a: 64, tier_b: 32, tier_c: 0 };
   if (tierId === "tier_a") {
-    return `${formatRamGb(mins.tier_a)} GB+`;
+    return `Tier A (${formatRamGb(mins.tier_a)} GB+)`;
   }
   if (tierId === "tier_b") {
-    return `${formatRamGb(mins.tier_b)}-${formatRamGb(mins.tier_a)} GB`;
+    return `Tier B (${formatRamGb(mins.tier_b)}-${formatRamGb(mins.tier_a)} GB)`;
   }
-  return `<${formatRamGb(mins.tier_b)} GB`;
+  return `Tier C (<${formatRamGb(mins.tier_b)} GB)`;
+}
+
+function hasCustomRamThresholds(model) {
+  const cfg = model?.ram_tier_thresholds || {};
+  return Number.isFinite(Number(cfg.tier_a_min_gb))
+    || Number.isFinite(Number(cfg.tier_b_min_gb))
+    || Number.isFinite(Number(cfg.tier_c_min_gb));
+}
+
+function ramThresholdKey(thresholds) {
+  if (!thresholds) return "";
+  return [
+    String(thresholds.tier_a),
+    String(thresholds.tier_b),
+    String(thresholds.tier_c),
+  ].join("::");
+}
+
+function sharedCustomRamThresholds(models) {
+  const entries = (Array.isArray(models) ? models : [])
+    .filter((model) => hasCustomRamThresholds(model))
+    .map((model) => resolvedModelRamThresholds(model));
+  if (!entries.length) return null;
+  const firstKey = ramThresholdKey(entries[0]);
+  return entries.every((entry) => ramThresholdKey(entry) === firstKey)
+    ? entries[0]
+    : null;
+}
+
+function ramThresholdsForDropdownContext() {
+  const selectedModels = selectedModelItems().map((item) => item.model).filter(Boolean);
+  const selectedShared = sharedCustomRamThresholds(selectedModels);
+  if (selectedShared) return selectedShared;
+
+  const filteredShared = sharedCustomRamThresholds(filteredModelsForCurrentSelection());
+  if (filteredShared) return filteredShared;
+
+  return null;
 }
 
 function updateRamTierOptions() {
@@ -2657,10 +2655,9 @@ function ramBucketLabel(tierId, artifact = null) {
     if (/^(Q[123]|FP[23]|INT[123])$/i.test(label)) return `Lowest memory use, most quality tradeoff (${label})`;
     return `Quantized, lower memory than full precision (${label})`;
   }
-  if (tierId === "tier_a") return "Highest quality option";
-  if (tierId === "tier_b") return "Balanced quality and memory use";
-  if (tierId === "tier_c") return "Lowest memory use";
-  return "";
+  const thresholds = ramThresholdsForDropdownContext();
+  if (!tierId) return "";
+  return customRamOptionLabel(tierId, thresholds);
 }
 
 function queueArtifactGroupLabel(group) {
@@ -2960,6 +2957,8 @@ function renderSelectedModelQueue() {
 
 function renderModelSelectionList() {
   if (!el.modelSelectionList) return;
+  const models = filteredModelsForCurrentSelection();
+  const tier = selectedVramTierValue();
   el.modelSelectionList.innerHTML = "";
 
   if (state.catalogLoading && !catalogHasContent()) {
@@ -2981,9 +2980,6 @@ function renderModelSelectionList() {
     renderSelectedModelQueue();
     return;
   }
-
-  const models = filteredModelsForCurrentSelection();
-  const tier = selectedVramTierValue();
 
   if (!String(el.modelFamily.value || "").trim() && !String(el.modelSearch?.value || "").trim()) {
     const empty = document.createElement("div");
@@ -3309,7 +3305,7 @@ async function bootstrap() {
   state.settings = settings;
   state.catalog = catalog;
 
-  state.appVersion = settings?.last_installed_version || "0.1.0";
+  state.appVersion = settings?.last_installed_version || state.appVersion || "";
   state.titleSystemText = "Loading system info...";
   renderAppVersionTag();
   renderTitleMeta();
@@ -3318,36 +3314,28 @@ async function bootstrap() {
       .then((snapshot) => {
         const ramRaw = Number(snapshot.total_ram_gb);
         const ramGb = Number.isFinite(ramRaw) ? (ramRaw > 1000 ? ramRaw / 1000 : ramRaw) : null;
-        const ramText = `${ramGb != null ? ramGb.toFixed(1) : "?"} GB RAM`;
         state.detectedRamGb = ramGb;
         state.detectedRamTier = normalizeRamTier(snapshot.ram_tier);
         state.detectedVramTier = vramTierForMb(snapshot.nvidia_gpu_vram_mb);
-        renderModelSelectionList();
+        const ramText = `${ramGb != null ? ramGb.toFixed(1) : "?"} GB RAM`;
         const amdGpu = String(snapshot.amd_gpu_name || "").trim();
         const nvidiaGpu = String(snapshot.nvidia_gpu_name || "").trim();
         const intelGpu = String(snapshot.intel_gpu_name || "").trim();
         state.comfyDetectedGpuVendor = nvidiaGpu ? "nvidia" : (amdGpu ? "amd" : (intelGpu ? "intel" : ""));
-        const detectedGpus = [];
-        if (nvidiaGpu) {
-          const vram = formatVramMbToGb(snapshot.nvidia_gpu_vram_mb);
-          detectedGpus.push(`NVIDIA: ${nvidiaGpu}${vram ? ` (${vram})` : ""}`);
-        }
-        if (amdGpu) detectedGpus.push(`AMD: ${amdGpu}`);
-        if (intelGpu) detectedGpus.push(`Intel: ${intelGpu}`);
-        const gpuText = detectedGpus.length ? detectedGpus.join(" + ") : "GPU: Not detected";
+        const gpuText = nvidiaGpu
+          ? `${nvidiaGpu}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
+          : (amdGpu
+            ? `AMD GPU: ${amdGpu}`
+            : (intelGpu
+              ? `Intel GPU: ${intelGpu}`
+              : "GPU: Not detected"));
         state.appVersion = snapshot.version || state.appVersion;
         state.titleSystemText = `${ramText}${DOT_SEP}${gpuText}`;
         applyComfyTorchProfileOptions(el.comfyTorchProfile?.value || null);
         applyComfyAddonRules();
-        updateRocmGuidedUi();
-        if ((amdGpu || intelGpu
-          || String(el.comfyTorchProfile?.value || "").trim() === "torch291_rocm64"
-          || String(el.comfyTorchProfile?.value || "").trim() === "torch291_xpu") && !state.rocmGuidedStatus) {
-          refreshRocmGuidedStatus(false).catch(() => {});
-        }
         renderAppVersionTag();
         renderTitleMeta();
-        if ((snapshot.gpu_detection_pending || (!amdGpu && !nvidiaGpu && !intelGpu)) && attempt < 8) {
+        if (!amdGpu && !nvidiaGpu && !intelGpu && attempt < 8) {
           setTimeout(() => refreshSnapshot(attempt + 1), 600);
         }
       })
@@ -3407,7 +3395,7 @@ async function bootstrap() {
     el.flagDisableSmartMemory.checked = settings.comfyui_disable_smart_memory_enabled === true;
   }
   if (el.comfyCustomLaunchArgs) {
-    el.comfyCustomLaunchArgs.value = settings.comfyui_custom_launch_args || "";
+    el.comfyCustomLaunchArgs.value = String(settings.comfyui_custom_launch_args || "");
   }
   if (el.comfyShowRuntimeLogs) {
     el.comfyShowRuntimeLogs.checked = settings.comfyui_show_runtime_logs !== false;
@@ -3421,43 +3409,49 @@ async function bootstrap() {
   if (
     savedTorchProfile
     && comfyTorchProfiles.some((x) => x.value === savedTorchProfile)
+    && state.comfyDetectedGpuVendor !== "amd"
+    && state.comfyDetectedGpuVendor !== "intel"
   ) {
     el.comfyTorchProfile.value = savedTorchProfile;
     state.comfyTorchProfileLocked = true;
   }
-  updateRocmGuidedUi();
 
   const refreshRecommendation = (attempt = 0) => {
     invoke("get_comfyui_install_recommendation")
       .then((reco) => {
         const recoReason = String(reco.reason || "").toLowerCase();
-        state.comfyTorchRecommendedBase = recoReason.includes("detected amd gpu")
-          ? "Detected AMD GPU. Auto-selected 'Torch 2.9.1 + ROCm 6.4'."
-          : (recoReason.includes("detected intel gpu")
-            ? "Detected Intel GPU. Auto-selected 'Torch 2.9.1 + XPU'."
-          : (recoReason.includes("non-nvidia")
-            ? "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected."
-            : `Recommended '${reco.torch_label}' for your GPU`));
+        state.comfyTorchRecommendedBase = recoReason.includes("supported amd gpu")
+          ? "Detected supported AMD GPU. Auto-selected 'Torch 2.9.1 + ROCm SDK 7.2'."
+          : (recoReason.includes("detected amd gpu")
+            ? "Detected AMD GPU. Windows ROCm support is limited to specific Radeon and Ryzen AI hardware."
+            : (recoReason.includes("detected intel gpu")
+              ? "Detected Intel GPU. Auto-selected 'PyTorch XPU Nightly'."
+              : `Recommended '${reco.torch_label}' for your GPU`));
         setTorchRecommendedDetecting(false);
         state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
         if (
           comfyTorchProfiles.some((x) => x.value === reco.torch_profile)
-          && !state.comfyTorchProfileLocked
+          && ((state.comfyDetectedGpuVendor === "amd" || state.comfyDetectedGpuVendor === "intel") || !state.comfyTorchProfileLocked)
         ) {
           applyComfyTorchProfileOptions(reco.torch_profile);
-          el.comfyTorchProfile.value = reco.torch_profile;
+          if (state.comfyDetectedGpuVendor !== "amd" && state.comfyDetectedGpuVendor !== "intel") {
+            el.comfyTorchProfile.value = reco.torch_profile;
+          }
         }
         applyComfyAddonRules();
-        if ((reco.detection_pending || !reco.gpu_name) && attempt < 8) {
+        if (!reco.gpu_name && attempt < 8) {
           setTimeout(() => refreshRecommendation(attempt + 1), 600);
         }
       })
       .catch((err) => {
-        state.comfyTorchRecommendedBase = "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected.";
+        state.comfyTorchRecommendedBase = "Recommended 'Torch 2.8.0 + cu128' for your GPU";
         setTorchRecommendedDetecting(false);
         if (state.comfyDetectedGpuVendor === "amd") {
-          applyComfyTorchProfileOptions("torch291_rocm64");
-          el.comfyTorchProfile.value = "torch291_rocm64";
+          applyComfyTorchProfileOptions("torch291_rocm72");
+          el.comfyTorchProfile.value = "torch291_rocm72";
+        } else if (state.comfyDetectedGpuVendor === "intel") {
+          applyComfyTorchProfileOptions("torchxpu_nightly");
+          el.comfyTorchProfile.value = "torchxpu_nightly";
         } else if (!state.comfyTorchProfileLocked) {
           el.comfyTorchProfile.value = "torch280_cu128";
         }
@@ -3658,6 +3652,10 @@ el.chooseRoot.addEventListener("click", async () => {
   }
 });
 
+el.comfyRoot?.addEventListener("input", () => {
+  refreshEffectiveDownloadDestination().catch(() => {});
+});
+
 el.saveRootLora.addEventListener("click", async () => {
   try {
     await invoke("set_comfyui_root", { comfyuiRoot: el.comfyRootLora.value });
@@ -3666,7 +3664,6 @@ el.saveRootLora.addEventListener("click", async () => {
       el.comfyRootWorkflow.value = el.comfyRootLora.value;
     }
     await loadInstalledAddonState(el.comfyRoot.value);
-    await refreshEffectiveDownloadDestination();
     const original = el.saveRootLora.textContent;
     el.saveRootLora.textContent = "Saved";
     el.saveRootLora.disabled = true;
@@ -3691,7 +3688,6 @@ el.chooseRootLora.addEventListener("click", async () => {
     }
     logLine("ComfyUI folder selected.");
     await loadInstalledAddonState(selected);
-    await refreshEffectiveDownloadDestination();
   } catch (err) {
     logLine(`Choose folder failed: ${err}`);
   }
@@ -3703,7 +3699,6 @@ el.saveRootWorkflow?.addEventListener("click", async () => {
     el.comfyRoot.value = el.comfyRootWorkflow.value;
     el.comfyRootLora.value = el.comfyRootWorkflow.value;
     await loadInstalledAddonState(el.comfyRoot.value);
-    await refreshEffectiveDownloadDestination();
     const original = el.saveRootWorkflow.textContent;
     el.saveRootWorkflow.textContent = "Saved";
     el.saveRootWorkflow.disabled = true;
@@ -3726,7 +3721,6 @@ el.chooseRootWorkflow?.addEventListener("click", async () => {
     el.comfyRootLora.value = selected;
     logLine("ComfyUI folder selected.");
     await loadInstalledAddonState(selected);
-    await refreshEffectiveDownloadDestination();
   } catch (err) {
     logLine(`Choose folder failed: ${err}`);
   }
@@ -3825,15 +3819,6 @@ el.comfyExtraModelRoot?.addEventListener("change", async () => {
   await refreshEffectiveDownloadDestination();
 });
 
-el.comfyTorchProfile?.addEventListener("change", async () => {
-  state.comfyTorchProfileLocked = true;
-  applyComfyAddonRules();
-  updateRocmGuidedUi();
-  if (["torch291_rocm64", "torch291_xpu"].includes(String(el.comfyTorchProfile.value || "").trim())) {
-    await refreshRocmGuidedStatus(false);
-  }
-});
-
 el.comfyMode?.addEventListener("change", async () => {
   state.comfyMode = el.comfyMode.value === "manage" ? "manage" : "install";
   if (state.comfyMode !== "manage") {
@@ -3841,12 +3826,12 @@ el.comfyMode?.addEventListener("change", async () => {
     const savedTorchProfile = String(state.settings?.comfyui_torch_profile || "").trim();
     if (state.comfyDetectedGpuVendor === "amd") {
       state.comfyTorchProfileLocked = false;
-      applyComfyTorchProfileOptions("torch291_rocm64");
-      el.comfyTorchProfile.value = "torch291_rocm64";
+      applyComfyTorchProfileOptions("torch291_rocm72");
+      el.comfyTorchProfile.value = "torch291_rocm72";
     } else if (state.comfyDetectedGpuVendor === "intel") {
       state.comfyTorchProfileLocked = false;
-      applyComfyTorchProfileOptions("torch291_xpu");
-      el.comfyTorchProfile.value = "torch291_xpu";
+      applyComfyTorchProfileOptions("torchxpu_nightly");
+      el.comfyTorchProfile.value = "torchxpu_nightly";
     } else {
       applyComfyTorchProfileOptions(savedTorchProfile || "torch280_cu128");
       if (savedTorchProfile && comfyTorchProfiles.some((x) => x.value === savedTorchProfile)) {
@@ -3857,7 +3842,6 @@ el.comfyMode?.addEventListener("change", async () => {
       }
     }
     applyComfyAddonRules();
-    updateRocmGuidedUi();
     if (el.comfyExtraModelRoot) {
       el.comfyExtraModelRoot.value = state.sharedModelsRootDefault || "";
     }
@@ -3973,6 +3957,7 @@ el.updateSelectedInstall?.addEventListener("click", async () => {
     if (result) {
       logComfyLine(String(result));
     }
+    comfyUpdateStatusCache.delete(normalizeSlashes(selectedRoot));
     await refreshComfyUiUpdateStatus(selectedRoot);
     await loadInstalledAddonState(selectedRoot);
   } catch (err) {
@@ -4038,33 +4023,39 @@ el.flagDisableSmartMemory?.addEventListener("change", () => {
   applyComponentToggleFromCheckbox(el.flagDisableSmartMemory, "launch_disable_smart_memory", "--disable-smart-memory")
     .catch((err) => logComfyLine(String(err)));
 });
-el.rocmGuidedCheck?.addEventListener("click", async () => {
-  await refreshRocmGuidedStatus(true);
-});
-el.rocmGuidedInstall?.addEventListener("click", async () => {
-  const target = currentGuidedAccelTarget();
-  if (!target) return;
-  state.rocmGuidedBusy = true;
-  updateRocmGuidedUi();
-  logComfyLine(`Starting guided ${target.logPrefix} setup...`);
-  await new Promise((resolve) => {
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(resolve);
-    });
-  });
+el.saveComfyCustomLaunchArgs?.addEventListener("click", async () => {
   try {
-    const status = await invoke(target.installCommand);
-    state.rocmGuidedStatus = status ? { ...status, target: target.key } : null;
-    if (status?.detail) {
-      logComfyLine(`${target.logPrefix} guided setup: ${status.detail}`);
+    state.settings = await invoke("set_comfyui_custom_launch_args", {
+      customLaunchArgs: String(el.comfyCustomLaunchArgs?.value || ""),
+    });
+    if (el.comfyCustomLaunchArgs) {
+      el.comfyCustomLaunchArgs.value = String(state.settings?.comfyui_custom_launch_args || "");
     }
-    await refreshRocmGuidedStatus(false);
+    logComfyLine("Custom launch args saved.");
   } catch (err) {
-    logComfyLine(`${target.logPrefix} guided setup failed: ${err}`);
-    await refreshRocmGuidedStatus(false);
-  } finally {
-    state.rocmGuidedBusy = false;
-    updateRocmGuidedUi();
+    logComfyLine(`Saving custom launch args failed: ${err}`);
+  }
+});
+el.clearComfyCustomLaunchArgs?.addEventListener("click", async () => {
+  try {
+    state.settings = await invoke("set_comfyui_custom_launch_args", { customLaunchArgs: "" });
+    if (el.comfyCustomLaunchArgs) {
+      el.comfyCustomLaunchArgs.value = "";
+    }
+    logComfyLine("Custom launch args cleared.");
+  } catch (err) {
+    logComfyLine(`Clearing custom launch args failed: ${err}`);
+  }
+});
+el.comfyShowRuntimeLogs?.addEventListener("change", async () => {
+  const enabled = el.comfyShowRuntimeLogs.checked;
+  try {
+    state.settings = await invoke("set_comfyui_show_runtime_logs", { enabled });
+    el.comfyShowRuntimeLogs.checked = state.settings?.comfyui_show_runtime_logs !== false;
+    logComfyLine(el.comfyShowRuntimeLogs.checked ? "Runtime log streaming enabled." : "Runtime log streaming disabled.");
+  } catch (err) {
+    el.comfyShowRuntimeLogs.checked = !enabled;
+    logComfyLine(`Runtime log toggle failed: ${err}`);
   }
 });
 el.nodeComfyuiManager?.addEventListener("change", () => {
@@ -4092,7 +4083,9 @@ el.nodeComfyuiCrystools?.addEventListener("change", () => {
     .catch((err) => logComfyLine(String(err)));
 });
 el.comfyTorchProfile?.addEventListener("change", () => {
-  state.comfyTorchProfileLocked = true;
+  if (state.comfyDetectedGpuVendor !== "amd" && state.comfyDetectedGpuVendor !== "intel") {
+    state.comfyTorchProfileLocked = true;
+  }
   applyComfyAddonRules();
 });
 el.runPreflight?.addEventListener("click", () => {
@@ -4111,12 +4104,10 @@ el.comfyFreshBtn?.addEventListener("click", async () => {
 el.comfyClearInstallLog?.addEventListener("click", () => {
   if (el.comfyInstallLog) el.comfyInstallLog.textContent = "Ready";
 });
-
 el.comfyClearRuntimeLog?.addEventListener("click", () => {
   state.comfyRuntimeLogs = [];
   renderComfyRuntimeLogs();
 });
-
 el.comfyRuntimeLogFilter?.addEventListener("change", () => {
   renderComfyRuntimeLogs();
 });
@@ -4216,9 +4207,9 @@ el.checkUpdates.addEventListener("click", async () => {
     } else {
       state.updateAvailable = false;
       state.updateVersion = null;
-      el.updateStatus.textContent = result.notes ? "Managed externally" : "Up to date";
+      el.updateStatus.textContent = "Up to date";
       updateUpdateButton();
-      logLine(result.notes || "No updates available.");
+      logLine("No updates available.");
     }
   } catch (err) {
     state.updateAvailable = false;
@@ -4309,6 +4300,7 @@ async function initEventListeners() {
     const key = `${p.kind || "download"}:${p.index || "?"}:${p.artifact || "item"}`;
     const current = state.transfers.get(key) || {
       id: key,
+      kind: p.kind || "download",
       artifact: p.artifact || "artifact",
       phase: "started",
       received: 0,
@@ -4316,9 +4308,16 @@ async function initEventListeners() {
       folder: "",
     };
     current.phase = p.phase || current.phase;
+    if (p.kind) current.kind = p.kind;
     current.lastUpdateTs = Date.now();
     if (p.artifact) current.artifact = p.artifact;
-    if (p.received != null) current.received = Number(p.received);
+    if (p.received != null) {
+      const nextReceived = Number(p.received || 0);
+      const prevReceived = Number(current.received || 0);
+      current.received = Number.isFinite(nextReceived)
+        ? Math.max(prevReceived, nextReceived)
+        : prevReceived;
+    }
     if (p.phase === "started") {
       current.displayReceived = 0;
       current.displayTs = Date.now();
@@ -4330,11 +4329,6 @@ async function initEventListeners() {
     if (p.phase === "started") {
       setProgress(`[${p.kind}] ${p.index || "?"}/${p.total || "?"} ${p.artifact || ""}`);
     } else if (p.phase === "progress") {
-      const received = Number(p.received || 0);
-      const size = Number(p.size || 0);
-      const shownReceived = size > 0 ? Math.min(received, size) : received;
-      const pct = size > 0 ? ` ${Math.round((shownReceived / size) * 100)}%` : "";
-      setProgress(`[${p.kind}] ${p.artifact || ""}${pct}`);
       ensureProgressSmoother();
     } else if (p.phase === "failed") {
       setProgress(`[${p.kind}] failed: ${p.message || "unknown error"}`);
@@ -4370,7 +4364,6 @@ async function initEventListeners() {
         state.updateInstalling = true;
         updateUpdateButton();
         el.updateStatus.textContent = "Installing update...";
-        showBlockingOverlay("App updating... It will close now. Please launch it again after update.");
       } else {
         el.updateStatus.textContent = `${p.phase}`;
       }
@@ -4455,9 +4448,10 @@ async function initEventListeners() {
 
     await listen("comfyui-runtime-log", (event) => {
       const p = event.payload || {};
-      const text = String(p.text || "").trimEnd();
-      if (!text) return;
-      logComfyRuntimeLine(text, String(p.stream || "stdout").trim() || "stdout");
+      const text = String(p.text || "").trim();
+      if (text) {
+        logComfyRuntimeLine(text, String(p.stream || "stdout").trim() || "stdout");
+      }
     });
   } catch (err) {
     logLine(`Event listener setup failed: ${err}`);
@@ -4659,10 +4653,6 @@ renderTransfers();
           } else {
             state.updateAvailable = false;
             state.updateVersion = null;
-            if (startup?.notes) {
-              el.updateStatus.textContent = "Managed externally";
-              logLine(startup.notes);
-            }
             updateUpdateButton();
           }
         })

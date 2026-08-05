@@ -1,11 +1,15 @@
-﻿# Arctic ComfyUI Helper (Private Technical README)
+﻿# Arctic ComfyUI Helper (Technical README)
 
-This repository (`ArcticDownloader-lin`) is the private/source repo for the Linux app.
+This is the canonical source repository for both the Linux and Windows apps.
+Platform code is selected at compile time, so normal development happens from one checkout.
 
 Public release repo: `https://github.com/ArcticLatent/Arctic-Helper`
 
 `README.public.md` is the public-facing README template for the release repo.
 This file (`README.md`) is the internal technical reference.
+
+See [Cross-platform development](docs/cross-platform-development.md) for the NixOS workflow,
+Windows checks, CI releases, and the remaining consolidation plan.
 
 ## Product Scope
 
@@ -24,8 +28,12 @@ Flatpak/Linux-specific UI/admin bits are intentionally not part of this app.
 - Core crate: `Cargo.toml` + `src/`
   - Shared services: catalog/config/download/updater/app context
 - Desktop shell: `src-tauri/`
-  - Tauri commands and Windows integration in `src-tauri/src/main.rs`
-  - Frontend files in `src-tauri/dist/` (`index.html`, `main.js`, `style.css`)
+  - Target selector: `src-tauri/src/main.rs`
+  - Linux backend: `src-tauri/src/app_linux.rs`
+  - Windows backend: `src-tauri/src/app_windows.rs`
+  - Linux frontend: `src-tauri/dist/`
+  - Windows frontend: `src-tauri/dist-windows/`
+  - Windows config overlay: `src-tauri/tauri.windows.conf.json`
 
 Key identifiers and branding:
 - App ID: `io.github.ArcticHelper`
@@ -145,7 +153,25 @@ If Windows still shows old icon after changing `.ico`, clear icon cache and rebu
 
 ## Development Commands
 
-From repository root:
+Linux/NixOS, from the repository root:
+
+```bash
+nix develop
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo tauri dev
+```
+
+Cross-check the Windows target without leaving NixOS:
+
+```bash
+nix develop .#windows
+./scripts/check-windows.sh
+```
+
+The cross-check catches Rust and Tauri compile errors. Native Windows CI remains the
+authority for Windows builds and artifacts because it runs on `windows-latest`.
+
+On a native Windows machine, if interactive testing is needed:
 
 ```powershell
 # dev run
@@ -179,7 +205,17 @@ Release binary output:
 
 ## Automated Release Flow
 
-Use one command:
+Windows releases are built from this repository by
+`.github/workflows/release-windows.yml` on a native GitHub Windows runner. Configure:
+
+- `ARCTIC_RELEASE_TOKEN` with Contents: write access to `ArcticLatent/Arctic-Helper`
+- `ARCTIC_SUPABASE_URL`
+- `ARCTIC_SUPABASE_PUBLISHABLE_KEY`
+
+Tagging `vX.Y.Z` builds `Arctic-ComfyUI-Helper.exe`, verifies `update.json`, stores a
+workflow artifact, and uploads both files to the public release repository.
+
+The local PowerShell flow remains available for emergency/native Windows releases:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\release.ps1

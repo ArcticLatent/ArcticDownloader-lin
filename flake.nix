@@ -22,9 +22,24 @@
         meta.description = "Run Arctic ComfyUI Helper";
       };
 
-      devShells.${system}.default = pkgs.mkShell {
-        inputsFrom = [ self.packages.${system}.default ];
-        packages = with pkgs; [ cargo rustc rustfmt clippy ];
+      devShells.${system} = {
+        default = pkgs.mkShell {
+          inputsFrom = [ self.packages.${system}.default ];
+          packages = with pkgs; [ cargo rustc rustfmt clippy cargo-tauri ];
+        };
+
+        # Windows cross-check shell for Linux/NixOS developers. The actual
+        # release is still built by a native Windows GitHub Actions runner.
+        windows = pkgs.mkShell {
+          packages = with pkgs; [
+            rustup
+            cargo-xwin
+            clang
+            lld
+            llvm
+            cacert
+          ];
+        };
       };
     };
 }

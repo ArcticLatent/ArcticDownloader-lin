@@ -5,9 +5,9 @@ use reqwest::Client;
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+#[cfg(not(target_os = "windows"))]
+use std::{ffi::OsStr, io::IsTerminal};
 use std::{
-    ffi::OsStr,
-    io::IsTerminal,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -18,6 +18,9 @@ const DEFAULT_UPDATE_MANIFEST_URL: &str =
 const DEFAULT_LINUX_RELEASE_MANIFEST_URL: &str =
     "https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/linux-release.json";
 const UPDATE_CACHE_DIR: &str = "updates";
+#[cfg(target_os = "windows")]
+const FALLBACK_PACKAGE_NAME: &str = "Arctic-ComfyUI-Helper.exe";
+#[cfg(not(target_os = "windows"))]
 const FALLBACK_PACKAGE_NAME: &str = "ArcticDownloader-lin-update.bin";
 
 #[derive(Clone, Debug)]
@@ -43,6 +46,7 @@ struct UpdateManifest {
     notes: Option<String>,
 }
 
+#[cfg(not(target_os = "windows"))]
 #[derive(Debug, Deserialize)]
 struct LinuxReleaseManifest {
     version: String,
@@ -53,6 +57,7 @@ struct LinuxReleaseManifest {
     assets: Vec<LinuxReleaseAsset>,
 }
 
+#[cfg(not(target_os = "windows"))]
 #[derive(Debug, Deserialize)]
 struct LinuxReleaseAsset {
     name: String,
@@ -270,28 +275,39 @@ async fn fetch_manifest(client: &Client, url: &str) -> Result<UpdateManifest> {
         .context("failed to fetch update manifest")?
         .error_for_status()
         .context("update manifest request returned error status")?;
-    let bytes = response
-        .bytes()
-        .await
-        .context("failed to read update manifest bytes")?;
-
-    if let Ok(legacy) = serde_json::from_slice::<UpdateManifest>(&bytes) {
-        return Ok(legacy);
+    #[cfg(target_os = "windows")]
+    {
+        response
+            .json::<UpdateManifest>()
+            .await
+            .context("failed to parse update manifest JSON")
     }
 
-    let linux = serde_json::from_slice::<LinuxReleaseManifest>(&bytes)
-        .context("failed to parse update manifest JSON (legacy and linux-release formats)")?;
-    let asset = select_linux_release_asset(&linux)
-        .context("no compatible Linux package artifact found in linux-release manifest")?;
-    let download_url = asset.download_url.clone();
-    let sha256 = asset.sha256.to_ascii_lowercase();
-    let asset_name = asset.name.clone();
-    Ok(UpdateManifest {
-        version: linux.version,
-        download_url,
-        sha256,
-        notes: Some(format!("Selected Linux package asset: {asset_name}")),
-    })
+    #[cfg(not(target_os = "windows"))]
+    {
+        let bytes = response
+            .bytes()
+            .await
+            .context("failed to read update manifest bytes")?;
+
+        if let Ok(legacy) = serde_json::from_slice::<UpdateManifest>(&bytes) {
+            return Ok(legacy);
+        }
+
+        let linux = serde_json::from_slice::<LinuxReleaseManifest>(&bytes)
+            .context("failed to parse update manifest JSON (legacy and linux-release formats)")?;
+        let asset = select_linux_release_asset(&linux)
+            .context("no compatible Linux package artifact found in linux-release manifest")?;
+        let download_url = asset.download_url.clone();
+        let sha256 = asset.sha256.to_ascii_lowercase();
+        let asset_name = asset.name.clone();
+        Ok(UpdateManifest {
+            version: linux.version,
+            download_url,
+            sha256,
+            notes: Some(format!("Selected Linux package asset: {asset_name}")),
+        })
+    }
 }
 
 fn installer_file_name(url: &str) -> Option<String> {
@@ -301,10 +317,75 @@ fn installer_file_name(url: &str) -> Option<String> {
         .filter(|name| !name.trim().is_empty())
 }
 
+#[cfg(target_os = "windows")]
 async fn run_install_command(path: &Path) -> Result<()> {
-    let path = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let current_exe = std::env::current_exe()
+        .context("failed to resolve current executable for post-update relaunch")?;
+    let helper_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("apply_update.cmd");
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    if ext.as_deref() != Some("exe") {
+        bail!(
+            "unsupported update package type for Windows updater: {:?} (expected .exe)",
+            path
+        );
+    }
+
+    let downloaded_exe = quote_for_cmd(path);
+    let executable = quote_for_cmd(&current_exe);
+    let script = format!(
+        "@echo off\r\n\
+         setlocal\r\n\
+         set \"NEW_EXE={downloaded_exe}\"\r\n\
+         set \"CURRENT_EXE={executable}\"\r\n\
+         set /a RETRIES=0\r\n\
+         timeout /t 2 /nobreak >nul\r\n\
+         :retry_copy\r\n\
+         copy /Y \"%NEW_EXE%\" \"%CURRENT_EXE%\" >nul 2>nul\r\n\
+         if errorlevel 1 (\r\n\
+           set /a RETRIES+=1\r\n\
+           if %RETRIES% GEQ 60 goto fail\r\n\
+           timeout /t 1 /nobreak >nul\r\n\
+           goto retry_copy\r\n\
+         )\r\n\
+         start \"\" \"%CURRENT_EXE%\"\r\n\
+         endlocal\r\n\
+         del /f /q \"%~f0\" >nul 2>nul\r\n\
+         goto :eof\r\n\
+         :fail\r\n\
+         endlocal\r\n"
+    );
+
+    fs::write(&helper_path, script)
+        .await
+        .with_context(|| format!("failed to write update helper script {:?}", helper_path))?;
+
+    Command::new("cmd")
+        .arg("/C")
+        .arg("start")
+        .arg("")
+        .arg("/MIN")
+        .arg(&helper_path)
+        .spawn()
+        .with_context(|| format!("failed to launch update helper script {:?}", helper_path))?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn quote_for_cmd(path: &Path) -> String {
+    path.to_string_lossy().replace('"', "\"\"")
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn run_install_command(path: &Path) -> Result<()> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let file_name = path
         .file_name()
         .and_then(OsStr::to_str)
@@ -325,7 +406,10 @@ async fn run_install_command(path: &Path) -> Result<()> {
         return Ok(());
     }
     if file_name.ends_with(".src.rpm") {
-        bail!("Refusing to auto-install source RPM update package: {}", path.display());
+        bail!(
+            "Refusing to auto-install source RPM update package: {}",
+            path.display()
+        );
     }
     if file_name.ends_with(".rpm") {
         if let Err(err) = run_privileged_install("dnf", &["install", "-y", &file_arg]).await {
@@ -340,8 +424,7 @@ async fn run_install_command(path: &Path) -> Result<()> {
         return Ok(());
     }
     if file_name.contains(".pkg.tar") {
-        if let Err(err) =
-            run_privileged_install("pacman", &["-U", "--noconfirm", &file_arg]).await
+        if let Err(err) = run_privileged_install("pacman", &["-U", "--noconfirm", &file_arg]).await
         {
             bail!(
                 "Update downloaded, but automatic install failed.\n\
@@ -360,6 +443,7 @@ async fn run_install_command(path: &Path) -> Result<()> {
     )
 }
 
+#[cfg(not(target_os = "windows"))]
 async fn run_privileged_install(program: &str, args: &[&str]) -> Result<()> {
     let mut attempts: Vec<String> = Vec::new();
 
@@ -379,7 +463,10 @@ async fn run_privileged_install(program: &str, args: &[&str]) -> Result<()> {
         Err(err) => attempts.push(format!("sudo {} => {err}", sudo_non_interactive.join(" "))),
     }
 
-    if run_install_command_direct("pkexec", &[program]).await.is_ok() {
+    if run_install_command_direct("pkexec", &[program])
+        .await
+        .is_ok()
+    {
         // Defensive noop for weird pkexec policies that reject direct no-arg checks.
     }
     let mut pkexec_args = vec![program];
@@ -412,17 +499,21 @@ async fn run_privileged_install(program: &str, args: &[&str]) -> Result<()> {
     );
 }
 
+#[cfg(not(target_os = "windows"))]
 fn can_use_interactive_sudo() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
+#[cfg(not(target_os = "windows"))]
 async fn run_install_command_direct(program: &str, args: &[&str]) -> Result<()> {
     let mut cmd = Command::new(program);
     cmd.args(args);
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| format!("failed to run install command: {program} {}", args.join(" ")))?;
+    let output = cmd.output().await.with_context(|| {
+        format!(
+            "failed to run install command: {program} {}",
+            args.join(" ")
+        )
+    })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -443,6 +534,7 @@ async fn run_install_command_direct(program: &str, args: &[&str]) -> Result<()> 
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 fn detect_linux_distro_family() -> String {
     let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
     let mut id = String::new();
@@ -461,7 +553,9 @@ fn detect_linux_distro_family() -> String {
         "arch".to_string()
     } else if haystack.contains("debian") || haystack.contains("ubuntu") {
         "debian".to_string()
-    } else if haystack.contains("fedora") || haystack.contains("rhel") || haystack.contains("centos")
+    } else if haystack.contains("fedora")
+        || haystack.contains("rhel")
+        || haystack.contains("centos")
     {
         "fedora".to_string()
     } else {
@@ -469,6 +563,7 @@ fn detect_linux_distro_family() -> String {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn select_linux_release_asset(manifest: &LinuxReleaseManifest) -> Option<&LinuxReleaseAsset> {
     let distro = detect_linux_distro_family();
     let arch = std::env::consts::ARCH.to_ascii_lowercase();
