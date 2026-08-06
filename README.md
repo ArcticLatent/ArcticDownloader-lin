@@ -29,10 +29,12 @@ Flatpak/Linux-specific UI/admin bits are intentionally not part of this app.
   - Shared services: catalog/config/download/updater/app context
 - Desktop shell: `src-tauri/`
   - Target selector: `src-tauri/src/main.rs`
+  - Shared API contracts: `src-tauri/src/contracts.rs`
+  - Compile-time platform adapter: `src-tauri/src/platform.rs`
+  - Shared backend commands: `src-tauri/src/shared.rs` + `src-tauri/src/shared/`
   - Linux backend: `src-tauri/src/app_linux.rs`
   - Windows backend: `src-tauri/src/app_windows.rs`
-  - Linux frontend: `src-tauri/dist/`
-  - Windows frontend: `src-tauri/dist-windows/`
+  - Shared Linux/Windows frontend: `src-tauri/dist/`
   - Windows config overlay: `src-tauri/tauri.windows.conf.json`
 
 Key identifiers and branding:

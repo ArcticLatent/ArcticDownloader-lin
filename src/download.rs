@@ -15,11 +15,11 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::Sender,
         Arc, OnceLock,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 use tokio::{
@@ -41,6 +41,8 @@ const IO_BUFFER_MAX: usize = 1024 * 1024;
 const ADAPTIVE_STEP_BYTES: u64 = 5 * 1024 * 1024;
 const ADAPTIVE_GROW_MBPS: f64 = 50.0;
 const ADAPTIVE_SHRINK_MBPS: f64 = 5.0;
+const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+const STREAM_RESUME_ATTEMPTS: usize = 3;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static HF_CLI_AVAILABLE: OnceLock<bool> = OnceLock::new();
@@ -115,6 +117,7 @@ pub enum DownloadSignal {
     },
     Failed {
         artifact: String,
+        index: usize,
         error: String,
     },
 }
@@ -174,52 +177,50 @@ impl DownloadManager {
             let artifacts = dedupe_artifacts(resolved.variant.artifacts);
             let total = artifacts.len();
 
-            let mut stream = futures::stream::iter(
-                artifacts
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, artifact)| {
-                        let download_clients = download_clients.clone();
-                        let comfy_root = comfy_root.clone();
-                        let model_folder = model_folder.clone();
-                        let progress = progress.clone();
-                        let cancel = cancel.clone();
-                        async move {
-                            if is_cancelled(cancel.as_ref()) {
-                                return Err(anyhow!("download cancelled by user"));
-                            }
-                            let artifact_name = artifact.file_name().to_string();
-                            let _ = progress.send(DownloadSignal::Started {
-                                artifact: artifact_name.clone(),
-                                index,
-                                total,
-                                size: artifact.size_bytes,
-                            });
+            let mut stream = futures::stream::iter(artifacts.into_iter().enumerate().map(
+                |(index, artifact)| {
+                    let download_clients = download_clients.clone();
+                    let comfy_root = comfy_root.clone();
+                    let model_folder = model_folder.clone();
+                    let progress = progress.clone();
+                    let cancel = cancel.clone();
+                    async move {
+                        if is_cancelled(cancel.as_ref()) {
+                            return Err(anyhow!("download cancelled by user"));
+                        }
+                        let artifact_name = artifact.file_name().to_string();
+                        let _ = progress.send(DownloadSignal::Started {
+                            artifact: artifact_name.clone(),
+                            index,
+                            total,
+                            size: artifact.size_bytes,
+                        });
 
-                            info!("Starting download: {}", artifact.file_name());
-                            match download_artifact(
-                                &download_clients,
-                                &comfy_root,
-                                &model_folder,
-                                &artifact,
-                                Some((progress.clone(), index, artifact_name.clone())),
-                                xet_enabled,
-                                cancel.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok(outcome) => Ok(outcome),
-                                Err(err) => {
-                                    let _ = progress.send(DownloadSignal::Failed {
-                                        artifact: artifact_name,
-                                        error: err.to_string(),
-                                    });
-                                    Err(err)
-                                }
+                        info!("Starting download: {}", artifact.file_name());
+                        match download_artifact(
+                            &download_clients,
+                            &comfy_root,
+                            &model_folder,
+                            &artifact,
+                            Some((progress.clone(), index, artifact_name.clone())),
+                            xet_enabled,
+                            cancel.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(outcome) => Ok(outcome),
+                            Err(err) => {
+                                let _ = progress.send(DownloadSignal::Failed {
+                                    artifact: artifact_name,
+                                    index,
+                                    error: format!("{err:#}"),
+                                });
+                                Err(err)
                             }
                         }
-                    }),
-            )
+                    }
+                },
+            ))
             .buffer_unordered(1);
 
             while let Some(result) = stream.next().await {
@@ -384,6 +385,7 @@ impl DownloadManager {
                         };
                         let _ = progress.send(DownloadSignal::Failed {
                             artifact: file_name.clone(),
+                            index: 0,
                             error: message.to_string(),
                         });
                         if fs::try_exists(&lora_dir).await.unwrap_or(false) {
@@ -398,7 +400,8 @@ impl DownloadManager {
 
                     let _ = progress.send(DownloadSignal::Failed {
                         artifact: file_name,
-                        error: err.to_string(),
+                        index: 0,
+                        error: format!("{err:#}"),
                     });
                     Err(err)
                 }
@@ -484,7 +487,10 @@ impl DownloadManager {
             }
             let url = workflow.workflow_json_url.trim().to_string();
             if url.is_empty() {
-                return Err(anyhow!("Workflow {} is missing workflow_json_url", workflow.id));
+                return Err(anyhow!(
+                    "Workflow {} is missing workflow_json_url",
+                    workflow.id
+                ));
             }
 
             let mut file_name = url
@@ -622,7 +628,9 @@ async fn download_artifact(
         .await
         .with_context(|| format!("failed to create directory {:?}", dest_dir))?;
 
-    let initial_file_name = artifact.file_name().to_string();
+    // Catalog data is first-party, but sanitize anyway so this name is safe
+    // to join onto `dest_dir` no matter where it originated.
+    let initial_file_name = sanitize_file_name(artifact.file_name());
     let mut dest_path = dest_dir.join(&initial_file_name);
 
     if fs::try_exists(&dest_path)
@@ -634,9 +642,7 @@ async fn download_artifact(
                 artifact: artifact_name.clone(),
                 index: *index,
                 size: Some(0),
-                folder: dest_path
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string()),
+                folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
             });
         }
         return Ok(DownloadOutcome {
@@ -674,14 +680,8 @@ async fn download_artifact(
             parsed.file_path
         );
         if xet_enabled && cli_available {
-            match download_via_hf_cli(
-                &parsed,
-                &dest_dir,
-                progress.clone(),
-                xet_size_hint,
-                cancel,
-            )
-            .await
+            match download_via_hf_cli(&parsed, &dest_dir, progress.clone(), xet_size_hint, cancel)
+                .await
             {
                 Ok(dest_path) => {
                     if let Some((sender, index, artifact_name)) = progress {
@@ -689,9 +689,7 @@ async fn download_artifact(
                             artifact: artifact_name,
                             index,
                             size: artifact.size_bytes,
-                            folder: dest_path
-                                .parent()
-                                .map(|p| p.to_string_lossy().to_string()),
+                            folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
                         });
                     }
                     return Ok(DownloadOutcome {
@@ -700,7 +698,9 @@ async fn download_artifact(
                         status: DownloadStatus::Downloaded,
                     });
                 }
-                Err(err) => return Err(err.context(format!("hf CLI/Xet download failed for {url}"))),
+                Err(err) => {
+                    return Err(err.context(format!("hf CLI/Xet download failed for {url}")))
+                }
             }
         }
     }
@@ -713,9 +713,7 @@ async fn download_artifact(
         .first()
         .ok_or_else(|| anyhow!("missing HTTP client for downloads"))?;
 
-    if let Ok(Some(metadata)) =
-        fetch_head_metadata(client, &url, None, &initial_file_name).await
-    {
+    if let Ok(Some(metadata)) = fetch_head_metadata(client, &url, None, &initial_file_name).await {
         if let Some(name) = metadata.file_name {
             final_file_name = name;
         }
@@ -734,9 +732,7 @@ async fn download_artifact(
                     artifact: artifact_name.clone(),
                     index: *index,
                     size: Some(0),
-                    folder: dest_path
-                        .parent()
-                        .map(|p| p.to_string_lossy().to_string()),
+                    folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
                 });
             }
             return Ok(DownloadOutcome {
@@ -755,7 +751,13 @@ async fn download_artifact(
         }
     }
 
-    if accept_ranges {
+    // A previous sequential stream is a contiguous prefix and can be resumed
+    // cheaply. Do not switch that file to the multipart path, which pre-sizes
+    // its temporary file and would otherwise erase the saved prefix.
+    let saved_tmp_path =
+        part_total.and_then(|total| find_resumable_tmp_path(&dest_dir, &final_file_name, total));
+
+    if accept_ranges && saved_tmp_path.is_none() {
         if let Some(total_size) = part_total {
             if total_size >= MULTIPART_MIN_BYTES {
                 let dest_path = download_ranged_to_file(
@@ -776,9 +778,7 @@ async fn download_artifact(
                         artifact: artifact_name.clone(),
                         index,
                         size: Some(total_size),
-                        folder: dest_path
-                            .parent()
-                            .map(|p| p.to_string_lossy().to_string()),
+                        folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
                     });
                 }
 
@@ -791,7 +791,7 @@ async fn download_artifact(
         }
     }
 
-    let response = client
+    let mut response = client
         .get(url.clone())
         .send()
         .await
@@ -806,8 +806,6 @@ async fn download_artifact(
     if final_file_name == initial_file_name {
         final_file_name = filename_from_headers(response.headers(), &initial_file_name);
     }
-    if accept_ranges {
-    }
     if final_file_name != initial_file_name {
         dest_path = dest_dir.join(&final_file_name);
         if fs::try_exists(&dest_path)
@@ -819,9 +817,7 @@ async fn download_artifact(
                     artifact: artifact_name.clone(),
                     index: *index,
                     size: Some(0),
-                    folder: dest_path
-                        .parent()
-                        .map(|p| p.to_string_lossy().to_string()),
+                    folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
                 });
             }
             return Ok(DownloadOutcome {
@@ -832,10 +828,75 @@ async fn download_artifact(
         }
     }
 
-    let tmp_path = unique_tmp_path(&dest_dir, &final_file_name);
-    let file = fs::File::create(&tmp_path)
+    let tmp_path = saved_tmp_path.unwrap_or_else(|| unique_tmp_path(&dest_dir, &final_file_name));
+    let mut received = fs::metadata(&tmp_path)
         .await
-        .with_context(|| format!("failed to create temporary file {:?}", tmp_path))?;
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let expected_size = content_length.or(artifact.size_bytes);
+    if expected_size.is_some_and(|total| received >= total) {
+        // A complete-looking partial file still needs the normal checksum and
+        // finalization path, so restart unless it is strictly smaller.
+        received = 0;
+    }
+
+    if received > 0 {
+        match client
+            .get(url.clone())
+            .header(header::RANGE, format!("bytes={received}-"))
+            .send()
+            .await
+        {
+            Ok(resumed) if resumed.status() == reqwest::StatusCode::PARTIAL_CONTENT => {
+                info!("Resuming {:?} at byte {}", tmp_path, received);
+                response = resumed;
+            }
+            Ok(resumed) => {
+                warn!(
+                    "Server rejected saved download resume at byte {} with status {}; restarting",
+                    received,
+                    resumed.status()
+                );
+                received = 0;
+            }
+            Err(err) => {
+                warn!("Saved download resume request failed ({err}); restarting");
+                received = 0;
+            }
+        }
+    }
+
+    let mut hasher = artifact.sha256.as_ref().map(|_| Sha256::new());
+    if received > 0 {
+        if let Some(hasher) = hasher.as_mut() {
+            let mut existing = fs::File::open(&tmp_path)
+                .await
+                .with_context(|| format!("failed to read partial file {:?}", tmp_path))?;
+            let mut hash_buffer = vec![0u8; IO_BUFFER_MAX];
+            loop {
+                let n = existing
+                    .read(&mut hash_buffer)
+                    .await
+                    .with_context(|| format!("failed hashing partial file {:?}", tmp_path))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&hash_buffer[..n]);
+            }
+        }
+    }
+
+    let file = if received > 0 {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&tmp_path)
+            .await
+            .with_context(|| format!("failed to reopen temporary file {:?}", tmp_path))?
+    } else {
+        fs::File::create(&tmp_path)
+            .await
+            .with_context(|| format!("failed to create temporary file {:?}", tmp_path))?
+    };
     let mut file = BufWriter::new(file);
 
     log::info!(
@@ -846,44 +907,115 @@ async fn download_artifact(
 
     let stream = response
         .bytes_stream()
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
+        .map_err(std::io::Error::other)
+        .boxed();
     let mut reader = StreamReader::new(stream);
-    let mut hasher = artifact.sha256.as_ref().map(|_| Sha256::new());
-    let mut received: u64 = 0;
     let mut buffer = vec![0u8; IO_BUFFER_INITIAL];
     let mut bytes_since = 0u64;
     let mut last_adjust = Instant::now();
+    let mut last_progress = Instant::now();
+    let mut resume_attempts = 0usize;
+
+    if received > 0 {
+        if let Some((sender, index, artifact_name)) = progress.as_ref() {
+            let _ = sender.send(DownloadSignal::Progress {
+                artifact: artifact_name.clone(),
+                index: *index,
+                received,
+                size: expected_size,
+            });
+        }
+    }
 
     loop {
         if is_cancelled(cancel) {
             fs::remove_file(&tmp_path).await.ok();
             return Err(anyhow!("download cancelled by user"));
         }
-        let n = match timeout(std::time::Duration::from_millis(500), reader.read(&mut buffer)).await {
-            Ok(Ok(n)) => n,
-            Ok(Err(err)) => return Err(err).with_context(|| format!("failed streaming {url}")),
-            Err(_) => continue,
+        let read_result = timeout(
+            std::time::Duration::from_millis(500),
+            reader.read(&mut buffer),
+        )
+        .await;
+
+        let retry_reason = match read_result {
+            Ok(Ok(0)) => {
+                let expected = content_length.or(artifact.size_bytes);
+                if expected.is_some_and(|total| received < total) {
+                    Some(format!(
+                        "stream ended early at {received} of {} bytes",
+                        expected.unwrap_or_default()
+                    ))
+                } else {
+                    break;
+                }
+            }
+            Ok(Ok(n)) => {
+                file.write_all(&buffer[..n])
+                    .await
+                    .with_context(|| format!("failed writing to {:?}", tmp_path))?;
+                received += n as u64;
+                last_progress = Instant::now();
+                if let Some(hasher) = hasher.as_mut() {
+                    hasher.update(&buffer[..n]);
+                }
+                bytes_since += n as u64;
+                adapt_buffer_size(&mut buffer, &mut bytes_since, &mut last_adjust);
+                if let Some((sender, index, artifact_name)) = progress.as_ref() {
+                    let _ = sender.send(DownloadSignal::Progress {
+                        artifact: artifact_name.clone(),
+                        index: *index,
+                        received,
+                        size: content_length.or(artifact.size_bytes),
+                    });
+                }
+                continue;
+            }
+            Ok(Err(err)) => Some(err.to_string()),
+            Err(_) if last_progress.elapsed() < STREAM_STALL_TIMEOUT => continue,
+            Err(_) => Some(format!(
+                "no data received for {} seconds",
+                STREAM_STALL_TIMEOUT.as_secs()
+            )),
         };
-        if n == 0 {
-            break;
+
+        if resume_attempts >= STREAM_RESUME_ATTEMPTS {
+            return Err(anyhow!(
+                "failed streaming {url} after {resume_attempts} resume attempts: {}",
+                retry_reason.unwrap_or_else(|| "unknown stream error".to_string())
+            ));
         }
-        file.write_all(&buffer[..n])
+
+        resume_attempts += 1;
+        let reason = retry_reason.unwrap_or_else(|| "unknown stream error".to_string());
+        warn!(
+            "Download stream interrupted at {} bytes (attempt {}/{}): {}",
+            received, resume_attempts, STREAM_RESUME_ATTEMPTS, reason
+        );
+        file.flush()
             .await
-            .with_context(|| format!("failed writing to {:?}", tmp_path))?;
-        received += n as u64;
-        if let Some(hasher) = hasher.as_mut() {
-            hasher.update(&buffer[..n]);
+            .with_context(|| format!("failed flushing {:?} before resume", tmp_path))?;
+        tokio::time::sleep(Duration::from_secs(1 << (resume_attempts - 1))).await;
+
+        let resumed = client
+            .get(url.clone())
+            .header(header::RANGE, format!("bytes={received}-"))
+            .send()
+            .await
+            .with_context(|| format!("failed resuming {url} at byte {received}"))?;
+        if resumed.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(anyhow!(
+                "failed streaming {url}: {reason}; server rejected resume at byte {received} with status {}",
+                resumed.status()
+            ));
         }
-        bytes_since += n as u64;
-        adapt_buffer_size(&mut buffer, &mut bytes_since, &mut last_adjust);
-        if let Some((sender, index, artifact_name)) = progress.as_ref() {
-            let _ = sender.send(DownloadSignal::Progress {
-                artifact: artifact_name.clone(),
-                index: *index,
-                received,
-                size: content_length.or(artifact.size_bytes),
-            });
-        }
+        reader = StreamReader::new(
+            resumed
+                .bytes_stream()
+                .map_err(std::io::Error::other)
+                .boxed(),
+        );
+        last_progress = Instant::now();
     }
 
     file.flush()
@@ -925,9 +1057,8 @@ async fn download_artifact(
                 status: DownloadStatus::SkippedExisting,
             });
         }
-        return Err(err).with_context(|| {
-            format!("failed to move {:?} to {:?}", tmp_path, dest_path)
-        });
+        return Err(err)
+            .with_context(|| format!("failed to move {:?} to {:?}", tmp_path, dest_path));
     }
 
     log::info!("Finished download: {:?}", dest_path);
@@ -937,9 +1068,7 @@ async fn download_artifact(
             artifact: artifact_name.clone(),
             index,
             size: content_length.or(artifact.size_bytes),
-            folder: dest_path
-                .parent()
-                .map(|p| p.to_string_lossy().to_string()),
+            folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
         });
     }
 
@@ -950,6 +1079,7 @@ async fn download_artifact(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_direct(
     clients: &[Client],
     url: &str,
@@ -967,9 +1097,7 @@ async fn download_direct(
 
     let mut xet_size_hint = None;
     if let Some(client) = clients.first() {
-        if let Ok(Some(metadata)) =
-            fetch_head_metadata(client, &url, auth_token, file_name).await
-        {
+        if let Ok(Some(metadata)) = fetch_head_metadata(client, &url, auth_token, file_name).await {
             xet_size_hint = metadata.content_length;
         }
     }
@@ -983,14 +1111,8 @@ async fn download_direct(
             parsed.file_path
         );
         if xet_enabled && cli_available {
-            match download_via_hf_cli(
-                &parsed,
-                dest_dir,
-                progress.clone(),
-                xet_size_hint,
-                cancel,
-            )
-            .await
+            match download_via_hf_cli(&parsed, dest_dir, progress.clone(), xet_size_hint, cancel)
+                .await
             {
                 Ok(path) => {
                     if let Some((sender, index, artifact_name)) = progress {
@@ -1003,7 +1125,9 @@ async fn download_direct(
                     }
                     return Ok(path);
                 }
-                Err(err) => return Err(err.context(format!("hf CLI/Xet download failed for {url}"))),
+                Err(err) => {
+                    return Err(err.context(format!("hf CLI/Xet download failed for {url}")))
+                }
             }
         }
     }
@@ -1048,9 +1172,7 @@ async fn download_direct(
                 artifact: artifact_name.clone(),
                 index,
                 size: Some(0),
-                folder: dest_path
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string()),
+                folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
             });
         }
         return Ok(dest_path);
@@ -1077,9 +1199,7 @@ async fn download_direct(
                         artifact: artifact_name.clone(),
                         index,
                         size: Some(total_size),
-                        folder: dest_path
-                            .parent()
-                            .map(|p| p.to_string_lossy().to_string()),
+                        folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
                     });
                 }
 
@@ -1118,9 +1238,6 @@ async fn download_direct(
     if final_file_name == file_name {
         final_file_name = filename_from_headers(response.headers(), file_name);
     }
-    if accept_ranges {
-    }
-
     let dest_path = dest_dir.join(&final_file_name);
     if fs::try_exists(&dest_path).await.unwrap_or(false) {
         if let Some((sender, index, artifact_name)) = progress {
@@ -1128,9 +1245,7 @@ async fn download_direct(
                 artifact: artifact_name.clone(),
                 index,
                 size: Some(0),
-                folder: dest_path
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string()),
+                folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
             });
         }
         return Ok(dest_path);
@@ -1145,9 +1260,7 @@ async fn download_direct(
         .with_context(|| format!("failed to create temporary file {:?}", tmp_path))?;
     let mut file = BufWriter::new(file);
 
-    let stream = response
-        .bytes_stream()
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
+    let stream = response.bytes_stream().map_err(std::io::Error::other);
     let mut reader = StreamReader::new(stream);
     let mut received: u64 = 0;
     let mut buffer = vec![0u8; IO_BUFFER_INITIAL];
@@ -1193,12 +1306,7 @@ async fn download_direct(
         .with_context(|| format!("failed flushing {:?}", tmp_path))?;
     drop(file);
 
-    if looks_like_non_binary_payload(
-        content_type.as_deref(),
-        &sniff,
-        received,
-        &final_file_name,
-    ) {
+    if looks_like_non_binary_payload(content_type.as_deref(), &sniff, received, &final_file_name) {
         fs::remove_file(&tmp_path).await.ok();
         if url.contains("civitai.com") {
             if auth_token.is_some() {
@@ -1225,9 +1333,8 @@ async fn download_direct(
             fs::remove_file(&tmp_path).await.ok();
             return Ok(dest_path);
         }
-        return Err(err).with_context(|| {
-            format!("failed to move {:?} to {:?}", tmp_path, dest_path)
-        });
+        return Err(err)
+            .with_context(|| format!("failed to move {:?} to {:?}", tmp_path, dest_path));
     }
 
     if let Some((sender, index, artifact_name)) = progress {
@@ -1235,9 +1342,7 @@ async fn download_direct(
             artifact: artifact_name.clone(),
             index,
             size: content_length,
-            folder: dest_path
-                .parent()
-                .map(|p| p.to_string_lossy().to_string()),
+            folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
         });
     }
 
@@ -1380,6 +1485,7 @@ fn is_cancelled(cancel: Option<&CancellationToken>) -> bool {
     cancel.map(|token| token.is_cancelled()).unwrap_or(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_ranged_to_file(
     clients: &[Client],
     url: &str,
@@ -1423,15 +1529,20 @@ async fn download_ranged_to_file(
 
     let semaphore = Arc::new(Semaphore::new(CHUNK_CONCURRENCY));
     let received = Arc::new(AtomicU64::new(0));
+    let multipart_abort = CancellationToken::new();
+    let completed_chunks = Arc::new(
+        (0..ranges.len())
+            .map(|_| AtomicBool::new(false))
+            .collect::<Vec<_>>(),
+    );
     let artifact_name = progress.as_ref().map(|(_, _, name)| name.clone());
-    let total_size = total_size;
 
     let client_count = clients.len();
     if client_count == 0 {
         return Err(anyhow!("missing HTTP client for ranged download"));
     }
 
-    let tasks = futures::stream::iter(ranges.into_iter().enumerate()).map(|(idx, (start, end))| {
+    let tasks = futures::stream::iter(ranges.iter().copied().enumerate()).map(|(idx, (start, end))| {
         let tmp_path = tmp_path.clone();
         let semaphore = Arc::clone(&semaphore);
         let client = clients[idx % client_count].clone();
@@ -1439,9 +1550,14 @@ async fn download_ranged_to_file(
         let progress = progress.clone();
         let auth_token = auth_token.map(|token| token.to_string());
         let received = Arc::clone(&received);
+        let completed_chunks = Arc::clone(&completed_chunks);
+        let multipart_abort = multipart_abort.clone();
         let artifact_name = artifact_name.clone();
         let cancel = cancel.cloned();
         async move {
+            if multipart_abort.is_cancelled() {
+                return Err(anyhow!("multipart download stopped after another range failed"));
+            }
             if is_cancelled(cancel.as_ref()) {
                 return Err(anyhow!("download cancelled by user"));
             }
@@ -1472,13 +1588,14 @@ async fn download_ranged_to_file(
             file.seek(SeekFrom::Start(start))
                 .await
                 .with_context(|| format!("failed to seek in {:?}", tmp_path))?;
-            let stream = response
-                .bytes_stream()
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
+            let stream = response.bytes_stream().map_err(std::io::Error::other);
             let mut reader = StreamReader::new(stream);
             let mut buffer = vec![0u8; IO_BUFFER_INITIAL];
             let mut bytes_since = 0u64;
             let mut last_adjust = Instant::now();
+            let mut last_progress = Instant::now();
+            let expected_chunk_size = end - start + 1;
+            let mut chunk_received = 0u64;
 
             loop {
                 if is_cancelled(cancel.as_ref()) {
@@ -1494,16 +1611,28 @@ async fn download_ranged_to_file(
                     Ok(Err(err)) => {
                         return Err(err).with_context(|| format!("failed streaming {url}"));
                     }
-                    Err(_) => continue,
+                    Err(_) if last_progress.elapsed() < STREAM_STALL_TIMEOUT => continue,
+                    Err(_) => {
+                        return Err(anyhow!(
+                            "no data received for {} seconds while downloading bytes {start}-{end} from {url}",
+                            STREAM_STALL_TIMEOUT.as_secs()
+                        ));
+                    }
                 };
                 if n == 0 {
                     break;
                 }
+                if chunk_received + n as u64 > expected_chunk_size {
+                    return Err(anyhow!(
+                        "server sent more than the requested range {start}-{end} for {url}"
+                    ));
+                }
                 file.write_all(&buffer[..n])
                     .await
                     .with_context(|| format!("failed writing to {:?}", tmp_path))?;
-                let new_total =
-                    received.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+                chunk_received += n as u64;
+                last_progress = Instant::now();
+                let new_total = received.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
                 bytes_since += n as u64;
                 adapt_buffer_size(&mut buffer, &mut bytes_since, &mut last_adjust);
                 if let (Some((sender, index, _)), Some(name)) =
@@ -1518,13 +1647,56 @@ async fn download_ranged_to_file(
                 }
             }
 
+            if chunk_received != expected_chunk_size {
+                return Err(anyhow!(
+                    "range {start}-{end} ended early at {chunk_received} of {expected_chunk_size} bytes for {url}"
+                ));
+            }
+            file.flush()
+                .await
+                .with_context(|| format!("failed flushing range {start}-{end} to {:?}", tmp_path))?;
+            completed_chunks[idx].store(true, Ordering::Release);
+
             Ok::<_, anyhow::Error>(())
         }
     });
 
     let mut tasks = tasks.buffer_unordered(CHUNK_CONCURRENCY);
+    let mut download_error = None;
     while let Some(result) = tasks.next().await {
-        result?;
+        if let Err(err) = result {
+            if download_error.is_none() {
+                download_error = Some(err);
+                multipart_abort.cancel();
+            }
+        }
+    }
+
+    if let Some(err) = download_error {
+        let contiguous_chunks = completed_chunks
+            .iter()
+            .take_while(|complete| complete.load(Ordering::Acquire))
+            .count();
+        let resumable_bytes = std::cmp::min(total_size, contiguous_chunks as u64 * chunk_size);
+        if resumable_bytes > 0 && resumable_bytes < total_size {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(&tmp_path)
+                .await
+                .with_context(|| {
+                    format!("failed to preserve resumable prefix in {:?}", tmp_path)
+                })?;
+            file.set_len(resumable_bytes).await.with_context(|| {
+                format!("failed to truncate resumable prefix in {:?}", tmp_path)
+            })?;
+            warn!(
+                "Multipart download failed; preserved {} contiguous bytes in {:?} for resume",
+                resumable_bytes, tmp_path
+            );
+        } else {
+            fs::remove_file(&tmp_path).await.ok();
+        }
+        return Err(err);
     }
 
     if let Some(expected) = expected_sha {
@@ -1566,19 +1738,25 @@ async fn download_ranged_to_file(
             fs::remove_file(&tmp_path).await.ok();
             return Ok(dest_path);
         }
-        return Err(err).with_context(|| {
-            format!("failed to move {:?} to {:?}", tmp_path, dest_path)
-        });
+        return Err(err)
+            .with_context(|| format!("failed to move {:?} to {:?}", tmp_path, dest_path));
     }
 
     Ok(dest_path)
 }
 
 fn filename_from_headers(headers: &header::HeaderMap, fallback: &str) -> String {
+    // The filename in `Content-Disposition` is attacker-influenceable (it comes
+    // straight from the remote server/redirect target), so it must never be
+    // trusted to build a filesystem path on its own. `sanitize_file_name`
+    // strips path separators and drive-letter colons, which prevents both
+    // `../` traversal and absolute-path overwrites (`PathBuf::join` would
+    // otherwise happily replace the whole destination with an absolute path).
     headers
         .get(header::CONTENT_DISPOSITION)
         .and_then(|value| value.to_str().ok())
         .and_then(parse_content_disposition)
+        .map(|name| sanitize_file_name(&name))
         .unwrap_or_else(|| fallback.to_string())
 }
 
@@ -1606,10 +1784,7 @@ fn extract_civitai_model_version_id(url: &str) -> Option<u64> {
 
     if let Some(pos) = lower.find("modelversionid=") {
         let remainder = &url[pos + "modelversionid=".len()..];
-        let id_str = remainder
-            .split(|c| c == '&' || c == '#' || c == '/')
-            .next()
-            .unwrap_or_default();
+        let id_str = remainder.split(['&', '#', '/']).next().unwrap_or_default();
         if let Ok(id) = id_str.parse() {
             return Some(id);
         }
@@ -1617,10 +1792,7 @@ fn extract_civitai_model_version_id(url: &str) -> Option<u64> {
 
     if let Some(pos) = lower.find("/model-versions/") {
         let remainder = &url[pos + "/model-versions/".len()..];
-        let id_str = remainder
-            .split(|c| c == '?' || c == '/' || c == '&')
-            .next()
-            .unwrap_or_default();
+        let id_str = remainder.split(['?', '/', '&']).next().unwrap_or_default();
         if let Ok(id) = id_str.parse() {
             return Some(id);
         }
@@ -1628,10 +1800,7 @@ fn extract_civitai_model_version_id(url: &str) -> Option<u64> {
 
     if let Some(pos) = lower.find("/models/") {
         let remainder = &url[pos + "/models/".len()..];
-        let id_str = remainder
-            .split(|c| c == '?' || c == '/' || c == '&')
-            .next()
-            .unwrap_or_default();
+        let id_str = remainder.split(['?', '/', '&']).next().unwrap_or_default();
         if let Ok(id) = id_str.parse() {
             return Some(id);
         }
@@ -1657,6 +1826,125 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod filename_safety_tests {
+    use super::{
+        filename_from_headers, find_resumable_tmp_path, parse_content_disposition,
+        sanitize_file_name,
+    };
+    use reqwest::header::{HeaderMap, HeaderValue, CONTENT_DISPOSITION};
+    use std::{
+        fs,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn sanitize_file_name_strips_traversal_and_absolute_path_markers() {
+        // No path separators or drive-letter colons should survive, so the
+        // result is always safe to `Path::join` onto a destination dir.
+        assert_eq!(sanitize_file_name("../../etc/passwd"), ".._.._etc_passwd");
+        assert_eq!(sanitize_file_name("/etc/passwd"), "_etc_passwd");
+        assert_eq!(
+            sanitize_file_name(r"C:\Windows\System32\evil.dll"),
+            "C__Windows_System32_evil.dll"
+        );
+        assert_eq!(sanitize_file_name(r"..\..\evil.exe"), ".._.._evil.exe");
+    }
+
+    #[test]
+    fn sanitize_file_name_falls_back_when_nothing_but_separators() {
+        assert_eq!(sanitize_file_name("///"), "download");
+    }
+
+    #[test]
+    fn parse_content_disposition_reads_plain_filename() {
+        assert_eq!(
+            parse_content_disposition(r#"attachment; filename="model.safetensors""#),
+            Some("model.safetensors".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_content_disposition_reads_rfc5987_filename() {
+        assert_eq!(
+            parse_content_disposition("attachment; filename*=UTF-8''model.safetensors"),
+            Some("model.safetensors".to_string())
+        );
+    }
+
+    #[test]
+    fn filename_from_headers_sanitizes_a_traversal_attempt() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_static(r#"attachment; filename="../../../etc/passwd""#),
+        );
+
+        let resolved = filename_from_headers(&headers, "fallback.bin");
+
+        // The join must stay a direct child of dest_dir: no separators means
+        // no way to climb out of it or land on an absolute path.
+        let dest_dir = Path::new("/home/user/ComfyUI/models/checkpoints");
+        let dest_path = dest_dir.join(&resolved);
+        assert_eq!(dest_path.parent(), Some(dest_dir));
+        assert!(!resolved.contains('/') && !resolved.contains('\\'));
+    }
+
+    #[test]
+    fn filename_from_headers_sanitizes_an_absolute_path_attempt() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_static(r#"attachment; filename="/etc/passwd""#),
+        );
+
+        let resolved = filename_from_headers(&headers, "fallback.bin");
+        let dest_dir = Path::new("/home/user/ComfyUI/models/checkpoints");
+        let dest_path = dest_dir.join(&resolved);
+
+        // Before the fix, PathBuf::join with an absolute component would
+        // discard dest_dir entirely and resolve straight to "/etc/passwd".
+        assert_eq!(dest_path.parent(), Some(dest_dir));
+    }
+
+    #[test]
+    fn filename_from_headers_falls_back_without_content_disposition() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            filename_from_headers(&headers, "fallback.bin"),
+            "fallback.bin"
+        );
+    }
+
+    #[test]
+    fn resumable_tmp_path_prefers_the_largest_contiguous_partial() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after the Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "arctic-helper-resume-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temporary test directory should be created");
+
+        let smaller = dir.join("model.gguf.part.0");
+        let larger = dir.join("model.gguf.part.1");
+        fs::write(&smaller, vec![0_u8; 32]).expect("smaller partial should be written");
+        fs::write(&larger, vec![0_u8; 64]).expect("larger partial should be written");
+        fs::write(dir.join("another-model.gguf.part.0"), vec![0_u8; 96])
+            .expect("unrelated partial should be written");
+
+        assert_eq!(
+            find_resumable_tmp_path(&dir, "model.gguf", 128),
+            Some(larger)
+        );
+
+        fs::remove_dir_all(&dir).expect("temporary test directory should be removed");
+    }
+}
+
 fn normalize_folder_name(name: &str) -> String {
     let mut normalized = String::new();
     for ch in name.chars() {
@@ -1672,6 +1960,28 @@ fn normalize_folder_name(name: &str) -> String {
 fn unique_tmp_path(dest_dir: &Path, final_file_name: &str) -> PathBuf {
     let suffix = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     dest_dir.join(format!("{final_file_name}.part.{suffix}"))
+}
+
+fn find_resumable_tmp_path(
+    dest_dir: &Path,
+    final_file_name: &str,
+    total_size: u64,
+) -> Option<PathBuf> {
+    let prefix = format!("{final_file_name}.part.");
+    std::fs::read_dir(dest_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            if !name.starts_with(&prefix) {
+                return None;
+            }
+            let len = entry.metadata().ok()?.len();
+            (len > 0 && len < total_size).then_some((len, path))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, path)| path)
 }
 
 fn adapt_buffer_size(buffer: &mut Vec<u8>, bytes_since: &mut u64, last_adjust: &mut Instant) {
@@ -1764,9 +2074,7 @@ fn parse_hf_resolve_url(url: &str) -> Option<HfResolveUrl> {
 }
 
 fn hf_cli_available() -> bool {
-    *HF_CLI_AVAILABLE.get_or_init(|| {
-        hf_bin_available() || uvx_available()
-    })
+    *HF_CLI_AVAILABLE.get_or_init(|| hf_bin_available() || uvx_available())
 }
 
 fn hf_bin_available() -> bool {
@@ -1835,17 +2143,19 @@ async fn download_via_hf_cli(
     let stage_dir = staging_root.join(format!("job-{stage_id}"));
     if let Some(parent) = Path::new(&parsed.file_path).parent() {
         if parent != Path::new("") {
-            fs::create_dir_all(stage_dir.join(parent)).await.with_context(|| {
-                format!(
-                    "failed to prepare hf staging parent {:?}",
-                    stage_dir.join(parent)
-                )
-            })?;
+            fs::create_dir_all(stage_dir.join(parent))
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to prepare hf staging parent {:?}",
+                        stage_dir.join(parent)
+                    )
+                })?;
         }
     } else {
-        fs::create_dir_all(&stage_dir).await.with_context(|| {
-            format!("failed to create hf staging dir {}", stage_dir.display())
-        })?;
+        fs::create_dir_all(&stage_dir)
+            .await
+            .with_context(|| format!("failed to create hf staging dir {}", stage_dir.display()))?;
     }
 
     let mut cmd = hf_command();
@@ -1972,9 +2282,9 @@ async fn download_via_hf_cli(
 
 async fn move_file_with_fallback(src: &Path, dst: &Path) -> Result<()> {
     if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).await.with_context(|| {
-            format!("failed to create destination parent {}", parent.display())
-        })?;
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create destination parent {}", parent.display()))?;
     }
     match fs::rename(src, dst).await {
         Ok(()) => Ok(()),
@@ -2019,11 +2329,11 @@ async fn cleanup_xet_local_sidecars(dest_dir: &Path, staging_root: &Path) {
     }
 
     // Drop legacy local Hugging Face cache under model folders to avoid duplicate payload usage.
-    let legacy_download_cache = dest_dir
-        .join(".cache")
-        .join("huggingface")
-        .join("download");
-    if fs::try_exists(&legacy_download_cache).await.unwrap_or(false) {
+    let legacy_download_cache = dest_dir.join(".cache").join("huggingface").join("download");
+    if fs::try_exists(&legacy_download_cache)
+        .await
+        .unwrap_or(false)
+    {
         let _ = fs::remove_dir_all(&legacy_download_cache).await;
         if let Some(parent) = legacy_download_cache.parent() {
             remove_empty_parents_until(parent, dest_dir).await;
@@ -2083,7 +2393,10 @@ fn parse_hf_size_token(token: &str) -> Option<u64> {
     let (num_part, mul) = match unit_char {
         'K' | 'k' => (&trimmed[..trimmed.len() - 1], 1024_f64),
         'M' | 'm' => (&trimmed[..trimmed.len() - 1], 1024_f64 * 1024_f64),
-        'G' | 'g' => (&trimmed[..trimmed.len() - 1], 1024_f64 * 1024_f64 * 1024_f64),
+        'G' | 'g' => (
+            &trimmed[..trimmed.len() - 1],
+            1024_f64 * 1024_f64 * 1024_f64,
+        ),
         'T' | 't' => (
             &trimmed[..trimmed.len() - 1],
             1024_f64 * 1024_f64 * 1024_f64 * 1024_f64,
@@ -2097,10 +2410,7 @@ fn parse_hf_size_token(token: &str) -> Option<u64> {
     Some((value * mul) as u64)
 }
 
-async fn hf_downloaded_bytes(
-    dest_dir: &Path,
-    parsed: &HfResolveUrl,
-) -> Option<u64> {
+async fn hf_downloaded_bytes(dest_dir: &Path, parsed: &HfResolveUrl) -> Option<u64> {
     let flat_path = dest_dir.join(&parsed.file_name);
     let nested_path = dest_dir.join(&parsed.file_path);
 
@@ -2147,7 +2457,11 @@ async fn hf_downloaded_bytes(
         }
     }
 
-    if best > 0 { Some(best) } else { None }
+    if best > 0 {
+        Some(best)
+    } else {
+        None
+    }
 }
 
 fn build_download_url(repo: &str, path: &str) -> Result<String> {
@@ -2247,8 +2561,7 @@ async fn fetch_civitai_model_metadata_internal(
         .and_then(|file| file.download_url.clone())
         .or(api_download_url.clone());
 
-    let (preview, preview_url) =
-        resolve_preview(client, &images, token, model_version_id).await;
+    let (preview, preview_url) = resolve_preview(client, &images, token, model_version_id).await;
 
     let mut description = select_richest_description(description, model_description);
     let mut usage_strength = extract_usage_strength(settings.as_ref(), meta.as_ref(), &images);
@@ -2363,7 +2676,7 @@ fn select_civitai_file<'a>(
             file.download_url
                 .as_deref()
                 .and_then(|candidate| Url::parse(candidate).ok())
-                .map_or(false, |candidate| urls_equivalent(&candidate, &reference))
+                .is_some_and(|candidate| urls_equivalent(&candidate, &reference))
         }) {
             return Some(matched);
         }

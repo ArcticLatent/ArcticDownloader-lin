@@ -313,7 +313,7 @@ async fn fetch_manifest(client: &Client, url: &str) -> Result<UpdateManifest> {
 fn installer_file_name(url: &str) -> Option<String> {
     reqwest::Url::parse(url)
         .ok()
-        .and_then(|parsed| parsed.path_segments()?.last().map(str::to_string))
+        .and_then(|parsed| parsed.path_segments()?.next_back().map(str::to_string))
         .filter(|name| !name.trim().is_empty())
 }
 

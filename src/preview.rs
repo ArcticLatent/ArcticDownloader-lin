@@ -26,13 +26,26 @@ fn run_preview_window(url: &str) -> Result<()> {
     use tao::window::WindowBuilder;
     use wry::WebViewBuilder;
 
+    // `url` comes from third-party metadata (Civitai/HF), so it must be
+    // treated as untrusted before it's spliced into HTML/JS below.
+    if !is_safe_http_url(url) {
+        return Err(anyhow::anyhow!(
+            "refusing to open preview window for non-http(s) URL"
+        ));
+    }
+
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("LoRA Preview")
         .build(&event_loop)?;
 
-    let escaped_url = serde_json::to_string(url)?;
     let html = if is_video_url(url) {
+        // `serde_json::to_string` correctly escapes the URL as a JS string
+        // literal, but a literal `</script>` substring inside that literal
+        // would still terminate the surrounding <script> block early (the
+        // HTML tokenizer looks for that byte sequence regardless of JS
+        // string context). Neutralize `<` so `</script>` can never appear.
+        let js_string_literal = serde_json::to_string(url)?.replace('<', "\\u003C");
         format!(
             r#"<!doctype html>
 <html>
@@ -46,7 +59,7 @@ fn run_preview_window(url: &str) -> Result<()> {
 <body>
   <video id="preview" controls autoplay muted loop playsinline></video>
   <script>
-    const src = {escaped_url};
+    const src = {js_string_literal};
     const player = document.getElementById("preview");
     player.src = src;
     player.play().catch(() => {{}});
@@ -55,6 +68,11 @@ fn run_preview_window(url: &str) -> Result<()> {
 </html>"#
         )
     } else {
+        // HTML-attribute-escape the URL rather than JSON-escaping it: JSON
+        // escaping is for JS string contexts, and leaves raw `"` in place
+        // for a URL like `x.png" onerror="...`, which would close the
+        // attribute early and let arbitrary attributes be injected.
+        let attr_escaped_url = html_escape_attribute(url);
         format!(
             r#"<!doctype html>
 <html>
@@ -66,7 +84,7 @@ fn run_preview_window(url: &str) -> Result<()> {
   </style>
 </head>
 <body>
-  <img src={escaped_url} />
+  <img src="{attr_escaped_url}" />
 </body>
 </html>"#
         )
@@ -84,6 +102,28 @@ fn run_preview_window(url: &str) -> Result<()> {
             *control_flow = ControlFlow::Exit;
         }
     })
+}
+
+#[cfg(target_os = "windows")]
+fn is_safe_http_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+#[cfg(target_os = "windows")]
+fn html_escape_attribute(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 #[cfg(target_os = "windows")]

@@ -7,6 +7,9 @@
 mod app_linux;
 #[cfg(target_os = "windows")]
 mod app_windows;
+mod contracts;
+mod platform;
+mod shared;
 
 #[cfg(target_os = "linux")]
 use app_linux as platform_app;

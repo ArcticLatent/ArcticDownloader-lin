@@ -1,27 +1,40 @@
+use crate::shared::{
+    amd_gpu_details_cache, append_attention_launch_arg, apply_torch_allocator_env_compat,
+    choose_install_folder, clear_directory_contents, comfyui_external_running,
+    comfyui_runtime_running, custom_node_exists, default_true, detect_amd_gpu_name,
+    detect_existing_comfyui_root, detect_intel_gpu_name, detect_nvidia_gpu,
+    emit_comfyui_runtime_event, emit_comfyui_runtime_log_event, emit_install_event,
+    git_current_branch, has_dns, intel_gpu_details_cache, is_empty_dir,
+    is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
+    normalize_optional_path, normalize_release_version, parse_custom_launch_args,
+    parse_hf_env_value, parse_semver_triplet, parse_yaml_bool, parse_yaml_scalar,
+    path_name_is_comfyui, push_preflight, read_comfyui_installed_version,
+    remove_custom_node_dirs, resolve_comfyui_instance_name, show_main_window,
+    spawn_progress_emitter, start_comfyui_root_background, stop_comfyui_for_mutation,
+    wait_for_comfyui_start, write_install_state, write_install_summary, yaml_single_quote,
+    AmdGpuDetails, AppState, ComfyExtraModelConfig, DownloadProgressEvent, InstallSummaryItem,
+    IntelGpuDetails,
+    PreflightItem,
+};
 use arctic_downloader::{
     app::{build_context, drain_lossy_lines, AppContext},
     config::AppSettings,
-    download::{CivitaiPreview, DownloadSignal, DownloadStatus},
     env_flags::auto_update_enabled,
-    model::{LoraDefinition, ModelArtifact, ModelCatalog, ResolvedModel, WorkflowDefinition},
-    ram::{detect_ram_profile, RamTier},
-    vram::VramTier,
+    ram::detect_ram_profile,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::{
-    collections::HashSet,
     io::{Read, Write},
-    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex, OnceLock,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tauri::{
     image::Image,
@@ -29,17 +42,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
-use tauri_plugin_notification::NotificationExt;
 use tokio_util::sync::CancellationToken;
-
-struct AppState {
-    context: AppContext,
-    active_cancel: Mutex<Option<CancellationToken>>,
-    active_abort: Mutex<Option<tokio::task::AbortHandle>>,
-    install_cancel: Mutex<Option<CancellationToken>>,
-    comfyui_process: Mutex<Option<std::process::Child>>,
-    quitting: Mutex<bool>,
-}
 
 #[derive(Debug, Serialize)]
 struct AppSnapshot {
@@ -50,6 +53,7 @@ struct AppSnapshot {
     nvidia_gpu_vram_mb: Option<u64>,
     amd_gpu_name: Option<String>,
     intel_gpu_name: Option<String>,
+    gpu_detection_pending: bool,
     model_count: usize,
     lora_count: usize,
 }
@@ -71,49 +75,6 @@ struct HfXetPreflightResponse {
     detail: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BatchModelDownloadItem {
-    model_id: String,
-    variant_id: String,
-    #[serde(default)]
-    selected_artifact_keys: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BatchModelDownloadRequest {
-    items: Vec<BatchModelDownloadItem>,
-    ram_tier: Option<String>,
-    #[serde(default)]
-    vram_tier: Option<String>,
-    comfyui_root: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct LoraMetadataResponse {
-    creator: String,
-    creator_url: Option<String>,
-    strength: String,
-    triggers: Vec<String>,
-    description: String,
-    preview_url: Option<String>,
-    preview_kind: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct DownloadProgressEvent {
-    kind: String,
-    phase: String,
-    artifact: Option<String>,
-    index: Option<usize>,
-    total: Option<usize>,
-    received: Option<u64>,
-    size: Option<u64>,
-    folder: Option<String>,
-    message: Option<String>,
-}
-
 #[derive(Debug, Serialize)]
 struct ComfyInstallRecommendation {
     gpu_name: Option<String>,
@@ -121,6 +82,7 @@ struct ComfyInstallRecommendation {
     torch_profile: String,
     torch_label: String,
     reason: String,
+    detection_pending: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -153,25 +115,10 @@ struct ComfyInstallRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct PreflightItem {
-    status: String, // pass | warn | fail
-    title: String,
-    detail: String,
-}
-
-#[derive(Debug, Serialize)]
 struct ComfyPreflightResponse {
     ok: bool,
     summary: String,
     items: Vec<PreflightItem>,
-}
-
-#[derive(Debug, Serialize)]
-struct ComfyResumeStateResponse {
-    found: bool,
-    install_dir: Option<String>,
-    step: Option<String>,
-    summary: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,34 +133,8 @@ struct ComfyInstallationEntry {
     root: String,
 }
 
-#[derive(Debug, Serialize)]
-struct ComfyUiUpdateStatus {
-    installed_version: Option<String>,
-    latest_version: Option<String>,
-    head_matches_latest_tag: bool,
-    update_available: bool,
-    checked: bool,
-    detail: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct InstallState {
-    status: String, // in_progress | completed
-    step: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct InstallSummaryItem {
-    name: String,
-    status: String, // ok | failed | skipped
-    detail: String,
-}
-
 const UV_PYTHON_VERSION: &str = "3.12.10";
 const UV_PYTHON_FALLBACK: &str = "3.12";
-fn default_true() -> bool {
-    true
-}
 
 #[tauri::command]
 fn get_app_snapshot(state: State<'_, AppState>) -> AppSnapshot {
@@ -221,6 +142,8 @@ fn get_app_snapshot(state: State<'_, AppState>) -> AppSnapshot {
     let (nvidia_gpu_name, nvidia_gpu_vram_mb) = detect_nvidia_gpu();
     let amd_gpu_name = detect_amd_gpu_name();
     let intel_gpu_name = detect_intel_gpu_name();
+    let gpu_detection_pending =
+        nvidia_gpu_name.is_none() && amd_gpu_name.is_none() && intel_gpu_name.is_none();
     let ram_profile = state.context.ram_profile.or_else(detect_ram_profile);
     AppSnapshot {
         version: state.context.display_version.clone(),
@@ -230,38 +153,22 @@ fn get_app_snapshot(state: State<'_, AppState>) -> AppSnapshot {
         nvidia_gpu_vram_mb,
         amd_gpu_name,
         intel_gpu_name,
+        gpu_detection_pending,
         model_count: catalog.models.len(),
         lora_count: catalog.loras.len(),
     }
 }
 
-fn detect_nvidia_gpu() -> (Option<String>, Option<u64>) {
-    let detailed = detect_nvidia_gpu_details();
-    (detailed.name, detailed.vram_mb)
-}
-
 #[derive(Clone, Debug, Default)]
-struct NvidiaGpuDetails {
-    name: Option<String>,
-    vram_mb: Option<u64>,
+pub(crate) struct NvidiaGpuDetails {
+    pub(crate) name: Option<String>,
+    pub(crate) vram_mb: Option<u64>,
     driver_version: Option<String>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct AmdGpuDetails {
-    name: Option<String>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct IntelGpuDetails {
-    name: Option<String>,
 }
 
 static GPU_DETAILS_CACHE: OnceLock<Mutex<Option<NvidiaGpuDetails>>> = OnceLock::new();
 static GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
-static AMD_GPU_DETAILS_CACHE: OnceLock<Mutex<Option<AmdGpuDetails>>> = OnceLock::new();
 static AMD_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
-static INTEL_GPU_DETAILS_CACHE: OnceLock<Mutex<Option<IntelGpuDetails>>> = OnceLock::new();
 static INTEL_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
 static TRAY_MENU_ITEMS: OnceLock<Mutex<Option<TrayMenuItems>>> = OnceLock::new();
 
@@ -276,14 +183,6 @@ fn tray_menu_items() -> &'static Mutex<Option<TrayMenuItems>> {
 
 fn gpu_details_cache() -> &'static Mutex<Option<NvidiaGpuDetails>> {
     GPU_DETAILS_CACHE.get_or_init(|| Mutex::new(None))
-}
-
-fn amd_gpu_details_cache() -> &'static Mutex<Option<AmdGpuDetails>> {
-    AMD_GPU_DETAILS_CACHE.get_or_init(|| Mutex::new(None))
-}
-
-fn intel_gpu_details_cache() -> &'static Mutex<Option<IntelGpuDetails>> {
-    INTEL_GPU_DETAILS_CACHE.get_or_init(|| Mutex::new(None))
 }
 
 fn query_nvidia_gpu_details_blocking() -> NvidiaGpuDetails {
@@ -330,7 +229,7 @@ fn query_nvidia_gpu_details_blocking() -> NvidiaGpuDetails {
     }
 }
 
-fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
+pub(crate) fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
     if let Ok(guard) = gpu_details_cache().lock() {
         if let Some(details) = guard.clone() {
             return details;
@@ -375,7 +274,7 @@ fn query_amd_gpu_details_blocking() -> AmdGpuDetails {
     AmdGpuDetails { name }
 }
 
-fn detect_amd_gpu_details() -> AmdGpuDetails {
+pub(crate) fn detect_amd_gpu_details() -> AmdGpuDetails {
     if let Ok(guard) = amd_gpu_details_cache().lock() {
         if let Some(details) = guard.clone() {
             return details;
@@ -397,13 +296,6 @@ fn detect_amd_gpu_details() -> AmdGpuDetails {
     }
 
     AmdGpuDetails::default()
-}
-
-fn detect_amd_gpu_name() -> Option<String> {
-    if fake_amd_enabled() {
-        return Some("Fake AMD GPU (simulation)".to_string());
-    }
-    detect_amd_gpu_details().name
 }
 
 fn query_intel_gpu_details_blocking() -> IntelGpuDetails {
@@ -432,7 +324,7 @@ fn query_intel_gpu_details_blocking() -> IntelGpuDetails {
     IntelGpuDetails { name }
 }
 
-fn detect_intel_gpu_details() -> IntelGpuDetails {
+pub(crate) fn detect_intel_gpu_details() -> IntelGpuDetails {
     if let Ok(guard) = intel_gpu_details_cache().lock() {
         if let Some(details) = guard.clone() {
             return details;
@@ -456,12 +348,6 @@ fn detect_intel_gpu_details() -> IntelGpuDetails {
     IntelGpuDetails::default()
 }
 
-fn detect_intel_gpu_name() -> Option<String> {
-    if fake_intel_enabled() {
-        return Some("Fake Intel GPU (simulation)".to_string());
-    }
-    detect_intel_gpu_details().name
-}
 
 fn windows_rocm_supported_gpu(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -524,6 +410,7 @@ fn get_comfyui_install_recommendation(
                 torch_profile: "torch291_rocm72".to_string(),
                 torch_label: "Torch 2.9.1 + ROCm SDK 7.2".to_string(),
                 reason,
+                detection_pending: false,
             };
         }
         if selection == "amd" {
@@ -533,6 +420,7 @@ fn get_comfyui_install_recommendation(
                 torch_profile: "torch291_rocm72".to_string(),
                 torch_label: "Torch 2.9.1 + ROCm SDK 7.2".to_string(),
                 reason: "Selected AMD GPU is still being detected.".to_string(),
+                detection_pending: true,
             };
         }
     }
@@ -556,6 +444,7 @@ fn get_comfyui_install_recommendation(
                 torch_profile: "torchxpu_nightly".to_string(),
                 torch_label: "PyTorch XPU Nightly".to_string(),
                 reason,
+                detection_pending: false,
             };
         }
         if selection == "intel" {
@@ -565,6 +454,7 @@ fn get_comfyui_install_recommendation(
                 torch_profile: "torchxpu_nightly".to_string(),
                 torch_label: "PyTorch XPU Nightly".to_string(),
                 reason: "Selected Intel GPU is still being detected.".to_string(),
+                detection_pending: true,
             };
         }
     }
@@ -582,6 +472,7 @@ fn get_comfyui_install_recommendation(
             torch_profile: "torch271_cu128".to_string(),
             torch_label: "Torch 2.7.1 + cu128".to_string(),
             reason: "Detected RTX 3000 series (Ampere).".to_string(),
+            detection_pending: false,
         };
     }
 
@@ -592,6 +483,7 @@ fn get_comfyui_install_recommendation(
             torch_profile: "torch280_cu128".to_string(),
             torch_label: "Torch 2.8.0 + cu128".to_string(),
             reason: "Detected RTX 4000 series (Ada).".to_string(),
+            detection_pending: false,
         };
     }
 
@@ -603,6 +495,7 @@ fn get_comfyui_install_recommendation(
                 torch_profile: "torch291_cu130".to_string(),
                 torch_label: "Torch 2.9.1 + cu130".to_string(),
                 reason: "Detected RTX 5000 series with driver >= 580.".to_string(),
+                detection_pending: false,
             };
         }
 
@@ -612,10 +505,12 @@ fn get_comfyui_install_recommendation(
             torch_profile: "torch280_cu128".to_string(),
             torch_label: "Torch 2.8.0 + cu128".to_string(),
             reason: "Detected RTX 5000 series with older driver; using safer fallback.".to_string(),
+            detection_pending: false,
         };
     }
 
     ComfyInstallRecommendation {
+        detection_pending: gpu.name.is_none(),
         gpu_name: gpu.name,
         driver_version: gpu.driver_version,
         torch_profile: "torch280_cu128".to_string(),
@@ -624,26 +519,7 @@ fn get_comfyui_install_recommendation(
     }
 }
 
-#[tauri::command]
-fn set_comfyui_gpu_selection(
-    state: State<'_, AppState>,
-    gpu_selection: String,
-) -> Result<AppSettings, String> {
-    let normalized = gpu_selection.trim().to_ascii_lowercase();
-    if !matches!(normalized.as_str(), "auto" | "nvidia" | "amd" | "intel") {
-        return Err("Unknown GPU selection.".to_string());
-    }
-    state
-        .context
-        .config
-        .update_settings(|settings| {
-            settings.comfyui_gpu_selection =
-                (normalized != "auto").then(|| normalized.clone());
-        })
-        .map_err(|err| err.to_string())
-}
-
-fn normalize_path(raw: &str) -> Result<PathBuf, String> {
+pub(crate) fn normalize_path(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("Install folder is required.".to_string());
@@ -657,22 +533,7 @@ fn normalize_path(raw: &str) -> Result<PathBuf, String> {
     Ok(strip_windows_verbatim_prefix(&path))
 }
 
-fn normalize_optional_path(raw: Option<&str>) -> Result<Option<PathBuf>, String> {
-    let Some(value) = raw else {
-        return Ok(None);
-    };
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    normalize_path(trimmed).map(Some)
-}
-
-fn yaml_single_quote(input: &str) -> String {
-    format!("'{}'", input.replace('\'', "''"))
-}
-
-fn write_extra_model_paths_yaml(
+pub(crate) fn write_extra_model_paths_yaml(
     comfy_dir: &Path,
     base_path: &Path,
     is_default: bool,
@@ -761,122 +622,6 @@ fn is_forbidden_install_path(path: &Path) -> bool {
         .any(|entry| normalized == *entry || normalized.starts_with(&format!("{entry}\\")))
 }
 
-fn find_in_progress_install(base_root: &Path) -> Option<(PathBuf, InstallState)> {
-    if let Ok(entries) = std::fs::read_dir(base_root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if !(name == "ComfyUI"
-                || (name.starts_with("ComfyUI-") && name.len() == "ComfyUI-00".len()))
-            {
-                continue;
-            }
-            let state_path = path.join(".arctic_install_state.json");
-            if !state_path.exists() {
-                continue;
-            }
-            let data = match std::fs::read(&state_path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            let parsed: InstallState = match serde_json::from_slice(&data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if parsed.status == "in_progress" {
-                return Some((path, parsed));
-            }
-        }
-    }
-    None
-}
-
-fn choose_install_folder(base_root: &Path, force_fresh: bool) -> PathBuf {
-    if !force_fresh {
-        if let Some((existing, _)) = find_in_progress_install(base_root) {
-            return existing;
-        }
-    }
-
-    for index in 1..=99u32 {
-        let candidate = base_root.join(format!("ComfyUI-{index:02}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-
-    // Extremely unlikely fallback if 01..99 are occupied.
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    base_root.join(format!("ComfyUI-{ts}"))
-}
-
-fn path_name_is_comfyui(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .map(|name| {
-            let lower = name.to_ascii_lowercase();
-            lower == "comfyui" || lower.starts_with("comfyui-")
-        })
-        .unwrap_or(false)
-}
-
-fn is_empty_dir(path: &Path) -> bool {
-    std::fs::read_dir(path)
-        .ok()
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(false)
-}
-
-fn is_recoverable_preclone_dir(path: &Path) -> bool {
-    let allowed = [
-        ".venv",
-        ".python",
-        ".tools",
-        ".arctic_install_state.json",
-        "install.log",
-        "install-summary.json",
-    ];
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return false;
-    };
-    entries.flatten().all(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .map(|name| allowed.iter().any(|item| item.eq_ignore_ascii_case(name)))
-            .unwrap_or(false)
-    })
-}
-
-fn clear_directory_contents(path: &Path) -> Result<(), String> {
-    let entries = std::fs::read_dir(path).map_err(|err| err.to_string())?;
-    for entry in entries.flatten() {
-        let p = entry.path();
-        let keep = p
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|name| name.eq_ignore_ascii_case(".tools") || name.eq_ignore_ascii_case(".python"))
-            .unwrap_or(false);
-        if keep {
-            continue;
-        }
-        if p.is_dir() {
-            std::fs::remove_dir_all(&p).map_err(|err| err.to_string())?;
-        } else {
-            std::fs::remove_file(&p).map_err(|err| err.to_string())?;
-        }
-    }
-    Ok(())
-}
-
 fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -896,30 +641,6 @@ fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
     }
 }
 
-fn write_install_state(install_root: &Path, status: &str, step: &str) {
-    let path = install_root.join(".arctic_install_state.json");
-    let payload = InstallState {
-        status: status.to_string(),
-        step: step.to_string(),
-    };
-    if let Ok(data) = serde_json::to_vec_pretty(&payload) {
-        let _ = std::fs::write(path, data);
-    }
-}
-
-fn push_preflight(
-    items: &mut Vec<PreflightItem>,
-    status: &str,
-    title: &str,
-    detail: impl Into<String>,
-) {
-    items.push(PreflightItem {
-        status: status.to_string(),
-        title: title.to_string(),
-        detail: detail.into(),
-    });
-}
-
 fn command_available(program: &str, args: &[&str]) -> bool {
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
@@ -934,24 +655,6 @@ fn apply_background_command_flags(cmd: &mut std::process::Command) {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-}
-
-fn nerdstats_enabled() -> bool {
-    std::env::var("ARCTIC_NERDSTATS")
-        .map(|value| value == "1")
-        .unwrap_or(false)
-}
-
-fn fake_amd_enabled() -> bool {
-    std::env::var("ARCTIC_FAKE_AMD")
-        .map(|value| value == "1")
-        .unwrap_or(false)
-}
-
-fn fake_intel_enabled() -> bool {
-    std::env::var("ARCTIC_FAKE_INTEL")
-        .map(|value| value == "1")
-        .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]
@@ -1067,21 +770,6 @@ fn ensure_git_available(app: &AppHandle) -> Result<(), String> {
             )
         }
     }
-}
-
-fn has_dns(host: &str, port: u16) -> bool {
-    (host, port)
-        .to_socket_addrs()
-        .map(|mut it| it.next().is_some())
-        .unwrap_or(false)
-}
-
-fn parse_hf_env_value(text: &str, key: &str) -> Option<String> {
-    let prefix = format!("- {key}:");
-    text.lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix(&prefix).map(str::trim))
-        .map(str::to_string)
 }
 
 fn prepend_path_entry_if_missing(entry: &Path) {
@@ -1558,61 +1246,6 @@ fn run_comfyui_preflight(
     ComfyPreflightResponse { ok, summary, items }
 }
 
-#[tauri::command]
-fn get_comfyui_resume_state(
-    state: State<'_, AppState>,
-    install_base: Option<String>,
-) -> Result<ComfyResumeStateResponse, String> {
-    let base = if let Some(raw) = install_base {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            state
-                .context
-                .config
-                .settings()
-                .comfyui_install_base
-                .ok_or_else(|| "ComfyUI install base folder is not set.".to_string())?
-        } else {
-            normalize_path(trimmed)?
-        }
-    } else {
-        state
-            .context
-            .config
-            .settings()
-            .comfyui_install_base
-            .ok_or_else(|| "ComfyUI install base folder is not set.".to_string())?
-    };
-
-    if !base.exists() {
-        return Ok(ComfyResumeStateResponse {
-            found: false,
-            install_dir: None,
-            step: None,
-            summary: "No interrupted install found.".to_string(),
-        });
-    }
-
-    if let Some((dir, install_state)) = find_in_progress_install(&base) {
-        return Ok(ComfyResumeStateResponse {
-            found: true,
-            install_dir: Some(dir.to_string_lossy().to_string()),
-            step: Some(install_state.step.clone()),
-            summary: format!(
-                "Interrupted install found in {} at step '{}'.",
-                dir.display(),
-                install_state.step
-            ),
-        });
-    }
-
-    Ok(ComfyResumeStateResponse {
-        found: false,
-        install_dir: None,
-        step: None,
-        summary: "No interrupted install found.".to_string(),
-    })
-}
 
 fn powershell_download(url: &str, out_file: &Path) -> Result<(), String> {
     let parent = out_file
@@ -1768,62 +1401,8 @@ fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Resu
     Ok(())
 }
 
-fn model_artifact_selection_key(artifact: &ModelArtifact) -> String {
-    [
-        artifact.target_category.slug(),
-        artifact.repo.trim(),
-        artifact.path.trim(),
-        artifact
-            .direct_url
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default(),
-        artifact.file_name(),
-    ]
-    .join("::")
-}
 
-fn filter_selected_model_artifacts(
-    artifacts: Vec<ModelArtifact>,
-    selected_keys: Option<&Vec<String>>,
-) -> Vec<ModelArtifact> {
-    let Some(selected_keys) = selected_keys else {
-        return artifacts;
-    };
-    let selected: HashSet<&str> = selected_keys.iter().map(String::as_str).collect();
-    artifacts
-        .into_iter()
-        .filter(|artifact| selected.contains(model_artifact_selection_key(artifact).as_str()))
-        .collect()
-}
-
-fn model_artifacts_for_download_request(
-    resolved: &ResolvedModel,
-    ram_tier: Option<RamTier>,
-    selected_keys: Option<&Vec<String>>,
-) -> Vec<ModelArtifact> {
-    let artifacts = if selected_keys.is_some() {
-        let mut artifacts = Vec::new();
-        for group in &resolved.master.always {
-            for artifact in &group.artifacts {
-                if artifact.ram_bucket.is_some() || artifact.is_supported_on_ram(ram_tier) {
-                    artifacts.push(artifact.clone());
-                }
-            }
-        }
-        for artifact in &resolved.variant.artifacts {
-            if artifact.is_supported_on_ram(ram_tier) {
-                artifacts.push(artifact.clone());
-            }
-        }
-        artifacts
-    } else {
-        resolved.artifacts_for_download(ram_tier)
-    };
-    filter_selected_model_artifacts(artifacts, selected_keys)
-}
-
-fn run_command_capture(
+pub(crate) fn run_command_capture(
     program: &str,
     args: &[&str],
     working_dir: Option<&Path>,
@@ -2369,13 +1948,6 @@ fn ensure_venv_pip(
     )
 }
 
-fn write_install_summary(install_root: &Path, items: &[InstallSummaryItem]) {
-    let path = install_root.join("install-summary.json");
-    if let Ok(data) = serde_json::to_vec_pretty(items) {
-        let _ = std::fs::write(path, data);
-    }
-}
-
 fn find_file_recursive(root: &Path, file_name: &str) -> Option<PathBuf> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -2462,23 +2034,6 @@ fn resolve_uv_binary(shared_runtime_root: &Path, app: &AppHandle) -> Result<Stri
     let found = find_file_recursive(&local_root, "uv.exe")
         .ok_or_else(|| "Failed to locate uv.exe after extraction.".to_string())?;
     Ok(found.to_string_lossy().to_string())
-}
-
-fn emit_install_event(app: &AppHandle, phase: &str, message: &str) {
-    let _ = app.emit(
-        "comfyui-install-progress",
-        DownloadProgressEvent {
-            kind: "comfyui_install".to_string(),
-            phase: phase.to_string(),
-            artifact: None,
-            index: None,
-            total: None,
-            received: None,
-            size: None,
-            folder: None,
-            message: Some(message.to_string()),
-        },
-    );
 }
 
 fn torch_profile_to_packages(
@@ -2753,19 +2308,6 @@ fn selected_attention_backend(request: &ComfyInstallRequest) -> Option<&'static 
     }
 }
 
-fn append_attention_launch_arg(args: &mut Vec<String>, backend: Option<&str>) {
-    match backend
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("flash") => args.push("--use-flash-attention".to_string()),
-        Some("sage") | Some("sage3") => args.push("--use-sage-attention".to_string()),
-        _ => {}
-    }
-}
-
 fn is_rocm_profile(profile: &str) -> bool {
     matches!(profile, "torch291_rocm72")
 }
@@ -2883,15 +2425,6 @@ fn install_windows_xpu_torch_stack(
     )
 }
 
-fn apply_torch_allocator_env_compat(cmd: &mut std::process::Command) {
-    if let Ok(value) = std::env::var("PYTORCH_CUDA_ALLOC_CONF") {
-        if std::env::var_os("PYTORCH_ALLOC_CONF").is_none() {
-            cmd.env("PYTORCH_ALLOC_CONF", value);
-        }
-        cmd.env_remove("PYTORCH_CUDA_ALLOC_CONF");
-    }
-}
-
 fn apply_intel_xpu_launch_env(cmd: &mut std::process::Command, profile: &str) {
     if is_xpu_profile(profile) {
         cmd.env("UR_L0_ENABLE_RELAXED_ALLOCATION_LIMITS", "1");
@@ -2958,50 +2491,6 @@ fn comfyui_launch_args(
     append_attention_launch_arg(&mut args, attention_backend);
     args.extend(custom_launch_args.iter().cloned());
     args
-}
-
-fn parse_custom_launch_args(input: &str) -> Result<Vec<String>, String> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut chars = input.chars().peekable();
-    let mut quote: Option<char> = None;
-
-    while let Some(ch) = chars.next() {
-        match quote {
-            Some(active_quote) => match ch {
-                '\\' => {
-                    if let Some(next) = chars.next() {
-                        current.push(next);
-                    }
-                }
-                _ if ch == active_quote => quote = None,
-                _ => current.push(ch),
-            },
-            None => match ch {
-                '"' | '\'' => quote = Some(ch),
-                '\\' => {
-                    if let Some(next) = chars.next() {
-                        current.push(next);
-                    }
-                }
-                c if c.is_whitespace() => {
-                    if !current.is_empty() {
-                        args.push(std::mem::take(&mut current));
-                    }
-                }
-                _ => current.push(ch),
-            },
-        }
-    }
-
-    if quote.is_some() {
-        return Err("Custom launch args contain an unclosed quote.".to_string());
-    }
-    if !current.is_empty() {
-        args.push(current);
-    }
-
-    Ok(args)
 }
 
 fn run_comfyui_install(
@@ -3872,41 +3361,6 @@ async fn start_comfyui_install(
     Ok(())
 }
 
-#[tauri::command]
-fn cancel_comfyui_install(state: State<'_, AppState>) -> Result<bool, String> {
-    let mut active = state
-        .install_cancel
-        .lock()
-        .map_err(|_| "install state lock poisoned".to_string())?;
-    if let Some(token) = active.as_ref() {
-        token.cancel();
-        *active = None;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-#[tauri::command]
-fn get_catalog(state: State<'_, AppState>) -> ModelCatalog {
-    state.context.catalog.catalog_snapshot()
-}
-
-#[tauri::command]
-async fn refresh_catalog(state: State<'_, AppState>) -> Result<ModelCatalog, String> {
-    state
-        .context
-        .catalog
-        .refresh_from_remote()
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(state.context.catalog.catalog_snapshot())
-}
-
-#[tauri::command]
-fn get_settings(state: State<'_, AppState>) -> AppSettings {
-    state.context.config.settings()
-}
 
 #[tauri::command]
 fn set_comfyui_root(
@@ -3965,125 +3419,6 @@ fn set_comfyui_install_base(
         .config
         .update_settings(|settings| {
             settings.comfyui_install_base = normalized.clone();
-        })
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-fn get_comfyui_extra_model_config(
-    state: State<'_, AppState>,
-    comfyui_root: Option<String>,
-) -> Result<ComfyExtraModelConfigResponse, String> {
-    let root = resolve_root_path(&state.context, comfyui_root)?;
-    let config = comfy_extra_model_config(&root);
-    Ok(match config {
-        Some(cfg) => ComfyExtraModelConfigResponse {
-            configured: true,
-            base_path: Some(cfg.base_path.to_string_lossy().to_string()),
-            use_as_default: cfg.is_default,
-        },
-        None => ComfyExtraModelConfigResponse {
-            configured: false,
-            base_path: None,
-            use_as_default: false,
-        },
-    })
-}
-
-#[tauri::command]
-fn get_effective_download_destination(
-    state: State<'_, AppState>,
-    comfyui_root: Option<String>,
-) -> Result<EffectiveDownloadDestinationResponse, String> {
-    let root = resolve_root_path(&state.context, comfyui_root)?;
-    let effective_root = effective_download_root(&root);
-    Ok(EffectiveDownloadDestinationResponse {
-        comfyui_root: root.to_string_lossy().to_string(),
-        effective_root: effective_root.to_string_lossy().to_string(),
-        uses_shared_default: effective_root != root,
-    })
-}
-
-#[tauri::command]
-fn set_comfyui_extra_model_config(
-    state: State<'_, AppState>,
-    comfyui_root: Option<String>,
-    extra_model_root: Option<String>,
-    use_as_default: bool,
-) -> Result<AppSettings, String> {
-    let root = resolve_root_path(&state.context, comfyui_root)?;
-    let normalized_extra = normalize_optional_path(extra_model_root.as_deref())?;
-    let yaml_path = root.join("extra_model_paths.yaml");
-    let example_path = root.join("extra_model_paths.yaml.example");
-
-    if let Some(extra_root) = normalized_extra.as_ref() {
-        write_extra_model_paths_yaml(&root, extra_root, use_as_default)?;
-    } else {
-        if yaml_path.exists() {
-            let _ = std::fs::remove_file(&yaml_path);
-        }
-        if !example_path.exists() {
-            let _ = std::fs::write(
-                &example_path,
-                "# Rename this to extra_model_paths.yaml and ComfyUI will load it\n",
-            );
-        }
-    }
-
-    state
-        .context
-        .config
-        .update_settings(|settings| {
-            settings.shared_models_root = normalized_extra.clone();
-            settings.shared_models_use_default = normalized_extra.is_some() && use_as_default;
-        })
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-fn set_comfyui_custom_launch_args(
-    state: State<'_, AppState>,
-    custom_launch_args: String,
-) -> Result<AppSettings, String> {
-    let trimmed = custom_launch_args.trim();
-    let normalized = if trimmed.is_empty() {
-        String::new()
-    } else {
-        parse_custom_launch_args(trimmed)?;
-        trimmed.to_string()
-    };
-
-    state
-        .context
-        .config
-        .update_settings(|settings| settings.comfyui_custom_launch_args = normalized.clone())
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-fn set_comfyui_show_runtime_logs(
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<AppSettings, String> {
-    state
-        .context
-        .config
-        .update_settings(|settings| settings.comfyui_show_runtime_logs = enabled)
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-fn save_civitai_token(state: State<'_, AppState>, token: String) -> Result<AppSettings, String> {
-    let trimmed = token.trim().to_string();
-    state
-        .context
-        .config
-        .update_settings(|settings| {
-            settings.civitai_token = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            };
         })
         .map_err(|err| err.to_string())
 }
@@ -4193,290 +3528,7 @@ async fn auto_update_startup(
     }
 }
 
-#[tauri::command]
-async fn download_model_assets(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    model_id: String,
-    variant_id: String,
-    ram_tier: Option<String>,
-    vram_tier: Option<String>,
-    selected_artifact_keys: Option<Vec<String>>,
-    comfyui_root: Option<String>,
-) -> Result<(), String> {
-    let root = resolve_root_path(&state.context, comfyui_root)?;
-    let effective_root = effective_download_root(&root);
-    let selected_vram_tier = vram_tier.as_deref().and_then(parse_vram_tier);
-    let resolved = state
-        .context
-        .catalog
-        .resolve_download_selection(&model_id, &variant_id, selected_vram_tier)
-        .ok_or_else(|| "Selected model variant was not found in catalog.".to_string())?;
 
-    let tier = ram_tier
-        .as_deref()
-        .and_then(parse_ram_tier)
-        .or_else(|| state.context.ram_tier());
-    let planned =
-        model_artifacts_for_download_request(&resolved, tier, selected_artifact_keys.as_ref());
-    if planned.is_empty() {
-        return Err("No model files are selected for download.".to_string());
-    }
-
-    let cancel = CancellationToken::new();
-    {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
-        if active.is_some() {
-            return Err("A download is already active. Cancel it first.".to_string());
-        }
-        *active = Some(cancel.clone());
-    }
-
-    let mut resolved_for_download = resolved.clone();
-    resolved_for_download.variant.artifacts = planned;
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let handle = state.context.downloads.download_variant_with_cancel(
-        effective_root,
-        resolved_for_download,
-        tx,
-        Some(cancel),
-    );
-    if let Ok(mut abort) = state.active_abort.lock() {
-        *abort = Some(handle.abort_handle());
-    }
-    spawn_progress_emitter(app.clone(), "model".to_string(), rx);
-    let app_for_task = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let result = handle.await;
-        let managed = app_for_task.state::<AppState>();
-        if let Ok(mut active) = managed.active_cancel.lock() {
-            *active = None;
-        }
-        if let Ok(mut abort) = managed.active_abort.lock() {
-            *abort = None;
-        }
-
-        match result {
-            Ok(Ok(outcomes)) => {
-                let _ = app_for_task.emit(
-                    "download-progress",
-                    DownloadProgressEvent {
-                        kind: "model".to_string(),
-                        phase: "batch_finished".to_string(),
-                        artifact: None,
-                        index: None,
-                        total: Some(outcomes.len()),
-                        received: None,
-                        size: None,
-                        folder: None,
-                        message: Some("Model download batch completed.".to_string()),
-                    },
-                );
-            }
-            Ok(Err(err)) => {
-                let lower = err.to_string().to_ascii_lowercase();
-                let phase = if lower.contains("cancel") {
-                    "cancelled"
-                } else {
-                    "batch_failed"
-                };
-                let _ = app_for_task.emit(
-                    "download-progress",
-                    DownloadProgressEvent {
-                        kind: "model".to_string(),
-                        phase: phase.to_string(),
-                        artifact: None,
-                        index: None,
-                        total: None,
-                        received: None,
-                        size: None,
-                        folder: None,
-                        message: Some(err.to_string()),
-                    },
-                );
-            }
-            Err(join_err) => {
-                let phase = if join_err.is_cancelled() {
-                    "cancelled"
-                } else {
-                    "batch_failed"
-                };
-                let _ = app_for_task.emit(
-                    "download-progress",
-                    DownloadProgressEvent {
-                        kind: "model".to_string(),
-                        phase: phase.to_string(),
-                        artifact: None,
-                        index: None,
-                        total: None,
-                        received: None,
-                        size: None,
-                        folder: None,
-                        message: Some(join_err.to_string()),
-                    },
-                );
-            }
-        }
-    });
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn download_model_assets_batch(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    request: BatchModelDownloadRequest,
-) -> Result<(), String> {
-    if request.items.is_empty() {
-        return Err("Select at least one model first.".to_string());
-    }
-
-    let root = resolve_root_path(&state.context, request.comfyui_root)?;
-    let effective_root = effective_download_root(&root);
-    let tier = request
-        .ram_tier
-        .as_deref()
-        .and_then(parse_ram_tier)
-        .or_else(|| state.context.ram_tier());
-    let selected_vram_tier = request.vram_tier.as_deref().and_then(parse_vram_tier);
-
-    let mut resolved_items = Vec::new();
-    for item in &request.items {
-        let resolved = state
-            .context
-            .catalog
-            .resolve_download_selection(&item.model_id, &item.variant_id, selected_vram_tier)
-            .ok_or_else(|| {
-                format!(
-                    "Selected model variant was not found in catalog: {}/{}",
-                    item.model_id, item.variant_id
-                )
-            })?;
-
-        let planned = model_artifacts_for_download_request(
-            &resolved,
-            tier,
-            item.selected_artifact_keys.as_ref(),
-        );
-        if planned.is_empty() {
-            return Err(format!(
-                "No model files are selected for {}.",
-                resolved.master.display_name
-            ));
-        }
-
-        let mut resolved_for_download = resolved.clone();
-        resolved_for_download.variant.artifacts = planned;
-        resolved_items.push(resolved_for_download);
-    }
-
-    let cancel = CancellationToken::new();
-    {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
-        if active.is_some() {
-            return Err("A download is already active. Cancel it first.".to_string());
-        }
-        *active = Some(cancel.clone());
-    }
-
-    let app_for_task = app.clone();
-    let downloads = state.context.downloads.clone();
-    let effective_root_for_task = effective_root.clone();
-    let abort = tauri::async_runtime::spawn(async move {
-        for (batch_index, resolved) in resolved_items.into_iter().enumerate() {
-            let (tx, rx) = std::sync::mpsc::channel();
-            spawn_progress_emitter(app_for_task.clone(), "model".to_string(), rx);
-            let handle = downloads.download_variant_with_cancel(
-                effective_root_for_task.clone(),
-                resolved,
-                tx,
-                Some(cancel.clone()),
-            );
-            match handle.await {
-                Ok(Ok(_)) => {}
-                Ok(Err(err)) => {
-                    let _ = app_for_task.emit(
-                        "download-progress",
-                        DownloadProgressEvent {
-                            kind: "model".to_string(),
-                            phase: if err.to_string().to_ascii_lowercase().contains("cancel") {
-                                "cancelled".to_string()
-                            } else {
-                                "batch_failed".to_string()
-                            },
-                            artifact: None,
-                            index: Some(batch_index + 1),
-                            total: None,
-                            received: None,
-                            size: None,
-                            folder: None,
-                            message: Some(err.to_string()),
-                        },
-                    );
-                    return;
-                }
-                Err(join_err) => {
-                    let _ = app_for_task.emit(
-                        "download-progress",
-                        DownloadProgressEvent {
-                            kind: "model".to_string(),
-                            phase: if join_err.is_cancelled() {
-                                "cancelled".to_string()
-                            } else {
-                                "batch_failed".to_string()
-                            },
-                            artifact: None,
-                            index: Some(batch_index + 1),
-                            total: None,
-                            received: None,
-                            size: None,
-                            folder: None,
-                            message: Some(join_err.to_string()),
-                        },
-                    );
-                    return;
-                }
-            }
-        }
-
-        let _ = app_for_task.emit(
-            "download-progress",
-            DownloadProgressEvent {
-                kind: "model".to_string(),
-                phase: "batch_finished".to_string(),
-                artifact: None,
-                index: None,
-                total: None,
-                received: None,
-                size: None,
-                folder: None,
-                message: Some("Model download batch completed.".to_string()),
-            },
-        );
-    });
-
-    let managed = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let _ = abort.await;
-        let state = managed.state::<AppState>();
-        match state.active_cancel.lock() {
-            Ok(mut active) => {
-                *active = None;
-            }
-            Err(_) => {}
-        };
-    });
-
-    Ok(())
-}
 
 #[tauri::command]
 async fn download_lora_asset(
@@ -4604,227 +3656,9 @@ async fn download_lora_asset(
     Ok(())
 }
 
-#[tauri::command]
-async fn download_workflow_asset(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    workflow_id: String,
-    comfyui_root: Option<String>,
-) -> Result<(), String> {
-    let root = resolve_root_path(&state.context, comfyui_root)?;
-    let workflow: WorkflowDefinition = state
-        .context
-        .catalog
-        .find_workflow(&workflow_id)
-        .ok_or_else(|| "Selected workflow was not found in catalog.".to_string())?;
 
-    let workflows_dir = root.join("user").join("default").join("workflows");
-    std::fs::create_dir_all(&workflows_dir).map_err(|err| {
-        format!(
-            "Failed to create ComfyUI workflows directory ({}): {err}",
-            workflows_dir.display()
-        )
-    })?;
 
-    let cancel = CancellationToken::new();
-    {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
-        if active.is_some() {
-            return Err("A download is already active. Cancel it first.".to_string());
-        }
-        *active = Some(cancel.clone());
-    }
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let handle = state.context.downloads.download_workflow_with_cancel(
-        workflows_dir,
-        workflow,
-        tx,
-        Some(cancel),
-    );
-    if let Ok(mut abort) = state.active_abort.lock() {
-        *abort = Some(handle.abort_handle());
-    }
-    spawn_progress_emitter(app.clone(), "workflow".to_string(), rx);
-    let app_for_task = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let result = handle.await;
-        let managed = app_for_task.state::<AppState>();
-        if let Ok(mut active) = managed.active_cancel.lock() {
-            *active = None;
-        }
-        if let Ok(mut abort) = managed.active_abort.lock() {
-            *abort = None;
-        }
-
-        match result {
-            Ok(Ok(outcome)) => {
-                let message = match outcome.status {
-                    DownloadStatus::SkippedExisting => {
-                        "Workflow already exists. Skipped download.".to_string()
-                    }
-                    DownloadStatus::Downloaded => "Workflow download completed.".to_string(),
-                };
-                let _ = app_for_task.emit(
-                    "download-progress",
-                    DownloadProgressEvent {
-                        kind: "workflow".to_string(),
-                        phase: "batch_finished".to_string(),
-                        artifact: None,
-                        index: None,
-                        total: Some(1),
-                        received: None,
-                        size: None,
-                        folder: None,
-                        message: Some(message),
-                    },
-                );
-            }
-            Ok(Err(err)) => {
-                let lower = err.to_string().to_ascii_lowercase();
-                let phase = if lower.contains("cancel") {
-                    "cancelled"
-                } else {
-                    "batch_failed"
-                };
-                let _ = app_for_task.emit(
-                    "download-progress",
-                    DownloadProgressEvent {
-                        kind: "workflow".to_string(),
-                        phase: phase.to_string(),
-                        artifact: None,
-                        index: None,
-                        total: None,
-                        received: None,
-                        size: None,
-                        folder: None,
-                        message: Some(err.to_string()),
-                    },
-                );
-            }
-            Err(join_err) => {
-                let phase = if join_err.is_cancelled() {
-                    "cancelled"
-                } else {
-                    "batch_failed"
-                };
-                let _ = app_for_task.emit(
-                    "download-progress",
-                    DownloadProgressEvent {
-                        kind: "workflow".to_string(),
-                        phase: phase.to_string(),
-                        artifact: None,
-                        index: None,
-                        total: None,
-                        received: None,
-                        size: None,
-                        folder: None,
-                        message: Some(join_err.to_string()),
-                    },
-                );
-            }
-        }
-    });
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn get_lora_metadata(
-    state: State<'_, AppState>,
-    lora_id: String,
-    token: Option<String>,
-) -> Result<LoraMetadataResponse, String> {
-    let lora: LoraDefinition = state
-        .context
-        .catalog
-        .find_lora(&lora_id)
-        .ok_or_else(|| "Selected LoRA was not found in catalog.".to_string())?;
-
-    if !lora
-        .download_url
-        .to_ascii_lowercase()
-        .contains("civitai.com")
-    {
-        return Ok(LoraMetadataResponse {
-            creator: "N/A".to_string(),
-            creator_url: None,
-            strength: "N/A".to_string(),
-            triggers: Vec::new(),
-            description: lora
-                .note
-                .unwrap_or_else(|| "Metadata is available for Civitai LoRAs only.".to_string()),
-            preview_url: None,
-            preview_kind: "none".to_string(),
-        });
-    }
-
-    let result = state
-        .context
-        .downloads
-        .civitai_model_metadata(lora.download_url.clone(), token)
-        .await;
-
-    match result {
-        Ok(Ok(metadata)) => {
-            let (preview_kind, preview_url) = match metadata.preview {
-                Some(CivitaiPreview::Video { url }) => ("video".to_string(), Some(url)),
-                Some(CivitaiPreview::Image(_)) => (
-                    if metadata
-                        .preview_url
-                        .as_deref()
-                        .map(is_video_url)
-                        .unwrap_or(false)
-                    {
-                        "video".to_string()
-                    } else {
-                        "image".to_string()
-                    },
-                    metadata.preview_url.clone(),
-                ),
-                None => (
-                    if metadata
-                        .preview_url
-                        .as_deref()
-                        .map(is_video_url)
-                        .unwrap_or(false)
-                    {
-                        "video".to_string()
-                    } else {
-                        "none".to_string()
-                    },
-                    metadata.preview_url.clone(),
-                ),
-            };
-
-            Ok(LoraMetadataResponse {
-                creator: metadata
-                    .creator_username
-                    .unwrap_or_else(|| "Unknown creator".to_string()),
-                creator_url: metadata.creator_link,
-                strength: metadata
-                    .usage_strength
-                    .map(|value| format!("{value:.2}"))
-                    .unwrap_or_else(|| "Not provided".to_string()),
-                triggers: metadata.trained_words,
-                description: metadata
-                    .description
-                    .map(|text| strip_html_tags(&text))
-                    .filter(|text| !text.trim().is_empty())
-                    .unwrap_or_else(|| "No description available.".to_string()),
-                preview_url,
-                preview_kind,
-            })
-        }
-        Ok(Err(err)) => Err(format!("Failed to load LoRA metadata: {err:#}")),
-        Err(join_err) => Err(format!("LoRA metadata task failed: {join_err}")),
-    }
-}
-
-fn resolve_root_path(
+pub(crate) fn resolve_root_path(
     context: &AppContext,
     comfyui_root: Option<String>,
 ) -> Result<std::path::PathBuf, String> {
@@ -4862,44 +3696,7 @@ fn resolve_root_path(
     Err("Select a valid ComfyUI root folder first.".to_string())
 }
 
-fn parse_yaml_scalar(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.len() >= 2 {
-        let single = trimmed.starts_with('\'') && trimmed.ends_with('\'');
-        let double = trimmed.starts_with('"') && trimmed.ends_with('"');
-        if single || double {
-            let inner = &trimmed[1..trimmed.len() - 1];
-            if single {
-                return inner.replace("''", "'");
-            }
-            return inner.replace("\\\"", "\"");
-        }
-    }
-    trimmed.to_string()
-}
-
-fn parse_yaml_bool(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "yes" | "on" | "1" => Some(true),
-        "false" | "no" | "off" | "0" => Some(false),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ComfyExtraModelConfig {
-    base_path: PathBuf,
-    is_default: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct ComfyExtraModelConfigResponse {
-    configured: bool,
-    base_path: Option<String>,
-    use_as_default: bool,
-}
-
-fn comfy_extra_model_config(comfy_root: &Path) -> Option<ComfyExtraModelConfig> {
+pub(crate) fn comfy_extra_model_config(comfy_root: &Path) -> Option<ComfyExtraModelConfig> {
     let path = comfy_root.join("extra_model_paths.yaml");
     let content = std::fs::read_to_string(path).ok()?;
     let mut in_comfyui = false;
@@ -4982,110 +3779,13 @@ fn comfy_extra_model_config(comfy_root: &Path) -> Option<ComfyExtraModelConfig> 
     })
 }
 
-fn effective_download_root(comfy_root: &Path) -> PathBuf {
+pub(crate) fn effective_download_root(comfy_root: &Path) -> PathBuf {
     match comfy_extra_model_config(comfy_root) {
         Some(config) if config.is_default => config.base_path,
         _ => comfy_root.to_path_buf(),
     }
 }
 
-fn comfyui_instance_name_from_path(path: &Path) -> String {
-    path.file_name()
-        .and_then(|value| value.to_str())
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("ComfyUI")
-        .to_string()
-}
-
-fn resolve_comfyui_instance_name(context: &AppContext, comfyui_root: Option<String>) -> String {
-    resolve_root_path(context, comfyui_root)
-        .ok()
-        .as_deref()
-        .map(comfyui_instance_name_from_path)
-        .unwrap_or_else(|| "ComfyUI".to_string())
-}
-
-fn parse_ram_tier(value: &str) -> Option<RamTier> {
-    RamTier::from_identifier(value)
-}
-
-fn parse_vram_tier(value: &str) -> Option<VramTier> {
-    VramTier::from_identifier(value)
-}
-
-fn is_video_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.ends_with(".mp4")
-        || lower.ends_with(".webm")
-        || lower.ends_with(".mov")
-        || lower.contains(".mp4?")
-        || lower.contains(".webm?")
-        || lower.contains(".mov?")
-}
-
-fn strip_html_tags(input: &str) -> String {
-    let mut raw = String::with_capacity(input.len());
-    let mut in_tag = false;
-    for ch in input.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => {
-                if in_tag {
-                    in_tag = false;
-                    raw.push(' ');
-                }
-            }
-            _ if !in_tag => raw.push(ch),
-            _ => {}
-        }
-    }
-    raw.replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn detect_existing_comfyui_root(path: &Path) -> Option<PathBuf> {
-    if path.join("main.py").is_file() {
-        return Some(path.to_path_buf());
-    }
-
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    let entries = std::fs::read_dir(path).ok()?;
-    for entry in entries.flatten() {
-        let child = entry.path();
-        if !child.is_dir() {
-            continue;
-        }
-        let name = child
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if !name.starts_with("comfyui") {
-            continue;
-        }
-        if child.join("main.py").is_file() {
-            candidates.push(child);
-        }
-    }
-
-    if candidates.is_empty() {
-        return None;
-    }
-    candidates.sort_by(|a, b| {
-        let an = a.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        let bn = b.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        an.cmp(bn)
-    });
-    candidates.into_iter().next()
-}
 
 #[tauri::command]
 fn inspect_comfyui_path(path: String) -> Result<ComfyPathInspection, String> {
@@ -5185,79 +3885,6 @@ fn list_comfyui_installations(
     Ok(entries)
 }
 
-fn spawn_progress_emitter(
-    app: AppHandle,
-    kind: String,
-    rx: std::sync::mpsc::Receiver<DownloadSignal>,
-) {
-    std::thread::spawn(move || {
-        while let Ok(signal) = rx.recv() {
-            let payload = match signal {
-                DownloadSignal::Started {
-                    artifact,
-                    index,
-                    total,
-                    size,
-                } => DownloadProgressEvent {
-                    kind: kind.clone(),
-                    phase: "started".to_string(),
-                    artifact: Some(artifact),
-                    index: Some(index + 1),
-                    total: Some(total),
-                    received: None,
-                    size,
-                    folder: None,
-                    message: None,
-                },
-                DownloadSignal::Progress {
-                    artifact,
-                    index,
-                    received,
-                    size,
-                } => DownloadProgressEvent {
-                    kind: kind.clone(),
-                    phase: "progress".to_string(),
-                    artifact: Some(artifact),
-                    index: Some(index + 1),
-                    total: None,
-                    received: Some(received),
-                    size,
-                    folder: None,
-                    message: None,
-                },
-                DownloadSignal::Finished {
-                    artifact,
-                    index,
-                    size,
-                    folder,
-                } => DownloadProgressEvent {
-                    kind: kind.clone(),
-                    phase: "finished".to_string(),
-                    artifact: Some(artifact),
-                    index: Some(index + 1),
-                    total: None,
-                    received: None,
-                    size,
-                    folder,
-                    message: None,
-                },
-                DownloadSignal::Failed { artifact, error } => DownloadProgressEvent {
-                    kind: kind.clone(),
-                    phase: "failed".to_string(),
-                    artifact: Some(artifact),
-                    index: None,
-                    total: None,
-                    received: None,
-                    size: None,
-                    folder: None,
-                    message: Some(error),
-                },
-            };
-            let _ = app.emit("download-progress", payload);
-        }
-    });
-}
-
 #[cfg(target_os = "windows")]
 fn normalize_explorer_path(path: &std::path::Path) -> String {
     let display = path.to_string_lossy().to_string();
@@ -5348,7 +3975,7 @@ fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
-fn start_comfyui_root_impl(
+pub(crate) fn start_comfyui_root_impl(
     app: &AppHandle,
     state: &AppState,
     comfyui_root: Option<String>,
@@ -5515,46 +4142,7 @@ fn start_comfyui_root_impl(
     Ok(())
 }
 
-fn wait_for_comfyui_start(state: &AppState, timeout: Duration) -> Result<(), String> {
-    let started_at = Instant::now();
-    loop {
-        if comfyui_external_running(state) {
-            return Ok(());
-        }
-
-        {
-            let mut guard = state
-                .comfyui_process
-                .lock()
-                .map_err(|_| "comfyui process lock poisoned".to_string())?;
-            if let Some(child) = guard.as_mut() {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        *guard = None;
-                        return Err(format!(
-                            "ComfyUI process exited during startup with status {status}."
-                        ));
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        *guard = None;
-                        return Err(format!("Failed to monitor ComfyUI startup: {err}"));
-                    }
-                }
-            }
-        }
-
-        if started_at.elapsed() > timeout {
-            if comfyui_process_running(state) || comfyui_external_running(state) {
-                return Ok(());
-            }
-            return Err("ComfyUI did not become ready on 127.0.0.1:8188 in time.".to_string());
-        }
-        std::thread::sleep(Duration::from_millis(220));
-    }
-}
-
-fn spawn_comfyui_start_monitor(app: &AppHandle, instance_name: String) {
+pub(crate) fn spawn_comfyui_start_monitor(app: &AppHandle, instance_name: String) {
     let app_handle = app.clone();
     std::thread::spawn(move || {
         let state = app_handle.state::<AppState>();
@@ -5566,6 +4154,9 @@ fn spawn_comfyui_start_monitor(app: &AppHandle, instance_name: String) {
                     "started",
                     format!("{instance_name} started."),
                 );
+                if let Err(err) = open::that("http://127.0.0.1:8188") {
+                    log::warn!("Failed to open ComfyUI in browser: {err}");
+                }
             }
             Err(err) => {
                 let running = comfyui_runtime_running(&state);
@@ -5578,116 +4169,6 @@ fn spawn_comfyui_start_monitor(app: &AppHandle, instance_name: String) {
             }
         }
     });
-}
-
-fn start_comfyui_root_background(app: &AppHandle, comfyui_root: Option<String>) {
-    let app_handle = app.clone();
-    let instance_name = {
-        let state = app_handle.state::<AppState>();
-        resolve_comfyui_instance_name(&state.context, comfyui_root.clone())
-    };
-    emit_comfyui_runtime_event(
-        &app_handle,
-        "starting",
-        format!("Starting {instance_name}..."),
-    );
-    update_tray_comfy_status(&app_handle, true);
-    let instance_name_for_task = instance_name.clone();
-    std::thread::spawn(move || {
-        let state = app_handle.state::<AppState>();
-        if let Err(err) = start_comfyui_root_impl(&app_handle, &state, comfyui_root) {
-            let running = comfyui_runtime_running(&state);
-            update_tray_comfy_status(&app_handle, running);
-            emit_comfyui_runtime_event(
-                &app_handle,
-                "start_failed",
-                format!("{instance_name_for_task} start failed: {err}"),
-            );
-            return;
-        }
-        spawn_comfyui_start_monitor(&app_handle, instance_name_for_task);
-    });
-}
-
-#[tauri::command]
-fn start_comfyui_root(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    comfyui_root: Option<String>,
-) -> Result<(), String> {
-    if comfyui_runtime_running(&state) {
-        let instance_name = resolve_comfyui_instance_name(&state.context, comfyui_root.clone());
-        update_tray_comfy_status(&app, true);
-        emit_comfyui_runtime_event(
-            &app,
-            "started",
-            format!("{instance_name} is already running."),
-        );
-        return Ok(());
-    }
-    start_comfyui_root_background(&app, comfyui_root);
-    Ok(())
-}
-
-fn comfyui_process_running(state: &AppState) -> bool {
-    let mut guard = match state.comfyui_process.lock() {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
-    let Some(child) = guard.as_mut() else {
-        return false;
-    };
-    match child.try_wait() {
-        Ok(Some(_)) => {
-            *guard = None;
-            false
-        }
-        Ok(None) => true,
-        Err(_) => {
-            *guard = None;
-            false
-        }
-    }
-}
-
-fn comfyui_external_running(state: &AppState) -> bool {
-    let _ = state;
-    let addr = ("127.0.0.1", 8188)
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut iter| iter.next());
-    let Some(addr) = addr else {
-        return false;
-    };
-    TcpStream::connect_timeout(&addr, Duration::from_millis(180)).is_ok()
-}
-
-fn comfyui_runtime_running(state: &AppState) -> bool {
-    comfyui_process_running(state) || comfyui_external_running(state)
-}
-
-#[derive(Debug, Serialize)]
-struct ComfyRuntimeStatus {
-    running: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ComfyRuntimeEvent {
-    phase: String,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ComfyRuntimeLogEvent {
-    stream: String,
-    text: String,
-}
-
-#[derive(Debug, Serialize)]
-struct EffectiveDownloadDestinationResponse {
-    comfyui_root: String,
-    effective_root: String,
-    uses_shared_default: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -5713,39 +4194,6 @@ struct ComfyAddonState {
     node_comfyui_gguf: bool,
     node_comfyui_kjnodes: bool,
     node_comfyui_crystools: bool,
-}
-
-fn emit_comfyui_runtime_event(app: &AppHandle, phase: &str, message: impl Into<String>) {
-    let msg = message.into();
-    let _ = app.emit(
-        "comfyui-runtime",
-        ComfyRuntimeEvent {
-            phase: phase.to_string(),
-            message: msg.clone(),
-        },
-    );
-
-    if matches!(
-        phase,
-        "starting" | "started" | "stopping" | "stopped" | "start_failed" | "stop_failed"
-    ) {
-        let _ = app
-            .notification()
-            .builder()
-            .title("Arctic ComfyUI Helper")
-            .body(msg)
-            .show();
-    }
-}
-
-fn emit_comfyui_runtime_log_event(app: &AppHandle, stream: &str, text: impl Into<String>) {
-    let _ = app.emit(
-        "comfyui-runtime-log",
-        ComfyRuntimeLogEvent {
-            stream: stream.to_string(),
-            text: text.into(),
-        },
-    );
 }
 
 fn spawn_comfyui_runtime_log_stream(
@@ -5931,46 +4379,7 @@ fn nunchaku_backend_present(root: &Path) -> bool {
         || custom_node_exists(root, "ComfyUI-nunchaku")
 }
 
-fn custom_node_exists(root: &Path, name: &str) -> bool {
-    root.join("custom_nodes").join(name).is_dir()
-}
-
-fn read_comfyui_installed_version(root: &Path) -> Option<String> {
-    let path = root.join("comfyui_version.py");
-    let content = std::fs::read_to_string(path).ok()?;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("__version__") {
-            continue;
-        }
-        let (_, rhs) = trimmed.split_once('=')?;
-        let value = rhs.trim().trim_matches('"').trim_matches('\'').trim();
-        if !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn parse_semver_triplet(input: &str) -> Option<(u64, u64, u64)> {
-    let trimmed = input.trim().trim_start_matches('v').trim_start_matches('V');
-    let core = trimmed.split('-').next().unwrap_or(trimmed);
-    let mut parts = core.split('.');
-    let major = parts.next()?.parse::<u64>().ok()?;
-    let minor = parts.next()?.parse::<u64>().ok()?;
-    let patch = parts.next()?.parse::<u64>().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some((major, minor, patch))
-}
-
-fn normalize_release_version(input: &str) -> Option<String> {
-    let (major, minor, patch) = parse_semver_triplet(input)?;
-    Some(format!("{major}.{minor}.{patch}"))
-}
-
-fn git_latest_release_tag(root: &Path) -> Option<(String, String)> {
+pub(crate) fn git_latest_release_tag(root: &Path) -> Option<(String, String)> {
     let (stdout, _) = run_command_capture(
         "git",
         &["ls-remote", "--tags", "--refs", "origin"],
@@ -6006,49 +4415,6 @@ fn git_latest_release_tag(root: &Path) -> Option<(String, String)> {
     best.map(|(_, tag, version)| (tag, version))
 }
 
-fn git_current_branch(root: &Path) -> Option<String> {
-    let (stdout, _) =
-        run_command_capture("git", &["rev-parse", "--abbrev-ref", "HEAD"], Some(root)).ok()?;
-    let branch = stdout.lines().next().unwrap_or_default().trim().to_string();
-    if branch.is_empty() {
-        None
-    } else {
-        Some(branch)
-    }
-}
-
-fn git_commit_for_ref(root: &Path, git_ref: &str) -> Option<String> {
-    let (stdout, _) = run_command_capture("git", &["rev-parse", git_ref], Some(root)).ok()?;
-    let commit = stdout.lines().next().unwrap_or_default().trim().to_string();
-    if commit.len() >= 7 {
-        Some(commit)
-    } else {
-        None
-    }
-}
-
-fn stop_comfyui_for_mutation(app: &AppHandle, state: &AppState) -> Result<bool, String> {
-    if !comfyui_runtime_running(state) {
-        return Ok(false);
-    }
-    emit_comfyui_runtime_event(
-        app,
-        "stopping_for_changes",
-        "Stopping ComfyUI before applying changes...",
-    );
-    stop_comfyui_root_impl(state)?;
-    let running = comfyui_runtime_running(state);
-    update_tray_comfy_status(app, running);
-    if running {
-        return Err("ComfyUI is still running. Stop it before applying changes.".to_string());
-    }
-    emit_comfyui_runtime_event(
-        app,
-        "stopped_for_changes",
-        "ComfyUI stopped for install/remove operation.",
-    );
-    Ok(true)
-}
 #[cfg(target_os = "windows")]
 fn kill_python_processes_for_root(root: &Path, py_exe: &Path) -> Result<bool, String> {
     let root =
@@ -6479,16 +4845,6 @@ fn set_comfyui_launch_attention_backend(
         "flash" => "ComfyUI will launch with FlashAttention.".to_string(),
         _ => unreachable!(),
     })
-}
-
-fn remove_custom_node_dirs(root: &Path, names: &[&str]) {
-    let custom_nodes = root.join("custom_nodes");
-    for name in names {
-        let path = custom_nodes.join(name);
-        if path.exists() {
-            let _ = std::fs::remove_dir_all(path);
-        }
-    }
 }
 
 fn install_insightface(
@@ -7309,128 +5665,6 @@ async fn apply_comfyui_component_toggle(
 }
 
 #[tauri::command]
-fn get_comfyui_runtime_status(state: State<'_, AppState>) -> ComfyRuntimeStatus {
-    ComfyRuntimeStatus {
-        running: comfyui_runtime_running(&state),
-    }
-}
-
-fn get_comfyui_update_status_blocking(root: PathBuf) -> Result<ComfyUiUpdateStatus, String> {
-    let installed_version = read_comfyui_installed_version(&root);
-
-    if !root.join(".git").exists() {
-        return Ok(ComfyUiUpdateStatus {
-            installed_version,
-            latest_version: None,
-            head_matches_latest_tag: false,
-            update_available: false,
-            checked: false,
-            detail: "Not a git-based ComfyUI install.".to_string(),
-        });
-    }
-
-    let Some((latest_tag, latest_version)) = git_latest_release_tag(&root) else {
-        return Ok(ComfyUiUpdateStatus {
-            installed_version,
-            latest_version: None,
-            head_matches_latest_tag: false,
-            update_available: false,
-            checked: false,
-            detail: "Could not read remote ComfyUI release tags.".to_string(),
-        });
-    };
-
-    let head_commit = git_commit_for_ref(&root, "HEAD");
-    let tag_commit = git_commit_for_ref(&root, &latest_tag);
-    if head_commit.is_some() && head_commit == tag_commit {
-        return Ok(ComfyUiUpdateStatus {
-            installed_version,
-            latest_version: Some(latest_version.clone()),
-            head_matches_latest_tag: true,
-            update_available: false,
-            checked: true,
-            detail: format!("ComfyUI is up to date by release tags (HEAD matches {latest_tag})."),
-        });
-    }
-
-    match installed_version.clone().and_then(|v| normalize_release_version(&v)) {
-        Some(local_version) => {
-            let local_triplet = parse_semver_triplet(&local_version);
-            let latest_triplet = parse_semver_triplet(&latest_version);
-            let update_available = matches!(
-                (local_triplet, latest_triplet),
-                (Some(local), Some(latest)) if latest > local
-            );
-
-            Ok(ComfyUiUpdateStatus {
-                installed_version,
-                latest_version: Some(latest_version.clone()),
-                head_matches_latest_tag: false,
-                update_available,
-                checked: true,
-                detail: if update_available {
-                    format!(
-                        "ComfyUI update available from release tags (local v{local_version}, latest tag {latest_tag})."
-                    )
-                } else {
-                    format!(
-                        "ComfyUI is up to date by release tags (local v{local_version}, latest tag {latest_tag})."
-                    )
-                },
-            })
-        }
-        None => Ok(ComfyUiUpdateStatus {
-            installed_version,
-            latest_version: Some(latest_version.clone()),
-            head_matches_latest_tag: false,
-            update_available: false,
-            checked: true,
-            detail: format!(
-                "Detected latest release tag {latest_tag}, but local ComfyUI version metadata is unavailable."
-            ),
-        }),
-    }
-}
-
-#[tauri::command]
-async fn get_comfyui_update_status(
-    state: State<'_, AppState>,
-    comfyui_root: Option<String>,
-) -> Result<ComfyUiUpdateStatus, String> {
-    let root = resolve_root_path(&state.context, comfyui_root)?;
-    tauri::async_runtime::spawn_blocking(move || get_comfyui_update_status_blocking(root))
-        .await
-        .map_err(|err| format!("ComfyUI update check task failed: {err}"))?
-}
-
-#[tauri::command]
-fn stop_comfyui_root(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
-    let instance_name = resolve_comfyui_instance_name(&state.context, None);
-    emit_comfyui_runtime_event(&app, "stopping", format!("Stopping {instance_name}..."));
-    let result = stop_comfyui_root_impl(&state);
-    if result.is_ok() {
-        let running = comfyui_runtime_running(&state);
-        update_tray_comfy_status(&app, running);
-        if running {
-            emit_comfyui_runtime_event(
-                &app,
-                "stop_failed",
-                format!("{instance_name} stop did not fully complete."),
-            );
-        } else {
-            emit_comfyui_runtime_event(&app, "stopped", format!("{instance_name} stopped."));
-        }
-    } else if let Err(err) = &result {
-        emit_comfyui_runtime_event(
-            &app,
-            "stop_failed",
-            format!("{instance_name} stop failed: {err}"),
-        );
-    }
-    result
-}
-
-#[tauri::command]
 async fn update_selected_comfyui(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -7546,22 +5780,8 @@ async fn update_selected_comfyui(
     ))
 }
 
-fn stop_comfyui_root_impl(state: &AppState) -> Result<bool, String> {
-    let mut stopped_any = false;
-
-    let mut guard = state
-        .comfyui_process
-        .lock()
-        .map_err(|_| "comfyui process lock poisoned".to_string())?;
-    if let Some(child) = guard.as_mut() {
-        child
-            .kill()
-            .map_err(|err| format!("Failed to stop ComfyUI: {err}"))?;
-        let _ = child.wait();
-        *guard = None;
-        stopped_any = true;
-    }
-    drop(guard);
+pub(crate) fn stop_comfyui_root_impl(state: &AppState) -> Result<bool, String> {
+    let mut stopped_any = kill_managed_comfyui_child(state)?;
 
     // After app restart, we may no longer have a child handle but ComfyUI can still
     // be running and listening on 8188. In that case, stop the listener process.
@@ -7617,16 +5837,6 @@ fn kill_listener_process_on_port(port: u16) -> Result<bool, String> {
     ))
 }
 
-fn show_main_window(app: &AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "Main window not found.".to_string())?;
-    let _ = window.show();
-    let _ = window.unminimize();
-    let _ = window.set_focus();
-    Ok(())
-}
-
 fn started_tray_icon() -> Option<Image<'static>> {
     static STARTED_ICON: OnceLock<Option<Image<'static>>> = OnceLock::new();
     STARTED_ICON
@@ -7634,7 +5844,7 @@ fn started_tray_icon() -> Option<Image<'static>> {
         .clone()
 }
 
-fn update_tray_comfy_status(app: &AppHandle, running: bool) {
+pub(crate) fn update_tray_comfy_status(app: &AppHandle, running: bool) {
     if let Some(tray) = app.tray_by_id("arctic_tray") {
         let tooltip = if running {
             let state = app.state::<AppState>();
@@ -7766,17 +5976,6 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 #[tauri::command]
-fn pick_folder(title: Option<String>) -> Option<String> {
-    let mut dialog = rfd::FileDialog::new();
-    if let Some(title) = title.filter(|value| !value.trim().is_empty()) {
-        dialog = dialog.set_title(title);
-    }
-    dialog
-        .pick_folder()
-        .map(|path| path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
 fn cancel_active_download(state: State<'_, AppState>) -> Result<bool, String> {
     let mut active = state
         .active_cancel
@@ -7825,6 +6024,12 @@ pub fn run() {
         } else {
             log::LevelFilter::Info
         })
+        // Tao 0.34.8 classifies these normal Windows event-loop transitions as
+        // DEBUG. Keep them out of Nerdstats without hiding real WARN/ERROR logs.
+        .filter_module(
+            "tao::platform_impl::platform::event_loop::runner",
+            log::LevelFilter::Info,
+        )
         .target(env_logger::Target::Stdout)
         .init();
 
@@ -7877,47 +6082,48 @@ pub fn run() {
             quitting: Mutex::new(false),
         })
         .invoke_handler(tauri::generate_handler![
+            crate::platform::get_platform_capabilities,
             get_app_snapshot,
-            get_catalog,
-            refresh_catalog,
-            get_settings,
+            crate::shared::get_catalog,
+            crate::shared::refresh_catalog,
+            crate::shared::get_settings,
             inspect_comfyui_path,
             list_comfyui_installations,
             get_comfyui_install_recommendation,
-            set_comfyui_gpu_selection,
-            get_comfyui_resume_state,
+            crate::shared::set_comfyui_gpu_selection,
+            crate::shared::get_comfyui_resume_state,
             get_comfyui_addon_state,
             apply_attention_backend_change,
             set_comfyui_launch_attention_backend,
             apply_comfyui_component_toggle,
-            get_comfyui_update_status,
+            crate::shared::get_comfyui_update_status,
             update_selected_comfyui,
             run_comfyui_preflight,
             get_hf_xet_preflight,
             set_hf_xet_enabled,
             set_comfyui_root,
             set_comfyui_install_base,
-            get_comfyui_extra_model_config,
-            get_effective_download_destination,
-            set_comfyui_extra_model_config,
-            set_comfyui_custom_launch_args,
-            set_comfyui_show_runtime_logs,
-            save_civitai_token,
+            crate::shared::get_comfyui_extra_model_config,
+            crate::shared::get_effective_download_destination,
+            crate::shared::set_comfyui_extra_model_config,
+            crate::shared::set_comfyui_custom_launch_args,
+            crate::shared::set_comfyui_show_runtime_logs,
+            crate::shared::save_civitai_token,
             check_updates_now,
             auto_update_startup,
-            download_model_assets,
-            download_model_assets_batch,
+            crate::shared::download_model_assets,
+            crate::shared::download_model_assets_batch,
             download_lora_asset,
-            download_workflow_asset,
-            get_lora_metadata,
+            crate::shared::download_workflow_asset,
+            crate::shared::get_lora_metadata,
             start_comfyui_install,
-            cancel_comfyui_install,
-            start_comfyui_root,
-            stop_comfyui_root,
-            get_comfyui_runtime_status,
+            crate::shared::cancel_comfyui_install,
+            crate::shared::start_comfyui_root,
+            crate::shared::stop_comfyui_root,
+            crate::shared::get_comfyui_runtime_status,
             open_folder,
             open_external_url,
-            pick_folder,
+            crate::shared::pick_folder,
             cancel_active_download
         ])
         .run(tauri::generate_context!())

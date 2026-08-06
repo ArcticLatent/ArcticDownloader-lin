@@ -275,10 +275,7 @@ impl LoraDefinition {
         }
 
         let url = self.download_url.trim();
-        let last_segment = url
-            .rsplit(|c| c == '/' || c == '\\')
-            .next()
-            .unwrap_or("lora.safetensors");
+        let last_segment = url.rsplit(['/', '\\']).next().unwrap_or("lora.safetensors");
         let cleaned = last_segment.split('?').next().unwrap_or(last_segment);
         if cleaned.is_empty() {
             format!("{}-lora.safetensors", self.id)

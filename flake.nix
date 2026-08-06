@@ -34,9 +34,15 @@
             clippy
             flatpak
             flatpak-builder
+            nodejs
             rustc
             rustfmt
           ];
+          shellHook = ''
+            # Prefer the Nix-provided toolchain over rustup shims inherited
+            # from an interactive shell. This keeps fmt/clippy reproducible.
+            export PATH="${pkgs.rustfmt}/bin:${pkgs.clippy}/bin:${pkgs.cargo}/bin:$PATH"
+          '';
         };
 
         # Windows cross-check shell for Linux/NixOS developers. The actual
