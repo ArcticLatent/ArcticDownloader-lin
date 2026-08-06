@@ -8,7 +8,7 @@ use crate::shared::{
     is_empty_dir, is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
     normalize_optional_path, normalize_release_version, parse_custom_launch_args,
     parse_hf_env_value, parse_semver_triplet, parse_yaml_bool, parse_yaml_scalar,
-    path_name_is_comfyui, push_preflight, read_comfyui_installed_version,
+    path_name_is_comfyui, push_preflight, read_comfyui_installed_version, recover_lock,
     remove_custom_node_dirs, resolve_comfyui_instance_name, show_main_window,
     spawn_progress_emitter, start_comfyui_root_background, stop_comfyui_for_mutation,
     wait_for_comfyui_start, write_install_state, write_install_summary, yaml_single_quote,
@@ -4268,20 +4268,14 @@ async fn start_comfyui_install(
     request: ComfyInstallRequest,
 ) -> Result<(), String> {
     {
-        let mut active = state
-            .install_cancel
-            .lock()
-            .map_err(|_| "install state lock poisoned".to_string())?;
+        let mut active = recover_lock(state.install_cancel.lock());
         if active.is_some() {
             return Err("ComfyUI installation is already active.".to_string());
         }
         *active = Some(CancellationToken::new());
     }
 
-    let cancel = state
-        .install_cancel
-        .lock()
-        .map_err(|_| "install state lock poisoned".to_string())?
+    let cancel = recover_lock(state.install_cancel.lock())
         .as_ref()
         .cloned()
         .ok_or_else(|| "Failed to initialize install cancellation token.".to_string())?;
@@ -4338,9 +4332,7 @@ async fn start_comfyui_install(
             Err(err) => emit_install_event(&app_for_task, "failed", &err),
         }
         let managed = app_for_task.state::<AppState>();
-        if let Ok(mut active) = managed.install_cancel.lock() {
-            *active = None;
-        };
+        *recover_lock(managed.install_cancel.lock()) = None;
     });
 
     Ok(())
@@ -4565,10 +4557,7 @@ async fn download_lora_asset(
 
     let cancel = CancellationToken::new();
     {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
+        let mut active = recover_lock(state.active_cancel.lock());
         if active.is_some() {
             return Err("A download is already active. Cancel it first.".to_string());
         }
@@ -4583,20 +4572,14 @@ async fn download_lora_asset(
         tx,
         Some(cancel),
     );
-    if let Ok(mut abort) = state.active_abort.lock() {
-        *abort = Some(handle.abort_handle());
-    }
+    *recover_lock(state.active_abort.lock()) = Some(handle.abort_handle());
     spawn_progress_emitter(app.clone(), "lora".to_string(), rx);
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = handle.await;
         let managed = app_for_task.state::<AppState>();
-        if let Ok(mut active) = managed.active_cancel.lock() {
-            *active = None;
-        }
-        if let Ok(mut abort) = managed.active_abort.lock() {
-            *abort = None;
-        }
+        *recover_lock(managed.active_cancel.lock()) = None;
+        *recover_lock(managed.active_abort.lock()) = None;
 
         match result {
             Ok(Ok(_outcome)) => {
@@ -5104,11 +5087,7 @@ pub(crate) fn start_comfyui_root_impl(
             spawn_comfyui_runtime_log_stream(app.clone(), "stderr", stderr);
         }
     }
-    let mut guard = state
-        .comfyui_process
-        .lock()
-        .map_err(|_| "comfyui process lock poisoned".to_string())?;
-    *guard = Some(child);
+    *recover_lock(state.comfyui_process.lock()) = Some(child);
     Ok(())
 }
 
@@ -6692,14 +6671,8 @@ fn setup_tray(_app: &AppHandle) -> tauri::Result<()> {
 
 #[tauri::command]
 fn cancel_active_download(state: State<'_, AppState>) -> Result<bool, String> {
-    let mut active = state
-        .active_cancel
-        .lock()
-        .map_err(|_| "download state lock poisoned".to_string())?;
-    let mut abort = state
-        .active_abort
-        .lock()
-        .map_err(|_| "download state lock poisoned".to_string())?;
+    let mut active = recover_lock(state.active_cancel.lock());
+    let mut abort = recover_lock(state.active_abort.lock());
     if let Some(token) = active.as_ref() {
         token.cancel();
         // Cancelling the token only stops the download at its next

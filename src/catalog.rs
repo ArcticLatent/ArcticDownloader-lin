@@ -40,7 +40,12 @@ impl CatalogService {
     }
 
     pub fn catalog_snapshot(&self) -> ModelCatalog {
-        self.catalog.read().expect("catalog poisoned").clone()
+        // Recover from poisoning rather than panicking -- see
+        // ConfigStore::settings()'s comment for why that's safe here too.
+        self.catalog
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn variants_for_tier(&self, model_id: &str, tier: VramTier) -> Vec<ModelVariant> {
@@ -166,7 +171,10 @@ impl CatalogService {
         self.persist_catalog(&catalog)?;
 
         {
-            let mut guard = self.catalog.write().expect("catalog poisoned for write");
+            let mut guard = self
+                .catalog
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = catalog;
         }
 

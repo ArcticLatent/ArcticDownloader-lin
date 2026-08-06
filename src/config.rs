@@ -137,9 +137,14 @@ impl ConfigStore {
     }
 
     pub fn settings(&self) -> AppSettings {
+        // Recover from poisoning rather than panicking: a panic elsewhere
+        // while holding this lock doesn't leave `AppSettings` (simple owned
+        // data) torn, so recovering keeps settings readable afterward
+        // instead of every future read/write panicking again for the rest
+        // of the process's life.
         self.settings
             .read()
-            .expect("settings lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -150,7 +155,7 @@ impl ConfigStore {
         let mut guard = self
             .settings
             .write()
-            .expect("settings lock poisoned for write");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         mutate(&mut guard);
         let snapshot = guard.clone();
         self.persist_locked(&snapshot)?;

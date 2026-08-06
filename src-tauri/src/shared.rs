@@ -61,6 +61,19 @@ pub fn default_true() -> bool {
     true
 }
 
+/// Recovers from a poisoned `Mutex`/`RwLock` by taking the guard anyway,
+/// instead of propagating an error or panicking. A panic while holding one
+/// of `AppState`'s locks doesn't leave the (simple, owned) data behind it
+/// torn -- Rust's poisoning is a conservative "might be inconsistent"
+/// signal here, not proof of actual corruption -- so recovering keeps the
+/// app functional after a single panic instead of every future access to
+/// that lock failing, or silently no-op'ing, for the rest of the process's
+/// life. Used uniformly in place of the previous mix of some call sites
+/// hard-erroring on poison and others silently skipping their body.
+pub fn recover_lock<T>(result: Result<T, std::sync::PoisonError<T>>) -> T {
+    result.unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// True if `path`'s final component is `ComfyUI` or `ComfyUI-<suffix>`
 /// (case-insensitive), the naming convention used for install directories
 /// (see README: "Install New" creates `ComfyUI`, `ComfyUI-01`, ...).
@@ -768,10 +781,7 @@ pub fn save_civitai_token(
 /// Cancels an in-flight ComfyUI install, if one is running.
 #[tauri::command]
 pub fn cancel_comfyui_install(state: State<'_, AppState>) -> Result<bool, String> {
-    let mut active = state
-        .install_cancel
-        .lock()
-        .map_err(|_| "install state lock poisoned".to_string())?;
+    let mut active = recover_lock(state.install_cancel.lock());
     if let Some(token) = active.as_ref() {
         token.cancel();
         *active = None;
@@ -784,10 +794,7 @@ pub fn cancel_comfyui_install(state: State<'_, AppState>) -> Result<bool, String
 /// True if the managed ComfyUI child process is still alive. Reaps it (sets
 /// the slot back to `None`) if it has already exited or become unqueryable.
 pub fn comfyui_process_running(state: &AppState) -> bool {
-    let mut guard = match state.comfyui_process.lock() {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
+    let mut guard = recover_lock(state.comfyui_process.lock());
     let Some(child) = guard.as_mut() else {
         return false;
     };
@@ -845,10 +852,7 @@ pub fn wait_for_comfyui_start(state: &AppState, timeout: Duration) -> Result<(),
         }
 
         {
-            let mut guard = state
-                .comfyui_process
-                .lock()
-                .map_err(|_| "comfyui process lock poisoned".to_string())?;
+            let mut guard = recover_lock(state.comfyui_process.lock());
             if let Some(child) = guard.as_mut() {
                 match child.try_wait() {
                     Ok(Some(status)) => {
@@ -948,10 +952,7 @@ pub fn set_comfyui_show_runtime_logs(
 /// (e.g. after an app restart, or a Flatpak host-spawned process on Linux).
 /// That fallback genuinely differs by platform and stays there.
 pub fn kill_managed_comfyui_child(state: &AppState) -> Result<bool, String> {
-    let mut guard = state
-        .comfyui_process
-        .lock()
-        .map_err(|_| "comfyui process lock poisoned".to_string())?;
+    let mut guard = recover_lock(state.comfyui_process.lock());
     let Some(child) = guard.as_mut() else {
         return Ok(false);
     };
@@ -1750,10 +1751,7 @@ pub async fn download_model_assets(
 
     let cancel = CancellationToken::new();
     {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
+        let mut active = recover_lock(state.active_cancel.lock());
         if active.is_some() {
             return Err("A download is already active. Cancel it first.".to_string());
         }
@@ -1770,20 +1768,14 @@ pub async fn download_model_assets(
         tx,
         Some(cancel),
     );
-    if let Ok(mut abort) = state.active_abort.lock() {
-        *abort = Some(handle.abort_handle());
-    }
+    *recover_lock(state.active_abort.lock()) = Some(handle.abort_handle());
     spawn_progress_emitter(app.clone(), "model".to_string(), rx);
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = handle.await;
         let managed = app_for_task.state::<AppState>();
-        if let Ok(mut active) = managed.active_cancel.lock() {
-            *active = None;
-        }
-        if let Ok(mut abort) = managed.active_abort.lock() {
-            *abort = None;
-        }
+        *recover_lock(managed.active_cancel.lock()) = None;
+        *recover_lock(managed.active_abort.lock()) = None;
 
         match result {
             Ok(Ok(outcomes)) => {
@@ -1905,10 +1897,7 @@ pub async fn download_model_assets_batch(
 
     let cancel = CancellationToken::new();
     {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
+        let mut active = recover_lock(state.active_cancel.lock());
         if active.is_some() {
             return Err("A download is already active. Cancel it first.".to_string());
         }
@@ -1991,20 +1980,14 @@ pub async fn download_model_assets_batch(
         );
     });
 
-    if let Ok(mut abort_slot) = state.active_abort.lock() {
-        *abort_slot = Some(abort.inner().abort_handle());
-    }
+    *recover_lock(state.active_abort.lock()) = Some(abort.inner().abort_handle());
 
     let managed = app.clone();
     tauri::async_runtime::spawn(async move {
         let _ = abort.await;
         let state = managed.state::<AppState>();
-        if let Ok(mut active) = state.active_cancel.lock() {
-            *active = None;
-        };
-        if let Ok(mut abort_slot) = state.active_abort.lock() {
-            *abort_slot = None;
-        };
+        *recover_lock(state.active_cancel.lock()) = None;
+        *recover_lock(state.active_abort.lock()) = None;
     });
 
     Ok(())
@@ -2036,10 +2019,7 @@ pub async fn download_workflow_asset(
 
     let cancel = CancellationToken::new();
     {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
+        let mut active = recover_lock(state.active_cancel.lock());
         if active.is_some() {
             return Err("A download is already active. Cancel it first.".to_string());
         }
@@ -2053,20 +2033,14 @@ pub async fn download_workflow_asset(
         tx,
         Some(cancel),
     );
-    if let Ok(mut abort) = state.active_abort.lock() {
-        *abort = Some(handle.abort_handle());
-    }
+    *recover_lock(state.active_abort.lock()) = Some(handle.abort_handle());
     spawn_progress_emitter(app.clone(), "workflow".to_string(), rx);
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = handle.await;
         let managed = app_for_task.state::<AppState>();
-        if let Ok(mut active) = managed.active_cancel.lock() {
-            *active = None;
-        }
-        if let Ok(mut abort) = managed.active_abort.lock() {
-            *abort = None;
-        }
+        *recover_lock(managed.active_cancel.lock()) = None;
+        *recover_lock(managed.active_abort.lock()) = None;
 
         match result {
             Ok(Ok(outcome)) => {

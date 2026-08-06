@@ -44,6 +44,8 @@ const state = {
   comfyLastUpdateDetailLogKey: "",
   comfyTorchProfileLocked: false,
   comfyAddonLoadSeq: 0,
+  comfySnapshotSeq: 0,
+  comfyRecommendationSeq: 0,
   comfyDetectedGpuVendor: "",
   comfyGpuSelection: "auto",
   detectedGpus: [],
@@ -332,21 +334,30 @@ const el = {
   startupStatus: document.getElementById("startup-status"),
 };
 
-function logLine(text) {
+// Caps how large a log panel's text can grow to. These panels prepend one
+// line per event for the life of the app session; without a cap, a long
+// session (or a chatty ComfyUI install) grows the text node -- and the
+// cost of every future prepend -- without bound.
+const LOG_MAX_CHARS = 200_000;
+
+function prependLogLine(target, text) {
   const stamp = new Date()
     .toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
     .replace(/\s+/g, " ")
     .toUpperCase();
-  el.statusLog.textContent = `[${stamp}] ${text}\n` + el.statusLog.textContent;
+  const combined = `[${stamp}] ${text}\n` + target.textContent;
+  target.textContent = combined.length > LOG_MAX_CHARS
+    ? combined.slice(0, LOG_MAX_CHARS)
+    : combined;
+}
+
+function logLine(text) {
+  prependLogLine(el.statusLog, text);
 }
 
 function logComfyLine(text) {
-  const stamp = new Date()
-    .toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
-    .replace(/\s+/g, " ")
-    .toUpperCase();
   if (!el.comfyInstallLog) return;
-  el.comfyInstallLog.textContent = `[${stamp}] ${text}\n` + el.comfyInstallLog.textContent;
+  prependLogLine(el.comfyInstallLog, text);
 }
 
 function escapeHtml(text) {
@@ -435,6 +446,24 @@ function runtimeLogMatchesFilter(entry) {
   return true;
 }
 
+// ComfyUI's stdout/stderr can emit many lines per second (model loading,
+// verbose custom nodes); logComfyRuntimeLine used to call
+// renderComfyRuntimeLogs() -- a full innerHTML wipe + ANSI-parsed rebuild
+// of up to 500 rows -- synchronously on every single line, which visibly
+// janks the UI exactly when it should feel responsive (during install/
+// startup). Coalescing into at most one render per animation frame keeps
+// the log visually live without redoing that work per line.
+let comfyRuntimeLogRenderScheduled = false;
+
+function scheduleComfyRuntimeLogRender() {
+  if (comfyRuntimeLogRenderScheduled) return;
+  comfyRuntimeLogRenderScheduled = true;
+  requestAnimationFrame(() => {
+    comfyRuntimeLogRenderScheduled = false;
+    renderComfyRuntimeLogs();
+  });
+}
+
 function renderComfyRuntimeLogs() {
   if (!el.comfyRuntimeLog) return;
   el.comfyRuntimeLog.innerHTML = "";
@@ -465,7 +494,7 @@ function logComfyRuntimeLine(text, stream = "stdout") {
   if (state.comfyRuntimeLogs.length > 500) {
     state.comfyRuntimeLogs.length = 500;
   }
-  renderComfyRuntimeLogs();
+  scheduleComfyRuntimeLogRender();
 }
 
 function setStartupStatus(text) {
@@ -1831,6 +1860,20 @@ function trimDescription(text, max = 520) {
   return `${value.slice(0, max).trimEnd()}...`;
 }
 
+// Coalesces rapid-fire calls (e.g. every keystroke in a search box) into
+// one, delayMs after the last one. Used instead of running a full
+// catalog filter + DOM rebuild on every single keystroke.
+function debounce(fn, delayMs) {
+  let timer = null;
+  return (...args) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      fn(...args);
+    }, delayMs);
+  };
+}
+
 // Remote/catalog-sourced values (Civitai/HuggingFace metadata, catalog
 // entries) end up here as preview `src`/link `href` targets and as
 // `open_external_url` invoke arguments. None of that data is app-authored,
@@ -2202,6 +2245,11 @@ function renderTransfers() {
   renderOverallProgress();
 }
 
+// Only the most recent 30 are ever rendered (see renderCompletedTransfers),
+// so keep well beyond that for scrollback/undo-adjacent uses but still
+// bounded -- a long session would otherwise grow this array without limit.
+const COMPLETED_HISTORY_MAX = 200;
+
 function addCompleted(item) {
   const index = state.completed.findIndex(
     (x) => x.name === item.name && x.status === item.status && x.folder === (item.folder || ""),
@@ -2217,6 +2265,9 @@ function addCompleted(item) {
       folder: item.folder || "",
       status: item.status,
     });
+    if (state.completed.length > COMPLETED_HISTORY_MAX) {
+      state.completed.length = COMPLETED_HISTORY_MAX;
+    }
   }
 }
 
@@ -3520,9 +3571,10 @@ async function bootstrap() {
   state.titleSystemText = "Loading system info...";
   renderAppVersionTag();
   renderTitleMeta();
-  const refreshSnapshot = (attempt = 0) => {
+  const refreshSnapshot = (attempt = 0, gen = ++state.comfySnapshotSeq) => {
     invoke("get_app_snapshot")
       .then((snapshot) => {
+        if (gen !== state.comfySnapshotSeq) return; // superseded by a newer call
         const ramRaw = Number(snapshot.total_ram_gb);
         const ramGb = Number.isFinite(ramRaw) ? (ramRaw > 1000 ? ramRaw / 1000 : ramRaw) : null;
         const ramText = `${ramGb != null ? ramGb.toFixed(1) : "?"} GB RAM`;
@@ -3555,7 +3607,7 @@ async function bootstrap() {
         renderAppVersionTag();
         renderTitleMeta();
         if ((snapshot.gpu_detection_pending || (!amdGpu && !nvidiaGpu && !intelGpu)) && attempt < 8) {
-          setTimeout(() => refreshSnapshot(attempt + 1), 600);
+          setTimeout(() => refreshSnapshot(attempt + 1, gen), 600);
         }
       })
       .catch(() => {});
@@ -3635,11 +3687,12 @@ async function bootstrap() {
   }
   updateRocmGuidedUi();
 
-  const refreshRecommendation = (attempt = 0) => {
+  const refreshRecommendation = (attempt = 0, gen = ++state.comfyRecommendationSeq) => {
     invoke("get_comfyui_install_recommendation", {
       gpuSelection: state.comfyGpuSelection === "auto" ? null : state.comfyGpuSelection,
     })
       .then((reco) => {
+        if (gen !== state.comfyRecommendationSeq) return; // superseded by a newer call
         state.comfyTorchRecommendedBase = reco.gpu_name
           ? `${platformLabel()} recommendation: '${reco.torch_label}' for ${reco.gpu_name}`
           : `${platformLabel()} recommendation: '${reco.torch_label}' for the selected GPU`;
@@ -3654,10 +3707,11 @@ async function bootstrap() {
         }
         applyComfyAddonRules();
         if ((reco.detection_pending || !reco.gpu_name) && attempt < 8) {
-          setTimeout(() => refreshRecommendation(attempt + 1), 600);
+          setTimeout(() => refreshRecommendation(attempt + 1, gen), 600);
         }
       })
       .catch((err) => {
+        if (gen !== state.comfyRecommendationSeq) return; // superseded by a newer call
         state.comfyTorchRecommendedBase = `${platformLabel()} recommendation unavailable. Choose the Torch profile manually.`;
         setTorchRecommendedDetecting(false);
         if (["amd", "intel"].includes(state.comfyDetectedGpuVendor)) {
@@ -3775,7 +3829,10 @@ el.tabWorkflows.addEventListener("click", () => switchTab("workflows"));
 el.modelFamily.addEventListener("change", renderModelSelectionList);
 el.vramTier.addEventListener("change", renderModelSelectionList);
 el.ramTier.addEventListener("change", renderModelSelectionList);
-el.modelSearch?.addEventListener("input", renderModelSelectionList);
+// Debounced: renderModelSelectionList() filters the whole catalog and
+// rebuilds the selection list + queue DOM on every call, which is wasteful
+// (and visibly janky on a large catalog) if run on every single keystroke.
+el.modelSearch?.addEventListener("input", debounce(renderModelSelectionList, 200));
 el.selectVisibleModels?.addEventListener("click", () => {
   const vramTier = selectedVramTierValue();
   filteredModelsForCurrentSelection().forEach((model) => {
