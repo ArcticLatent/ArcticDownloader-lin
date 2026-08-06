@@ -2,8 +2,9 @@ use crate::shared::{
     amd_gpu_details_cache, append_attention_launch_arg, apply_torch_allocator_env_compat,
     choose_install_folder, clear_directory_contents, comfyui_runtime_running, custom_node_exists,
     custom_node_installed, default_true, detect_amd_gpu_name, detect_existing_comfyui_root,
-    detect_intel_gpu_name, detect_nvidia_gpu, emit_comfyui_runtime_event,
-    emit_comfyui_runtime_log_event, emit_install_event, fake_amd_enabled, fake_intel_enabled,
+    detect_gpu_details_cached, detect_intel_gpu_name, detect_nvidia_gpu,
+    emit_comfyui_runtime_event, emit_comfyui_runtime_log_event, emit_install_event,
+    fake_amd_enabled, fake_intel_enabled,
     git_current_branch, has_dns, install_custom_node_and_record, intel_gpu_details_cache,
     is_empty_dir, is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
     normalize_optional_path, normalize_release_version, parse_custom_launch_args,
@@ -224,11 +225,8 @@ pub(crate) struct NvidiaGpuDetails {
 
 static GPU_DETAILS_CACHE: OnceLock<Mutex<Option<NvidiaGpuDetails>>> = OnceLock::new();
 static GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
-static GPU_DETAILS_PROBE_COMPLETE: AtomicBool = AtomicBool::new(false);
 static AMD_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
-static AMD_GPU_DETAILS_PROBE_COMPLETE: AtomicBool = AtomicBool::new(false);
 static INTEL_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
-static INTEL_GPU_DETAILS_PROBE_COMPLETE: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "desktop-tray")]
 static TRAY_MENU_ITEMS: OnceLock<Mutex<Option<TrayMenuItems>>> = OnceLock::new();
 static LINUX_PREREQ_CACHE: OnceLock<Mutex<Option<LinuxPrereqScan>>> = OnceLock::new();
@@ -670,95 +668,30 @@ fn is_nvidia_hopper_sm90() -> bool {
 }
 
 pub(crate) fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
-    if let Ok(guard) = gpu_details_cache().lock() {
-        if let Some(details) = guard.clone() {
-            return details;
-        }
-    }
-
-    if GPU_DETAILS_PROBE_COMPLETE.load(Ordering::SeqCst) {
-        return NvidiaGpuDetails::default();
-    }
-
-    if !GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
-        std::thread::spawn(|| {
-            let details = query_nvidia_gpu_details_blocking();
-            let has_data = details.name.is_some()
-                || details.vram_mb.is_some()
-                || details.driver_version.is_some();
-            if let Ok(mut guard) = gpu_details_cache().lock() {
-                if has_data {
-                    *guard = Some(details);
-                } else {
-                    *guard = None;
-                }
-            }
-            GPU_DETAILS_PROBE_COMPLETE.store(true, Ordering::SeqCst);
-            GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
-        });
-    }
-
-    NvidiaGpuDetails::default()
+    detect_gpu_details_cached(
+        gpu_details_cache(),
+        &GPU_DETAILS_PROBE_STARTED,
+        |d| d.name.is_some() || d.vram_mb.is_some() || d.driver_version.is_some(),
+        query_nvidia_gpu_details_blocking,
+    )
 }
 
 pub(crate) fn detect_amd_gpu_details() -> AmdGpuDetails {
-    if let Ok(guard) = amd_gpu_details_cache().lock() {
-        if let Some(details) = guard.clone() {
-            return details;
-        }
-    }
-
-    if AMD_GPU_DETAILS_PROBE_COMPLETE.load(Ordering::SeqCst) {
-        return AmdGpuDetails::default();
-    }
-
-    if !AMD_GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
-        std::thread::spawn(|| {
-            let details = query_amd_gpu_details_blocking();
-            let has_data = details.name.is_some();
-            if let Ok(mut guard) = amd_gpu_details_cache().lock() {
-                if has_data {
-                    *guard = Some(details);
-                } else {
-                    *guard = None;
-                }
-            }
-            AMD_GPU_DETAILS_PROBE_COMPLETE.store(true, Ordering::SeqCst);
-            AMD_GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
-        });
-    }
-
-    AmdGpuDetails::default()
+    detect_gpu_details_cached(
+        amd_gpu_details_cache(),
+        &AMD_GPU_DETAILS_PROBE_STARTED,
+        |d| d.name.is_some(),
+        query_amd_gpu_details_blocking,
+    )
 }
 
 pub(crate) fn detect_intel_gpu_details() -> IntelGpuDetails {
-    if let Ok(guard) = intel_gpu_details_cache().lock() {
-        if let Some(details) = guard.clone() {
-            return details;
-        }
-    }
-
-    if INTEL_GPU_DETAILS_PROBE_COMPLETE.load(Ordering::SeqCst) {
-        return IntelGpuDetails::default();
-    }
-
-    if !INTEL_GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
-        std::thread::spawn(|| {
-            let details = query_intel_gpu_details_blocking();
-            let has_data = details.name.is_some();
-            if let Ok(mut guard) = intel_gpu_details_cache().lock() {
-                if has_data {
-                    *guard = Some(details);
-                } else {
-                    *guard = None;
-                }
-            }
-            INTEL_GPU_DETAILS_PROBE_COMPLETE.store(true, Ordering::SeqCst);
-            INTEL_GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
-        });
-    }
-
-    IntelGpuDetails::default()
+    detect_gpu_details_cached(
+        intel_gpu_details_cache(),
+        &INTEL_GPU_DETAILS_PROBE_STARTED,
+        |d| d.name.is_some(),
+        query_intel_gpu_details_blocking,
+    )
 }
 
 fn gpu_detection_pending() -> bool {
@@ -2032,9 +1965,18 @@ fn ensure_hf_xet_runtime_installed(always_upgrade: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_hf_xet_enabled(state: State<'_, AppState>, enabled: bool) -> Result<AppSettings, String> {
+async fn set_hf_xet_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<AppSettings, String> {
     if enabled {
-        ensure_hf_xet_runtime_installed(true)?;
+        // `uv tool install ... huggingface_hub[hf_xet]` fetches and
+        // installs a package over the network; run it off the command
+        // dispatch thread like the rest of this file's install/mutation
+        // commands.
+        tauri::async_runtime::spawn_blocking(|| ensure_hf_xet_runtime_installed(true))
+            .await
+            .map_err(|err| format!("HF/Xet setup task failed: {err}"))??;
     }
     state
         .context
@@ -5662,7 +5604,7 @@ struct ComfyComponentToggleRequest {
 }
 
 #[tauri::command]
-fn apply_attention_backend_change(
+async fn apply_attention_backend_change(
     app: AppHandle,
     state: State<'_, AppState>,
     request: AttentionBackendChangeRequest,
@@ -5711,131 +5653,154 @@ fn apply_attention_backend_change(
     let hopper_sm90 = is_nvidia_hopper_sm90();
     let triton_pkg = triton_package_for_profile_linux(&profile);
 
-    force_cleanup_attention_backends(&root, &py_path)?;
+    // Everything below is git clone + `uv pip install` + wheel downloads --
+    // potentially minutes of network and subprocess I/O -- so it runs off
+    // the command dispatch thread, matching
+    // apply_comfyui_component_toggle's equivalent branch. The originals are
+    // still available below the `.await` -- only clones are moved in.
+    {
+        let root = root.clone();
+        let py_path = py_path.clone();
+        let profile = profile.clone();
+        let target = target.clone();
+        let uv_bin = uv_bin.clone();
+        let uv_python_install_dir = uv_python_install_dir.clone();
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            force_cleanup_attention_backends(&root, &py_path)?;
 
-    match target.as_str() {
-        "none" => {}
-        "sage" => {
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_path,
-                &["install", "--upgrade", "--force-reinstall", triton_pkg],
-                Some(&root),
-                &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
-            )?;
-            install_sageattention_linux(&root, &py_path, &profile, hopper_sm90)?;
-        }
-        "flash" => {
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_path,
-                &["install", "--upgrade", "--force-reinstall", triton_pkg],
-                Some(&root),
-                &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
-            )?;
-            install_flashattention_linux(&root, &py_path, &profile, hopper_sm90)?;
-        }
-        "sage3" => {
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_path,
-                &["install", "--upgrade", "--force-reinstall", triton_pkg],
-                Some(&root),
-                &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
-            )?;
-            install_linux_wheel_for_profile(&root, &py_path, &profile, "sage3", hopper_sm90, true)?;
-            // Keep sageattention installed for ComfyUI --use-sage-attention compatibility checks.
-            install_sageattention_linux(&root, &py_path, &profile, hopper_sm90)?;
-        }
-        "nunchaku" => {
-            ensure_git_available(&app)?;
-            let custom_nodes_root = root.join("custom_nodes");
-            std::fs::create_dir_all(&custom_nodes_root).map_err(|err| err.to_string())?;
-            let nunchaku_node = root.join("custom_nodes").join("ComfyUI-nunchaku");
-            clone_or_update_repo(
-                &root,
-                &nunchaku_node,
-                "https://github.com/nunchaku-ai/ComfyUI-nunchaku",
-            )?;
-            let versions_json = nunchaku_node.join("nunchaku_versions.json");
-            let _ = download_http_file(
-                "https://nunchaku.tech/cdn/nunchaku_versions.json",
-                &versions_json,
-            );
-            run_uv_pip_strict(
-                &uv_bin,
-                &py_path,
-                &["install", "--upgrade", "--force-reinstall", triton_pkg],
-                Some(&root),
-                &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
-            )?;
-            install_insightface(&root, &uv_bin, &py_path, &uv_python_install_dir)?;
-            install_nunchaku_node_requirements(
-                &root,
-                &uv_bin,
-                &py_path,
-                &uv_python_install_dir,
-                &nunchaku_node,
-            )?;
-            install_linux_wheel_for_profile(
-                &root,
-                &py_path,
-                &profile,
-                "nunchaku",
-                hopper_sm90,
-                true,
-            )?;
-            if !nunchaku_backend_present(&root) {
-                return Err(
-                    "Nunchaku backend install incomplete: module or custom node not detected."
-                        .to_string(),
-                );
-            }
-        }
-        _ => return Err("Unknown attention backend target.".to_string()),
-    }
-
-    if target == "none" {
-        let mut lingering: Vec<&str> = Vec::new();
-        for pkg in [
-            "sageattention",
-            "sageattn3",
-            "flash-attn",
-            "flash_attn",
-            "nunchaku",
-        ] {
-            if pip_has_package(&root, pkg) {
-                lingering.push(pkg);
-            }
-        }
-        let mut lingering_nodes: Vec<&str> = Vec::new();
-        for node in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
-            if custom_node_exists(&root, node) {
-                lingering_nodes.push(node);
-            }
-        }
-        if !lingering.is_empty() || !lingering_nodes.is_empty() {
-            let mut detail = String::new();
-            if !lingering.is_empty() {
-                detail.push_str(&format!(
-                    "packages still installed: {}",
-                    lingering.join(", ")
-                ));
-            }
-            if !lingering_nodes.is_empty() {
-                if !detail.is_empty() {
-                    detail.push_str("; ");
+            match target.as_str() {
+                "none" => {}
+                "sage" => {
+                    run_uv_pip_strict(
+                        &uv_bin,
+                        &py_path,
+                        &["install", "--upgrade", "--force-reinstall", triton_pkg],
+                        Some(&root),
+                        &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
+                    )?;
+                    install_sageattention_linux(&root, &py_path, &profile, hopper_sm90)?;
                 }
-                detail.push_str(&format!(
-                    "nodes still present: {}",
-                    lingering_nodes.join(", ")
-                ));
+                "flash" => {
+                    run_uv_pip_strict(
+                        &uv_bin,
+                        &py_path,
+                        &["install", "--upgrade", "--force-reinstall", triton_pkg],
+                        Some(&root),
+                        &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
+                    )?;
+                    install_flashattention_linux(&root, &py_path, &profile, hopper_sm90)?;
+                }
+                "sage3" => {
+                    run_uv_pip_strict(
+                        &uv_bin,
+                        &py_path,
+                        &["install", "--upgrade", "--force-reinstall", triton_pkg],
+                        Some(&root),
+                        &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
+                    )?;
+                    install_linux_wheel_for_profile(
+                        &root, &py_path, &profile, "sage3", hopper_sm90, true,
+                    )?;
+                    // Keep sageattention installed for ComfyUI --use-sage-attention compatibility checks.
+                    install_sageattention_linux(&root, &py_path, &profile, hopper_sm90)?;
+                }
+                "nunchaku" => {
+                    ensure_git_available(&app)?;
+                    let custom_nodes_root = root.join("custom_nodes");
+                    std::fs::create_dir_all(&custom_nodes_root).map_err(|err| err.to_string())?;
+                    let nunchaku_node = root.join("custom_nodes").join("ComfyUI-nunchaku");
+                    clone_or_update_repo(
+                        &root,
+                        &nunchaku_node,
+                        "https://github.com/nunchaku-ai/ComfyUI-nunchaku",
+                    )?;
+                    let versions_json = nunchaku_node.join("nunchaku_versions.json");
+                    let _ = download_http_file(
+                        "https://nunchaku.tech/cdn/nunchaku_versions.json",
+                        &versions_json,
+                    );
+                    run_uv_pip_strict(
+                        &uv_bin,
+                        &py_path,
+                        &["install", "--upgrade", "--force-reinstall", triton_pkg],
+                        Some(&root),
+                        &[("UV_PYTHON_INSTALL_DIR", &uv_python_install_dir)],
+                    )?;
+                    install_insightface(&root, &uv_bin, &py_path, &uv_python_install_dir)?;
+                    install_nunchaku_node_requirements(
+                        &root,
+                        &uv_bin,
+                        &py_path,
+                        &uv_python_install_dir,
+                        &nunchaku_node,
+                    )?;
+                    install_linux_wheel_for_profile(
+                        &root,
+                        &py_path,
+                        &profile,
+                        "nunchaku",
+                        hopper_sm90,
+                        true,
+                    )?;
+                    if !nunchaku_backend_present(&root) {
+                        return Err(
+                            "Nunchaku backend install incomplete: module or custom node not detected."
+                                .to_string(),
+                        );
+                    }
+                }
+                _ => return Err("Unknown attention backend target.".to_string()),
             }
-            return Err(format!(
-                "Attention backend removal incomplete ({detail}). Stop ComfyUI and retry."
-            ));
-        }
+
+            if target == "none" {
+                let mut lingering: Vec<&str> = Vec::new();
+                for pkg in [
+                    "sageattention",
+                    "sageattn3",
+                    "flash-attn",
+                    "flash_attn",
+                    "nunchaku",
+                ] {
+                    if pip_has_package(&root, pkg) {
+                        lingering.push(pkg);
+                    }
+                }
+                let mut lingering_nodes: Vec<&str> = Vec::new();
+                for node in ["ComfyUI-nunchaku", "nunchaku_nodes"] {
+                    if custom_node_exists(&root, node) {
+                        lingering_nodes.push(node);
+                    }
+                }
+                if !lingering.is_empty() || !lingering_nodes.is_empty() {
+                    let mut detail = String::new();
+                    if !lingering.is_empty() {
+                        detail.push_str(&format!(
+                            "packages still installed: {}",
+                            lingering.join(", ")
+                        ));
+                    }
+                    if !lingering_nodes.is_empty() {
+                        if !detail.is_empty() {
+                            detail.push_str("; ");
+                        }
+                        detail.push_str(&format!(
+                            "nodes still present: {}",
+                            lingering_nodes.join(", ")
+                        ));
+                    }
+                    return Err(format!(
+                        "Attention backend removal incomplete ({detail}). Stop ComfyUI and retry."
+                    ));
+                }
+            }
+
+            Ok(())
+        })
+        .await
+        .map_err(|err| format!("Attention backend change task failed: {err}"))??;
     }
+
     let target_setting = match target.as_str() {
         "sage" => Some("sage".to_string()),
         "sage3" => Some("sage3".to_string()),
@@ -5853,7 +5818,7 @@ fn apply_attention_backend_change(
 }
 
 #[tauri::command]
-fn set_comfyui_launch_attention_backend(
+async fn set_comfyui_launch_attention_backend(
     app: AppHandle,
     state: State<'_, AppState>,
     request: LaunchAttentionFlagRequest,
@@ -5865,20 +5830,30 @@ fn set_comfyui_launch_attention_backend(
         return Err("Unknown launch attention backend target.".to_string());
     }
 
-    let unavailable = match target.as_str() {
-        "sage"
-            if !(python_module_importable(&root, "sageattention")
-                || python_module_importable(&root, "sageattn3")) =>
-        {
-            Some("SageAttention launch flag is unavailable because SageAttention is not installed.")
-        }
-        "sage3" if !python_module_importable(&root, "sageattn3") => Some(
-            "SageAttention3 launch flag is unavailable because SageAttention3 is not installed.",
-        ),
-        "flash" if !python_module_importable(&root, "flash_attn") => Some(
-            "FlashAttention launch flag is unavailable because FlashAttention is not installed.",
-        ),
-        _ => None,
+    // Module-importability checks shell out to Python; run off the command
+    // dispatch thread like this file's other install/mutation commands.
+    let unavailable = {
+        let root = root.clone();
+        let target = target.clone();
+        tauri::async_runtime::spawn_blocking(move || -> Option<&'static str> {
+            match target.as_str() {
+                "sage"
+                    if !(python_module_importable(&root, "sageattention")
+                        || python_module_importable(&root, "sageattn3")) =>
+                {
+                    Some("SageAttention launch flag is unavailable because SageAttention is not installed.")
+                }
+                "sage3" if !python_module_importable(&root, "sageattn3") => Some(
+                    "SageAttention3 launch flag is unavailable because SageAttention3 is not installed.",
+                ),
+                "flash" if !python_module_importable(&root, "flash_attn") => Some(
+                    "FlashAttention launch flag is unavailable because FlashAttention is not installed.",
+                ),
+                _ => None,
+            }
+        })
+        .await
+        .map_err(|err| format!("Launch attention backend check task failed: {err}"))?
     };
     if let Some(message) = unavailable {
         return Err(message.to_string());

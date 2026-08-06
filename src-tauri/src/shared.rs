@@ -50,7 +50,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
@@ -72,6 +75,53 @@ pub fn default_true() -> bool {
 /// hard-erroring on poison and others silently skipping their body.
 pub fn recover_lock<T>(result: Result<T, std::sync::PoisonError<T>>) -> T {
     result.unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Runs `probe` (the platform-specific "how do I query this vendor's GPU"
+/// query -- `nvidia-smi`, a PowerShell `Get-CimInstance` script, `lspci`,
+/// etc.) on a background thread and returns the cached result immediately:
+/// callers get `T::default()` until the first successful probe completes,
+/// then the cached value on every call after. A failed/empty probe result
+/// is not cached and does not stick permanently -- `probe_started` resets
+/// so a later call retries instead of reporting "no GPU" forever (e.g. if
+/// the vendor's tool wasn't on PATH yet at the first check, right after a
+/// driver install or before a session PATH refresh).
+///
+/// `app_linux.rs` and `app_windows.rs` each had their own copy of this
+/// caching/retry pattern, three times per platform (NVIDIA/AMD/Intel) --
+/// identical except for the query function and (on Linux) an extra
+/// "probe complete" flag that, unlike this version, gave up retrying
+/// permanently after the very first attempt, success or failure.
+pub fn detect_gpu_details_cached<T>(
+    cache: &'static Mutex<Option<T>>,
+    probe_started: &'static AtomicBool,
+    has_result: impl Fn(&T) -> bool + Send + 'static,
+    probe: impl FnOnce() -> T + Send + 'static,
+) -> T
+where
+    T: Clone + Default + Send + 'static,
+{
+    if let Ok(guard) = cache.lock() {
+        if let Some(details) = guard.clone() {
+            return details;
+        }
+    }
+
+    if !probe_started.swap(true, Ordering::SeqCst) {
+        std::thread::spawn(move || {
+            let details = probe();
+            if let Ok(mut guard) = cache.lock() {
+                if has_result(&details) {
+                    *guard = Some(details);
+                } else {
+                    *guard = None;
+                    probe_started.store(false, Ordering::SeqCst);
+                }
+            }
+        });
+    }
+
+    T::default()
 }
 
 /// True if `path`'s final component is `ComfyUI` or `ComfyUI-<suffix>`

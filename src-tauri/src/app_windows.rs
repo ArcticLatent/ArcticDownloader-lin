@@ -2,8 +2,9 @@ use crate::shared::{
     amd_gpu_details_cache, append_attention_launch_arg, apply_torch_allocator_env_compat,
     choose_install_folder, clear_directory_contents, comfyui_external_running,
     comfyui_runtime_running, custom_node_exists, custom_node_installed, default_true,
-    detect_amd_gpu_name, detect_existing_comfyui_root, detect_intel_gpu_name, detect_nvidia_gpu,
-    emit_comfyui_runtime_event, emit_comfyui_runtime_log_event, emit_install_event,
+    detect_amd_gpu_name, detect_existing_comfyui_root, detect_gpu_details_cached,
+    detect_intel_gpu_name, detect_nvidia_gpu, emit_comfyui_runtime_event,
+    emit_comfyui_runtime_log_event, emit_install_event,
     git_current_branch, has_dns, install_custom_node_and_record, intel_gpu_details_cache,
     is_empty_dir, is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
     normalize_optional_path, normalize_release_version, parse_custom_launch_args,
@@ -29,10 +30,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex, OnceLock,
-    },
+    sync::{atomic::AtomicBool, Mutex, OnceLock},
     time::Duration,
 };
 use tauri::{
@@ -229,32 +227,12 @@ fn query_nvidia_gpu_details_blocking() -> NvidiaGpuDetails {
 }
 
 pub(crate) fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
-    if let Ok(guard) = gpu_details_cache().lock() {
-        if let Some(details) = guard.clone() {
-            return details;
-        }
-    }
-
-    if !GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
-        std::thread::spawn(|| {
-            let details = query_nvidia_gpu_details_blocking();
-            if let Ok(mut guard) = gpu_details_cache().lock() {
-                if details.name.is_some() {
-                    *guard = Some(details);
-                } else {
-                    // Don't cache a negative result: if `nvidia-smi` isn't on
-                    // PATH yet (e.g. right after a driver install, or before
-                    // a session PATH refresh), this lets a later call retry
-                    // instead of permanently reporting "no GPU" for the rest
-                    // of the process, matching the AMD/Intel probes below.
-                    *guard = None;
-                    GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
-                }
-            }
-        });
-    }
-
-    NvidiaGpuDetails::default()
+    detect_gpu_details_cached(
+        gpu_details_cache(),
+        &GPU_DETAILS_PROBE_STARTED,
+        |d| d.name.is_some(),
+        query_nvidia_gpu_details_blocking,
+    )
 }
 
 fn query_amd_gpu_details_blocking() -> AmdGpuDetails {
@@ -284,27 +262,12 @@ fn query_amd_gpu_details_blocking() -> AmdGpuDetails {
 }
 
 pub(crate) fn detect_amd_gpu_details() -> AmdGpuDetails {
-    if let Ok(guard) = amd_gpu_details_cache().lock() {
-        if let Some(details) = guard.clone() {
-            return details;
-        }
-    }
-
-    if !AMD_GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
-        std::thread::spawn(|| {
-            let details = query_amd_gpu_details_blocking();
-            if let Ok(mut guard) = amd_gpu_details_cache().lock() {
-                if details.name.is_some() {
-                    *guard = Some(details);
-                } else {
-                    *guard = None;
-                    AMD_GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
-                }
-            }
-        });
-    }
-
-    AmdGpuDetails::default()
+    detect_gpu_details_cached(
+        amd_gpu_details_cache(),
+        &AMD_GPU_DETAILS_PROBE_STARTED,
+        |d| d.name.is_some(),
+        query_amd_gpu_details_blocking,
+    )
 }
 
 fn query_intel_gpu_details_blocking() -> IntelGpuDetails {
@@ -334,27 +297,12 @@ fn query_intel_gpu_details_blocking() -> IntelGpuDetails {
 }
 
 pub(crate) fn detect_intel_gpu_details() -> IntelGpuDetails {
-    if let Ok(guard) = intel_gpu_details_cache().lock() {
-        if let Some(details) = guard.clone() {
-            return details;
-        }
-    }
-
-    if !INTEL_GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
-        std::thread::spawn(|| {
-            let details = query_intel_gpu_details_blocking();
-            if let Ok(mut guard) = intel_gpu_details_cache().lock() {
-                if details.name.is_some() {
-                    *guard = Some(details);
-                } else {
-                    *guard = None;
-                    INTEL_GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
-                }
-            }
-        });
-    }
-
-    IntelGpuDetails::default()
+    detect_gpu_details_cached(
+        intel_gpu_details_cache(),
+        &INTEL_GPU_DETAILS_PROBE_STARTED,
+        |d| d.name.is_some(),
+        query_intel_gpu_details_blocking,
+    )
 }
 
 
