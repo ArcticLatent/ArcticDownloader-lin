@@ -39,5 +39,12 @@ tauri-plugin-notification = "2"
 [target.'cfg(target_os = "linux")'.dependencies]
 glib = "0.18"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+] }
+
 [patch.crates-io]
 tray-icon = { path = "../vendor/tray-icon-0.21.3" }

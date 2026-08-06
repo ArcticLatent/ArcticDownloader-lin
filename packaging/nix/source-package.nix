@@ -10,6 +10,7 @@
   libayatana-appindicator,
   glib-networking,
   gst_all_1,
+  dbus,
   git,
   curl,
   wget,
@@ -75,6 +76,7 @@ rustPlatform.buildRustPackage {
     glib-networking
     gst_all_1.gstreamer
     gst_all_1.gst-plugins-base
+    dbus
   ];
 
   # CI runs the Rust test harness separately; avoid rebuilding the full Tauri

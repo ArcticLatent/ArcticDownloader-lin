@@ -675,6 +675,121 @@ fn apply_background_command_flags(cmd: &mut std::process::Command) {
     }
 }
 
+// --- Job Object: tie the managed ComfyUI process tree to this app's lifetime ---
+//
+// `Child::kill()` (used by `kill_managed_comfyui_child` in shared.rs) only
+// ever terminates the one process Rust holds a handle to. If ComfyUI (or a
+// custom node) spawns its own subprocess/worker, or if this app itself is
+// killed abruptly (crash, Task Manager "End Task") rather than stopped
+// normally, those processes are left running with no code path that ever
+// touches them again.
+//
+// A Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` fixes
+// this at the OS level: every process assigned to the job is terminated
+// when the job's last handle closes, whether that's this code explicitly
+// dropping it or Windows force-closing every handle this app owned because
+// the app itself was killed. `COMFY_JOB_OBJECT` holds that handle for as
+// long as we consider a ComfyUI process "ours."
+//
+// NOTE for reviewers: this compiles and lints clean against the real
+// x86_64-pc-windows-gnu target, but the actual runtime kill-on-close
+// behavior has not been exercised on a real Windows machine by the author
+// of this change. Please verify manually before relying on it:
+//   1. Start ComfyUI from the app.
+//   2. Kill the app itself abruptly (Task Manager -> End Task, not the
+//      in-app Stop button) while ComfyUI is running.
+//   3. Confirm ComfyUI's python.exe (and any child worker processes) also
+//      exit, rather than being left running.
+static COMFY_JOB_OBJECT: Mutex<Option<ComfyJobObject>> = Mutex::new(None);
+
+struct ComfyJobObject(windows::Win32::Foundation::HANDLE);
+
+// SAFETY: a Win32 HANDLE is just an opaque identifier; the Job Object APIs
+// are documented as safe to call from any thread. This type is only ever
+// touched behind `COMFY_JOB_OBJECT`'s `Mutex`, so there's no unsynchronized
+// concurrent access.
+unsafe impl Send for ComfyJobObject {}
+
+impl Drop for ComfyJobObject {
+    fn drop(&mut self) {
+        // Closing the last handle to the job object triggers
+        // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, terminating every process
+        // still assigned to it.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Creates a Job Object configured to kill everything assigned to it when
+/// its handle closes, and assigns `child` to it. Best-effort: any failure
+/// is returned as `Err` and the caller should treat that as "the
+/// orphan-process protection didn't apply this time," not as a reason to
+/// fail starting ComfyUI.
+fn bind_child_to_job_object(child: &std::process::Child) -> Result<ComfyJobObject, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    unsafe {
+        let job =
+            CreateJobObjectW(None, None).map_err(|err| format!("CreateJobObjectW: {err}"))?;
+
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        if let Err(err) = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) {
+            let _ = CloseHandle(job);
+            return Err(format!("SetInformationJobObject: {err}"));
+        }
+
+        let process_handle = HANDLE(child.as_raw_handle());
+        if let Err(err) = AssignProcessToJobObject(job, process_handle) {
+            let _ = CloseHandle(job);
+            return Err(format!("AssignProcessToJobObject: {err}"));
+        }
+
+        Ok(ComfyJobObject(job))
+    }
+}
+
+/// Binds `child` to a fresh Job Object and stores it in `COMFY_JOB_OBJECT`,
+/// replacing (and thereby closing/kill-on-closing) any previous one. Purely
+/// best-effort: logs and continues on failure rather than affecting the
+/// caller's ability to start ComfyUI.
+fn track_comfy_job_object(child: &std::process::Child) {
+    match bind_child_to_job_object(child) {
+        Ok(job) => {
+            if let Ok(mut guard) = COMFY_JOB_OBJECT.lock() {
+                *guard = Some(job);
+            }
+        }
+        Err(err) => {
+            log::warn!(
+                "Failed to bind ComfyUI process to a Job Object (orphan-process protection \
+                 won't apply this run): {err}"
+            );
+        }
+    }
+}
+
+/// Drops (closing, and thus kill-on-closing any still-assigned processes)
+/// the tracked Job Object, if any.
+fn release_comfy_job_object() {
+    if let Ok(mut guard) = COMFY_JOB_OBJECT.lock() {
+        *guard = None;
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn try_attach_parent_console() {
     // ATTACH_PARENT_PROCESS from Win32 API
@@ -3058,11 +3173,9 @@ fn run_comfyui_install(
             Some(&comfy_dir),
         )?;
 
-        let nunchaku_whl = match selected_profile.as_str() {
-            "torch271_cu128" => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.0.2/nunchaku-1.0.2+torch2.7-cp312-cp312-win_amd64.whl",
-            "torch291_cu130" => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu13.0torch2.9-cp312-cp312-win_amd64.whl",
-            _ => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu12.8torch2.8-cp312-cp312-win_amd64.whl",
-        };
+        let nunchaku_whl = attention_wheel_url(&selected_profile, "nunchaku").ok_or_else(|| {
+            format!("No Nunchaku wheel available for torch profile {selected_profile}")
+        })?;
         install_wheel_no_deps(
             &uv_bin,
             &py_exe.to_string_lossy(),
@@ -3132,11 +3245,9 @@ fn run_comfyui_install(
     if request.include_sage_attention {
         write_install_state(&install_root, "in_progress", "addon_sageattention");
         emit_install_event(app, "step", "Installing SageAttention...");
-        let whl = match selected_profile.as_str() {
-            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu128torch2.7.1.post3-cp39-abi3-win_amd64.whl",
-            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu130torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl",
-            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu128torch2.8.0.post3-cp39-abi3-win_amd64.whl",
-        };
+        let whl = attention_wheel_url(&selected_profile, "sage").ok_or_else(|| {
+            format!("No SageAttention wheel available for torch profile {selected_profile}")
+        })?;
         install_wheel_no_deps(
             &uv_bin,
             &py_exe.to_string_lossy(),
@@ -3149,11 +3260,9 @@ fn run_comfyui_install(
     if request.include_sage_attention3 {
         write_install_state(&install_root, "in_progress", "addon_sageattention3");
         emit_install_event(app, "step", "Installing SageAttention3...");
-        let whl = match selected_profile.as_str() {
-            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu128torch271-cp312-cp312-win_amd64.whl",
-            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu130torch291-cp312-cp312-win_amd64.whl",
-            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu128torch280-cp312-cp312-win_amd64.whl",
-        };
+        let whl = attention_wheel_url(&selected_profile, "sage3").ok_or_else(|| {
+            format!("No SageAttention3 wheel available for torch profile {selected_profile}")
+        })?;
 
         install_wheel_no_deps(
             &uv_bin,
@@ -3177,11 +3286,9 @@ fn run_comfyui_install(
     if request.include_flash_attention {
         write_install_state(&install_root, "in_progress", "addon_flashattention");
         emit_install_event(app, "step", "Installing FlashAttention...");
-        let whl = match selected_profile.as_str() {
-            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu128torch2.7.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
-            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu130torch2.9.1cxx11abiTRUE-cp312-cp312-win_amd64.whl",
-            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu128torch2.8.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
-        };
+        let whl = attention_wheel_url(&selected_profile, "flash").ok_or_else(|| {
+            format!("No FlashAttention wheel available for torch profile {selected_profile}")
+        })?;
         install_wheel_no_deps(
             &uv_bin,
             &py_exe.to_string_lossy(),
@@ -4121,6 +4228,7 @@ pub(crate) fn start_comfyui_root_impl(
     let mut child = cmd
         .spawn()
         .map_err(|err| format!("Failed to start ComfyUI: {err}"))?;
+    track_comfy_job_object(&child);
     if !nerdstats_enabled() && settings.comfyui_show_runtime_logs {
         if let Some(stdout) = child.stdout.take() {
             spawn_comfyui_runtime_log_stream(app.clone(), "stdout", stdout);
@@ -5698,6 +5806,10 @@ async fn update_selected_comfyui(
 
 pub(crate) fn stop_comfyui_root_impl(state: &AppState) -> Result<bool, String> {
     let mut stopped_any = kill_managed_comfyui_child(state)?;
+    // Drop (and thus close/kill-on-close) the Job Object so any lingering
+    // grandchild process ComfyUI spawned is cleaned up too, not just the
+    // one process `kill_managed_comfyui_child` holds a handle to.
+    release_comfy_job_object();
 
     // After app restart, we may no longer have a child handle but ComfyUI can still
     // be running and listening on 8188. In that case, stop the listener process.
