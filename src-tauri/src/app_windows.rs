@@ -4,9 +4,9 @@ use crate::shared::{
     comfyui_runtime_running, custom_node_exists, custom_node_installed, default_true,
     detect_amd_gpu_name, detect_existing_comfyui_root, detect_gpu_details_cached,
     detect_intel_gpu_name, detect_nvidia_gpu, emit_comfyui_runtime_event,
-    emit_comfyui_runtime_log_event, emit_install_event,
-    git_current_branch, has_dns, install_custom_node_and_record, intel_gpu_details_cache,
-    is_empty_dir, is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
+    emit_comfyui_runtime_log_event, emit_install_event, git_current_branch, has_dns,
+    install_custom_node_and_record, intel_gpu_details_cache, is_empty_dir,
+    is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
     normalize_optional_path, normalize_release_version, parse_custom_launch_args,
     parse_hf_env_value, parse_semver_triplet, parse_yaml_bool, parse_yaml_scalar,
     path_name_is_comfyui, push_preflight, read_comfyui_installed_version, recover_lock,
@@ -14,8 +14,8 @@ use crate::shared::{
     run_with_timeout_capturing_output, show_main_window, spawn_progress_emitter,
     start_comfyui_root_background, stop_comfyui_for_mutation, wait_for_comfyui_start,
     write_install_state, write_install_summary, yaml_single_quote, AmdGpuDetails, AppState,
-    ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent, GIT_COMMAND_TIMEOUT,
-    InstallSummaryItem, IntelGpuDetails, PreflightItem,
+    ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent, InstallSummaryItem,
+    IntelGpuDetails, PreflightItem, GIT_COMMAND_TIMEOUT,
 };
 use arctic_downloader::{
     app::{build_context, drain_lossy_lines, AppContext},
@@ -41,6 +41,9 @@ use tauri::{
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use tokio_util::sync::CancellationToken;
+
+const COMMAND_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const HF_ENV_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Serialize)]
 struct AppSnapshot {
@@ -306,7 +309,6 @@ pub(crate) fn detect_intel_gpu_details() -> IntelGpuDetails {
     )
 }
 
-
 fn windows_rocm_supported_gpu(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     [
@@ -340,9 +342,7 @@ fn windows_xpu_supported_gpu(name: &str) -> bool {
 }
 
 #[tauri::command]
-fn get_comfyui_install_recommendation(
-    gpu_selection: Option<String>,
-) -> ComfyInstallRecommendation {
+fn get_comfyui_install_recommendation(gpu_selection: Option<String>) -> ComfyInstallRecommendation {
     let selection = gpu_selection.unwrap_or_else(|| "auto".to_string());
     let selection = selection.trim().to_ascii_lowercase();
     let gpu = detect_nvidia_gpu_details();
@@ -382,9 +382,7 @@ fn get_comfyui_install_recommendation(
             };
         }
     }
-    if selection == "intel"
-        || (selection == "auto" && gpu.name.is_none() && amd_name.is_none())
-    {
+    if selection == "intel" || (selection == "auto" && gpu.name.is_none() && amd_name.is_none()) {
         if let Some(intel_name) = intel_name {
             let reason = if windows_xpu_supported_gpu(&intel_name) {
                 if selection == "intel" {
@@ -612,7 +610,9 @@ fn command_available(program: &str, args: &[&str]) -> bool {
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
     apply_background_command_flags(&mut cmd);
-    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+    run_with_timeout_capturing_output(cmd, COMMAND_PROBE_TIMEOUT)
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn apply_background_command_flags(cmd: &mut std::process::Command) {
@@ -685,8 +685,7 @@ fn bind_child_to_job_object(child: &std::process::Child) -> Result<ComfyJobObjec
     };
 
     unsafe {
-        let job =
-            CreateJobObjectW(None, None).map_err(|err| format!("CreateJobObjectW: {err}"))?;
+        let job = CreateJobObjectW(None, None).map_err(|err| format!("CreateJobObjectW: {err}"))?;
 
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -902,6 +901,18 @@ fn add_local_uv_tools_to_path(shared_runtime_root: &Path) {
 }
 
 fn get_hf_xet_preflight_internal(xet_enabled: bool) -> HfXetPreflightResponse {
+    if !xet_enabled {
+        return HfXetPreflightResponse {
+            xet_enabled: false,
+            hf_cli_available: false,
+            hf_backend: "disabled".to_string(),
+            hf_xet_installed: false,
+            hub_version: None,
+            detail: "HF/Xet acceleration is disabled in app settings; the default downloader will be used."
+                .to_string(),
+        };
+    }
+
     let uvx_hf_available = command_available("uvx", &["hf", "--help"]);
     let hf_native_available = command_available("hf", &["--help"]);
     let hf_cli_available = uvx_hf_available || hf_native_available;
@@ -939,12 +950,7 @@ fn get_hf_xet_preflight_internal(xet_enabled: bool) -> HfXetPreflightResponse {
                 !normalized.is_empty() && normalized != "n/a" && normalized != "none"
             };
 
-            let detail = if !xet_enabled {
-                format!(
-                    "Xet is installed but disabled in app settings (backend: {}).",
-                    hf_backend
-                )
-            } else if hf_xet_installed {
+            let detail = if hf_xet_installed {
                 format!(
                     "HF/Xet preflight OK via {} (huggingface_hub {}, hf_xet {}).",
                     hf_backend,
@@ -979,11 +985,14 @@ fn get_hf_xet_preflight_internal(xet_enabled: bool) -> HfXetPreflightResponse {
 }
 
 #[tauri::command]
-fn get_hf_xet_preflight(state: State<'_, AppState>) -> HfXetPreflightResponse {
+async fn get_hf_xet_preflight(app: AppHandle) -> Result<HfXetPreflightResponse, String> {
+    let state = app.state::<AppState>();
     let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
     add_local_uv_tools_to_path(&shared_runtime_root);
     let xet_enabled = state.context.config.settings().hf_xet_enabled;
-    get_hf_xet_preflight_internal(xet_enabled)
+    tauri::async_runtime::spawn_blocking(move || get_hf_xet_preflight_internal(xet_enabled))
+        .await
+        .map_err(|err| format!("HF/Xet preflight task failed: {err}"))
 }
 
 fn ensure_hf_xet_runtime_installed(
@@ -1328,7 +1337,6 @@ fn run_comfyui_preflight(
     ComfyPreflightResponse { ok, summary, items }
 }
 
-
 fn powershell_download(url: &str, out_file: &Path) -> Result<(), String> {
     let parent = out_file
         .parent()
@@ -1525,7 +1533,6 @@ fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Resu
     Ok(())
 }
 
-
 pub(crate) fn run_command_capture(
     program: &str,
     args: &[&str],
@@ -1538,8 +1545,14 @@ pub(crate) fn run_command_capture(
         cmd.current_dir(dir);
     }
     apply_background_command_flags(&mut cmd);
-    let output = output_with_optional_timeout(program, cmd)
-        .map_err(|err| format!("Failed to run {program}: {err}"))?;
+    let is_hf_env_probe =
+        (program == "uvx" && args == ["hf", "env"]) || (program == "hf" && args == ["env"]);
+    let output = if is_hf_env_probe {
+        run_with_timeout_capturing_output(cmd, HF_ENV_PROBE_TIMEOUT)
+    } else {
+        output_with_optional_timeout(program, cmd)
+    }
+    .map_err(|err| format!("Failed to run {program}: {err}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
@@ -3428,7 +3441,6 @@ async fn start_comfyui_install(
     Ok(())
 }
 
-
 #[tauri::command]
 fn set_comfyui_root(
     state: State<'_, AppState>,
@@ -3602,8 +3614,6 @@ async fn auto_update_startup(
     }
 }
 
-
-
 #[tauri::command]
 async fn download_lora_asset(
     app: AppHandle,
@@ -3720,8 +3730,6 @@ async fn download_lora_asset(
 
     Ok(())
 }
-
-
 
 pub(crate) fn resolve_root_path(
     context: &AppContext,
@@ -3863,7 +3871,6 @@ pub(crate) fn effective_download_root(comfy_root: &Path) -> PathBuf {
         _ => comfy_root.to_path_buf(),
     }
 }
-
 
 #[tauri::command]
 fn inspect_comfyui_path(path: String) -> Result<ComfyPathInspection, String> {

@@ -25,6 +25,7 @@
   gnused,
   pciutils,
   procps,
+  uv,
   util-linux,
   xdg-utils,
   arcticSupabaseUrl ? "",
@@ -46,7 +47,6 @@ rustPlatform.buildRustPackage {
       ../../Cargo.lock
       ../../src
       ../../src-tauri/Cargo.toml
-      ../../src-tauri/Cargo.lock
       ../../src-tauri/build.rs
       ../../src-tauri/capabilities
       ../../src-tauri/dist
@@ -58,10 +58,11 @@ rustPlatform.buildRustPackage {
       ../../packaging/linux/io.github.ArcticHelper.desktop
     ];
   };
-  cargoRoot = "src-tauri";
-  buildAndTestSubdir = "src-tauri";
-
-  cargoLock.lockFile = ../../src-tauri/Cargo.lock;
+  cargoLock.lockFile = ../../Cargo.lock;
+  cargoBuildFlags = [
+    "--manifest-path"
+    "src-tauri/Cargo.toml"
+  ];
 
   nativeBuildInputs = [
     pkg-config
@@ -120,6 +121,7 @@ rustPlatform.buildRustPackage {
           gnused
           pciutils
           procps
+          uv
           util-linux
           xdg-utils
         ]

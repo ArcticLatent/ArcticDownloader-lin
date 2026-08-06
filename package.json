@@ -1,4 +1,9 @@
 {
+  "type": "module",
+  "scripts": {
+    "check:frontend": "node scripts/check-frontend.mjs",
+    "test:frontend": "node --test \"tests/frontend/*.test.js\""
+  },
   "devDependencies": {
     "@tauri-apps/cli": "^2.10.1"
   }

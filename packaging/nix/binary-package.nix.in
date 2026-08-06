@@ -23,6 +23,7 @@
   gnused,
   pciutils,
   procps,
+  uv,
   util-linux,
   xdg-utils,
 }:
@@ -93,6 +94,7 @@ stdenv.mkDerivation {
         gnused
         pciutils
         procps
+        uv
         util-linux
         xdg-utils
       ]}

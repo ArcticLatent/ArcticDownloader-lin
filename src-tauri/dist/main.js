@@ -1,7 +1,22 @@
+import {
+  ansiToHtml,
+  detectRuntimeLogLevel,
+  escapeHtml,
+} from "./lib/log-format.js";
+import {
+  formatBytes,
+  formatFileSize,
+  formatVramMbToGb,
+  trimDescription,
+} from "./lib/display-format.js";
+import { normalizeSlashes, parentDir, PATH_SEP } from "./lib/path.js";
+import { debounce } from "./lib/timing.js";
+import { isSafeHttpUrl, isVideoPreviewUrl } from "./lib/url.js";
+import { createDownloadProgress } from "./features/download-progress.js";
+
 const invoke = window.__TAURI__?.core?.invoke;
 const listen = window.__TAURI__?.event?.listen || window.__TAURI__?.core?.listen;
 const DOT_SEP = " \u2022 ";
-const PATH_SEP = "/";
 const ALWAYS_ONLY_VARIANT_ID = "__always_only__";
 const state = {
   catalog: null,
@@ -64,7 +79,6 @@ const state = {
   comfyRuntimeLogs: [],
 };
 
-let progressSmoothTimer = null;
 const comfyUpdateStatusCache = new Map();
 const comfyUpdateStatusInflight = new Map();
 const COMFY_UPDATE_STATUS_CACHE_MS = 4000;
@@ -334,6 +348,27 @@ const el = {
   startupStatus: document.getElementById("startup-status"),
 };
 
+const {
+  addCompleted,
+  beginBusyDownload,
+  endBusyDownload,
+  ensureProgressSmoother,
+  renderActiveTransfers,
+  renderCompletedTransfers,
+  renderOverallProgress,
+  renderTransfers,
+  requestCancelDownload,
+  setProgress,
+  updateDownloadButtons,
+} = createDownloadProgress({
+  state,
+  elements: el,
+  invoke,
+  logLine,
+  selectedWorkflow,
+  workflowExternalUrl,
+});
+
 // Caps how large a log panel's text can grow to. These panels prepend one
 // line per event for the life of the app session; without a cap, a long
 // session (or a chatty ComfyUI install) grows the text node -- and the
@@ -358,84 +393,6 @@ function logLine(text) {
 function logComfyLine(text) {
   if (!el.comfyInstallLog) return;
   prependLogLine(el.comfyInstallLog, text);
-}
-
-function escapeHtml(text) {
-  return String(text || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function ansiToHtml(text) {
-  const input = String(text || "");
-  let html = "";
-  let classes = [];
-
-  const flush = (chunk) => {
-    if (!chunk) return;
-    const escaped = escapeHtml(chunk);
-    html += classes.length
-      ? `<span class="${classes.join(" ")}">${escaped}</span>`
-      : escaped;
-  };
-
-  let index = 0;
-  while (index < input.length) {
-    const escIndex = input.indexOf("\u001b[", index);
-    if (escIndex < 0) {
-      flush(input.slice(index));
-      break;
-    }
-    flush(input.slice(index, escIndex));
-    const match = /^\u001b\[([0-9;]*)m/.exec(input.slice(escIndex));
-    if (!match) {
-      flush(input.slice(escIndex, escIndex + 1));
-      index = escIndex + 1;
-      continue;
-    }
-    const codes = (match[1] || "0")
-      .split(";")
-      .map((part) => Number(part || 0))
-      .filter((code) => Number.isFinite(code));
-    if (codes.length === 0 || codes.includes(0)) {
-      classes = [];
-    }
-    if (codes.includes(1)) {
-      classes = classes.filter((name) => name !== "ansi-bold");
-      classes.push("ansi-bold");
-    }
-    codes.forEach((code) => {
-      if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
-        classes = classes.filter((name) => !/^ansi-fg-/.test(name));
-        classes.push(`ansi-fg-${code}`);
-      }
-      if (code === 39) {
-        classes = classes.filter((name) => !/^ansi-fg-/.test(name));
-      }
-      if (code === 22) {
-        classes = classes.filter((name) => name !== "ansi-bold");
-      }
-    });
-    index = escIndex + match[0].length;
-  }
-  return html;
-}
-
-function detectRuntimeLogLevel(text) {
-  const value = String(text || "").toLowerCase();
-  if (
-    /traceback|fatal|exception|error|failed|cannot|could not|invalid|denied/.test(value)
-  ) {
-    return "error";
-  }
-  if (/warn|warning|deprecated|retry|fallback|slow|stall/.test(value)) {
-    return "warn";
-  }
-  if (/started|ready|listening|loaded|completed|success|using /.test(value)) {
-    return "success";
-  }
-  return "info";
 }
 
 function runtimeLogMatchesFilter(entry) {
@@ -608,10 +565,6 @@ function waitForNextPaint() {
   });
 }
 
-function setProgress(text) {
-  el.progressLine.textContent = text || "Idle";
-}
-
 function updateComfyInstallButton() {
   if (!el.installComfyui) return;
   el.installComfyui.textContent = state.comfyInstallBusy ? "Cancel Install" : "Install ComfyUI";
@@ -721,18 +674,6 @@ function updateUpdateButton() {
   renderAppVersionTag();
 }
 
-function normalizeSlashes(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  const normalized = raw.replace(/[\\/]+/g, PATH_SEP);
-  const nestedHome = `${PATH_SEP}src-tauri${PATH_SEP}home${PATH_SEP}`;
-  const idx = normalized.indexOf(nestedHome);
-  if (idx >= 0) {
-    return normalized.slice(idx + `${PATH_SEP}src-tauri`.length);
-  }
-  return normalized;
-}
-
 function setTorchRecommendedDetecting(detecting) {
   if (!el.comfyTorchRecommended) return;
   if (detecting) {
@@ -834,13 +775,6 @@ async function refreshRocmGuidedStatus(logResult = false) {
     state.rocmGuidedBusy = false;
     updateRocmGuidedUi();
   }
-}
-
-function parentDir(path) {
-  const normalized = normalizeSlashes(path);
-  const idx = normalized.lastIndexOf(PATH_SEP);
-  if (idx <= 0) return normalized;
-  return normalized.slice(0, idx);
 }
 
 function comfyInstallOrder(name) {
@@ -1853,54 +1787,6 @@ function applyComfyAddonRules() {
   }
 }
 
-function trimDescription(text, max = 520) {
-  const value = (text || "").trim();
-  if (!value) return "-";
-  if (value.length <= max) return value;
-  return `${value.slice(0, max).trimEnd()}...`;
-}
-
-// Coalesces rapid-fire calls (e.g. every keystroke in a search box) into
-// one, delayMs after the last one. Used instead of running a full
-// catalog filter + DOM rebuild on every single keystroke.
-function debounce(fn, delayMs) {
-  let timer = null;
-  return (...args) => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = null;
-      fn(...args);
-    }, delayMs);
-  };
-}
-
-// Remote/catalog-sourced values (Civitai/HuggingFace metadata, catalog
-// entries) end up here as preview `src`/link `href` targets and as
-// `open_external_url` invoke arguments. None of that data is app-authored,
-// so it must never be trusted to carry a non-http(s) scheme (e.g. `file:`,
-// `asset:`, or something Tauri's asset protocol would resolve) across the
-// JS/Rust boundary or into the DOM as a live URL.
-function isSafeHttpUrl(value) {
-  const trimmed = String(value || "").trim();
-  if (!trimmed) return false;
-  try {
-    // No base argument: a relative string (e.g. "#", "foo/bar") throws and
-    // is rejected rather than silently resolving against the app's own
-    // origin. These fields are only ever expected to hold absolute
-    // http(s) URLs from remote metadata.
-    const parsed = new URL(trimmed);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-function isVideoPreviewUrl(url) {
-  const value = String(url || "").toLowerCase();
-  return value.endsWith(".mp4") || value.endsWith(".webm") || value.endsWith(".mov")
-    || value.includes(".mp4?") || value.includes(".webm?") || value.includes(".mov?");
-}
-
 function applyLoraPreview(previewUrl, previewKind) {
   const rawUrl = String(previewUrl || "").trim();
   const url = isSafeHttpUrl(rawUrl) ? rawUrl : "";
@@ -1994,281 +1880,6 @@ function renderTriggerWords(words) {
     }
   });
   el.metaTriggers.appendChild(frag);
-}
-
-function formatBytes(v) {
-  const value = Number(v || 0);
-  if (!value) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  let n = value;
-  let u = 0;
-  while (n >= 1024 && u < units.length - 1) {
-    n /= 1024;
-    u += 1;
-  }
-  return `${n.toFixed(u === 0 ? 0 : 1)} ${units[u]}`;
-}
-
-function formatVramMbToGb(vramMb) {
-  const value = Number(vramMb || 0);
-  if (!value) return null;
-  return `${(value / 1024).toFixed(1)} GB VRAM`;
-}
-
-function smoothedReceived(item) {
-  const target = Math.max(0, Number(item.received || 0));
-  const now = Date.now();
-  if (!Number.isFinite(item.displayReceived)) item.displayReceived = 0;
-  if (!Number.isFinite(item.displayTs)) item.displayTs = now;
-  if (item.displayReceived > target) item.displayReceived = target;
-
-  const dtMs = Math.max(16, now - item.displayTs);
-  item.displayTs = now;
-  const delta = target - item.displayReceived;
-  if (delta <= 0) return item.displayReceived;
-
-  const minStep = 128 * 1024;
-  const easedStep = delta * 0.25;
-  const rateCapStep = (dtMs / 1000) * (320 * 1024 * 1024);
-  const advance = Math.min(
-    delta,
-    Math.max(minStep, Math.min(rateCapStep, Math.max(minStep, easedStep))),
-  );
-  item.displayReceived += advance;
-  return item.displayReceived;
-}
-
-function ensureProgressSmoother() {
-  if (progressSmoothTimer) return;
-  progressSmoothTimer = window.setInterval(() => {
-    const active = [...state.transfers.values()].filter((x) => x.phase !== "finished" && x.phase !== "failed");
-    if (!active.length && state.busyDownloads <= 0) {
-      window.clearInterval(progressSmoothTimer);
-      progressSmoothTimer = null;
-      return;
-    }
-    renderActiveTransfers();
-    renderOverallProgress();
-  }, 140);
-}
-
-function renderOverallProgress() {
-  const active = [...state.transfers.values()].filter((x) => x.phase !== "finished" && x.phase !== "failed");
-  const busyOnly = state.busyDownloads > 0 && active.length === 0;
-
-  if (!active.length && !busyOnly) {
-    el.overallProgress.classList.add("hidden");
-    el.overallProgress.classList.remove("indeterminate");
-    el.overallProgressMeta.classList.add("hidden");
-    el.overallProgressFill.style.width = "0%";
-    return;
-  }
-
-  el.overallProgress.classList.remove("hidden");
-  el.overallProgressMeta.classList.remove("hidden");
-
-  const lead = active[0];
-  if (lead) {
-    const leadSize = Number(lead.size || 0);
-    const leadShown = leadSize > 0
-      ? Math.min(smoothedReceived(lead), leadSize)
-      : smoothedReceived(lead);
-    const leadPct = leadSize > 0 ? ` ${Math.round((leadShown / leadSize) * 100)}%` : "";
-    setProgress(`[${lead.kind || "download"}] ${lead.artifact || "file"}${leadPct}`);
-  }
-
-  const known = active.filter((x) => Number(x.size || 0) > 0);
-  if (!known.length) {
-    el.overallProgress.classList.add("indeterminate");
-    el.overallProgressFill.style.removeProperty("width");
-    const activeCount = Math.max(active.length, state.busyDownloads > 0 ? 1 : 0);
-    el.overallProgressMeta.textContent = `Downloading ${activeCount} file(s)...`;
-    return;
-  }
-
-  const totalBytes = known.reduce((sum, x) => sum + Number(x.size || 0), 0);
-  const receivedBytes = known.reduce((sum, x) => sum + Math.min(smoothedReceived(x), Number(x.size || 0)), 0);
-  const pct = totalBytes > 0 ? Math.max(0, Math.min(100, Math.round((receivedBytes / totalBytes) * 100))) : 0;
-  const unknownCount = Math.max(0, active.length - known.length);
-
-  el.overallProgress.classList.remove("indeterminate");
-  el.overallProgressFill.style.width = `${pct}%`;
-  el.overallProgressMeta.textContent = unknownCount > 0
-    ? `${pct}%${DOT_SEP}${formatBytes(receivedBytes)} / ${formatBytes(totalBytes)}${DOT_SEP}${known.length} known + ${unknownCount} unknown`
-    : `${pct}%${DOT_SEP}${formatBytes(receivedBytes)} / ${formatBytes(totalBytes)}${DOT_SEP}${known.length} active`;
-}
-
-function beginBusyDownload(label) {
-  state.busyDownloads += 1;
-  if (!state.activeDownloadKind) {
-    if (state.activeTab === "loras") {
-      state.activeDownloadKind = "lora";
-    } else if (state.activeTab === "workflows") {
-      state.activeDownloadKind = "workflow";
-    } else {
-      state.activeDownloadKind = "model";
-    }
-  }
-  setProgress(label || "Downloading...");
-  updateDownloadButtons();
-  renderOverallProgress();
-  ensureProgressSmoother();
-}
-
-function endBusyDownload() {
-  state.busyDownloads = Math.max(0, state.busyDownloads - 1);
-  if (state.busyDownloads === 0) {
-    state.activeDownloadKind = null;
-    setProgress("Idle");
-  }
-  updateDownloadButtons();
-  renderOverallProgress();
-}
-
-function updateDownloadButtons() {
-  const cancelling = state.busyDownloads > 0;
-  if (cancelling) {
-    el.downloadModel.textContent = "Cancel Download";
-    el.downloadLora.textContent = "Cancel Download";
-    el.downloadWorkflow.textContent = "Cancel Download";
-  } else {
-    el.downloadModel.textContent = "Download Model Assets";
-    el.downloadLora.textContent = "Download LoRA";
-    el.downloadWorkflow.textContent = workflowExternalUrl(selectedWorkflow())
-      ? "Open Workflow Link"
-      : "Download Workflow";
-  }
-}
-
-async function requestCancelDownload() {
-  try {
-    setProgress("Cancelling download...");
-    const cancelled = await invoke("cancel_active_download");
-    if (cancelled) {
-      logLine("Cancellation requested.");
-      setProgress("Cancellation requested...");
-    } else {
-      logLine("No active download to cancel.");
-      endBusyDownload();
-    }
-  } catch (err) {
-    logLine(`Cancel failed: ${err}`);
-    endBusyDownload();
-  }
-}
-
-function renderActiveTransfers() {
-  const now = Date.now();
-  const active = [...state.transfers.values()].filter((x) => x.phase !== "finished" && x.phase !== "failed");
-  el.transferList.innerHTML = "";
-  if (!active.length) {
-    const msg = document.createElement("div");
-    msg.className = "empty-msg";
-    msg.textContent = "No active transfers.";
-    el.transferList.appendChild(msg);
-  }
-  for (const item of active) {
-    const smoothed = smoothedReceived(item);
-    const shownReceived = item.size > 0 ? Math.min(smoothed, item.size) : smoothed;
-    const pct = item.size > 0 ? Math.max(0, Math.min(100, Math.round((shownReceived / item.size) * 100))) : 0;
-    const quietMs = now - Number(item.lastUpdateTs || now);
-    const nearEnd = item.size > 0 && shownReceived >= item.size * 0.9;
-    const finalizing = item.phase === "progress" && nearEnd && quietMs > 2500;
-    const phaseLabel = finalizing ? "finalizing" : item.phase;
-    const row = document.createElement("div");
-    row.className = "transfer-item";
-    const title = document.createElement("div");
-    title.className = "transfer-title";
-    title.textContent = item.artifact || item.id;
-    const bar = document.createElement("div");
-    bar.className = "bar";
-    const fill = document.createElement("span");
-    fill.style.width = `${pct}%`;
-    bar.appendChild(fill);
-    const sub = document.createElement("div");
-    sub.className = "transfer-sub";
-    sub.textContent = item.size
-      ? `${phaseLabel}${DOT_SEP}${formatBytes(shownReceived)} / ${formatBytes(item.size)}`
-      : phaseLabel;
-    row.appendChild(title);
-    row.appendChild(bar);
-    row.appendChild(sub);
-    el.transferList.appendChild(row);
-  }
-}
-
-function renderCompletedTransfers() {
-  el.completedList.innerHTML = "";
-  if (!state.completed.length) {
-    const msg = document.createElement("div");
-    msg.className = "empty-msg";
-    msg.textContent = "No completed downloads.";
-    el.completedList.appendChild(msg);
-  } else {
-    const max = Math.min(30, state.completed.length);
-    for (let i = 0; i < max; i += 1) {
-      const item = state.completed[i];
-      const hasFolder = Boolean(item.folder && item.folder.trim());
-      const row = document.createElement("div");
-      row.className = "transfer-item";
-      const title = document.createElement("div");
-      title.className = "transfer-title";
-      title.textContent = item.name;
-      const sub = document.createElement("div");
-      sub.className = "transfer-sub";
-      sub.textContent = item.status;
-      const button = document.createElement("button");
-      button.textContent = "Open Folder";
-      button.setAttribute("type", "button");
-      if (!hasFolder) {
-        button.disabled = true;
-      } else {
-        button.addEventListener("click", async () => {
-          try {
-            await invoke("open_folder", { path: item.folder });
-          } catch (err) {
-            logLine(`Open folder failed: ${err}`);
-          }
-        });
-      }
-      row.appendChild(title);
-      row.appendChild(sub);
-      row.appendChild(button);
-      el.completedList.appendChild(row);
-    }
-  }
-}
-
-function renderTransfers() {
-  renderActiveTransfers();
-  renderCompletedTransfers();
-  renderOverallProgress();
-}
-
-// Only the most recent 30 are ever rendered (see renderCompletedTransfers),
-// so keep well beyond that for scrollback/undo-adjacent uses but still
-// bounded -- a long session would otherwise grow this array without limit.
-const COMPLETED_HISTORY_MAX = 200;
-
-function addCompleted(item) {
-  const index = state.completed.findIndex(
-    (x) => x.name === item.name && x.status === item.status && x.folder === (item.folder || ""),
-  );
-  if (index >= 0) {
-    if (item.folder && item.folder.trim()) {
-      state.completed[index].folder = item.folder;
-    }
-  } else {
-    state.completed.unshift({
-      id: `done-${Date.now()}-${state.completedSeq++}`,
-      name: item.name,
-      folder: item.folder || "",
-      status: item.status,
-    });
-    if (state.completed.length > COMPLETED_HISTORY_MAX) {
-      state.completed.length = COMPLETED_HISTORY_MAX;
-    }
-  }
 }
 
 function setOptions(select, options, selectedValue = null) {
@@ -2792,20 +2403,6 @@ function isFullPrecisionTextEncoderArtifact(artifact) {
 function artifactSizeBytes(artifact) {
   const size = Number(artifact?.size_bytes);
   return Number.isFinite(size) && size > 0 ? size : 0;
-}
-
-function formatFileSize(bytes) {
-  const size = Number(bytes);
-  if (!Number.isFinite(size) || size <= 0) return "";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = size;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  const precision = value >= 10 || unitIndex === 0 ? 0 : 1;
-  return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function artifactDisplayName(artifact) {

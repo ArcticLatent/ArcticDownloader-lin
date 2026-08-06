@@ -27,9 +27,7 @@ pub use events::{
     emit_comfyui_runtime_event, emit_comfyui_runtime_log_event, emit_install_event,
     DownloadProgressEvent,
 };
-pub use gpu::{
-    amd_gpu_details_cache, intel_gpu_details_cache, AmdGpuDetails, IntelGpuDetails,
-};
+pub use gpu::{amd_gpu_details_cache, intel_gpu_details_cache, AmdGpuDetails, IntelGpuDetails};
 
 use crate::platform::{
     comfy_extra_model_config, detect_amd_gpu_details, detect_intel_gpu_details,
@@ -826,7 +824,12 @@ pub struct PreflightItem {
 }
 
 /// Appends a preflight result row to `items`.
-pub fn push_preflight(items: &mut Vec<PreflightItem>, status: &str, title: &str, detail: impl Into<String>) {
+pub fn push_preflight(
+    items: &mut Vec<PreflightItem>,
+    status: &str,
+    title: &str,
+    detail: impl Into<String>,
+) {
     items.push(PreflightItem {
         status: status.to_string(),
         title: title.to_string(),
@@ -2388,14 +2391,9 @@ mod tests {
         // Pasting a Windows path unquoted (the natural thing to do) must not
         // silently eat every backslash.
         assert_eq!(
-            parse_custom_launch_args(
-                r"--extra-model-paths-config C:\Users\name\file.yaml"
-            )
-            .unwrap(),
-            vec![
-                "--extra-model-paths-config",
-                r"C:\Users\name\file.yaml"
-            ]
+            parse_custom_launch_args(r"--extra-model-paths-config C:\Users\name\file.yaml")
+                .unwrap(),
+            vec!["--extra-model-paths-config", r"C:\Users\name\file.yaml"]
         );
     }
 
@@ -2442,7 +2440,10 @@ mod tests {
         append_attention_launch_arg(&mut args, None);
         assert_eq!(
             args,
-            vec!["--use-flash-attention".to_string(), "--use-sage-attention".to_string()]
+            vec![
+                "--use-flash-attention".to_string(),
+                "--use-sage-attention".to_string()
+            ]
         );
     }
 
@@ -2508,7 +2509,10 @@ mod tests {
     #[test]
     fn gpu_detail_caches_are_stable_and_independently_lockable() {
         // get_or_init should hand back the same static Mutex on every call...
-        assert!(std::ptr::eq(amd_gpu_details_cache(), amd_gpu_details_cache()));
+        assert!(std::ptr::eq(
+            amd_gpu_details_cache(),
+            amd_gpu_details_cache()
+        ));
         assert!(std::ptr::eq(
             intel_gpu_details_cache(),
             intel_gpu_details_cache()

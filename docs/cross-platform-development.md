@@ -12,7 +12,7 @@ these consolidation changes are committed and pushed.
 | Tauri backend | `src-tauri/src/app_linux.rs` | `src-tauri/src/app_windows.rs` | `main.rs`, `contracts.rs`, `platform.rs`, and `shared.rs` |
 | Frontend | `src-tauri/dist/` | `src-tauri/dist/` | capabilities control platform-specific options |
 | Core services | — | — | `src/` |
-| Dependencies | target-specific Cargo sections | target-specific Cargo sections | common Cargo dependencies |
+| Dependencies | target-specific Cargo sections | target-specific Cargo sections | workspace dependency versions and one root `Cargo.lock` |
 
 This boundary deliberately preserves the behavior of both existing applications. It
 also lets common code be extracted gradually without blocking day-to-day releases.
@@ -26,6 +26,11 @@ nix develop
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo tauri dev
 ```
+
+The root manifest is also the Cargo workspace root. Shared dependency versions live in
+`[workspace.dependencies]`; each crate keeps its own feature selection. Run Cargo from
+the repository root, including when using `--manifest-path src-tauri/Cargo.toml`, so
+both crates consistently use the root `Cargo.lock` and workspace `target/` directory.
 
 Check the Windows build from Linux:
 

@@ -19,19 +19,19 @@ desktop-tray = ["tauri/tray-icon"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-anyhow = "1"
-env_logger = "0.11"
+anyhow.workspace = true
+env_logger.workspace = true
 fs2 = "0.4"
-log = "0.4"
-open = "5"
-rfd = "0.15"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
+log.workspace = true
+open.workspace = true
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tauri = { version = "2", features = ["image-png", "image-ico"] }
-tokio = { version = "1", features = ["rt"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tokio = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true, features = ["rt"] }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
 arctic-downloader = { path = ".." }
 tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2"
@@ -45,6 +45,3 @@ windows = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_JobObjects",
 ] }
-
-[patch.crates-io]
-tray-icon = { path = "../vendor/tray-icon-0.21.3" }

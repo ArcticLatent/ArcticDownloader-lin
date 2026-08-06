@@ -4,9 +4,9 @@ use crate::shared::{
     custom_node_installed, default_true, detect_amd_gpu_name, detect_existing_comfyui_root,
     detect_gpu_details_cached, detect_intel_gpu_name, detect_nvidia_gpu,
     emit_comfyui_runtime_event, emit_comfyui_runtime_log_event, emit_install_event,
-    fake_amd_enabled, fake_intel_enabled,
-    git_current_branch, has_dns, install_custom_node_and_record, intel_gpu_details_cache,
-    is_empty_dir, is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
+    fake_amd_enabled, fake_intel_enabled, git_current_branch, has_dns,
+    install_custom_node_and_record, intel_gpu_details_cache, is_empty_dir,
+    is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
     normalize_optional_path, normalize_release_version, parse_custom_launch_args,
     parse_hf_env_value, parse_semver_triplet, parse_yaml_bool, parse_yaml_scalar,
     path_name_is_comfyui, push_preflight, read_comfyui_installed_version, recover_lock,
@@ -14,8 +14,8 @@ use crate::shared::{
     run_with_timeout_capturing_output, show_main_window, spawn_progress_emitter,
     start_comfyui_root_background, stop_comfyui_for_mutation, wait_for_comfyui_start,
     write_install_state, write_install_summary, yaml_single_quote, AmdGpuDetails, AppState,
-    ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent, GIT_COMMAND_TIMEOUT,
-    InstallSummaryItem, IntelGpuDetails, PreflightItem,
+    ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent, InstallSummaryItem,
+    IntelGpuDetails, PreflightItem, GIT_COMMAND_TIMEOUT,
 };
 use arctic_downloader::{
     app::{build_context, drain_lossy_lines, AppContext},
@@ -228,6 +228,8 @@ static GPU_DETAILS_CACHE: OnceLock<Mutex<Option<NvidiaGpuDetails>>> = OnceLock::
 static GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
 static AMD_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
 static INTEL_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
+const COMMAND_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const HF_ENV_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(feature = "desktop-tray")]
 static TRAY_MENU_ITEMS: OnceLock<Mutex<Option<TrayMenuItems>>> = OnceLock::new();
 static LINUX_PREREQ_CACHE: OnceLock<Mutex<Option<LinuxPrereqScan>>> = OnceLock::new();
@@ -1454,9 +1456,7 @@ async fn install_xpu_guided(app: AppHandle) -> Result<XpuGuidedStatus, String> {
 }
 
 #[tauri::command]
-fn get_comfyui_install_recommendation(
-    gpu_selection: Option<String>,
-) -> ComfyInstallRecommendation {
+fn get_comfyui_install_recommendation(gpu_selection: Option<String>) -> ComfyInstallRecommendation {
     let mut gpu = detect_nvidia_gpu_details();
     let mut amd_name = detect_amd_gpu_name();
     let mut intel_name = detect_intel_gpu_name();
@@ -1516,9 +1516,7 @@ fn comfy_install_recommendation_for(
             };
         }
     }
-    if selection == "intel"
-        || (selection == "auto" && gpu.name.is_none() && amd_name.is_none())
-    {
+    if selection == "intel" || (selection == "auto" && gpu.name.is_none() && amd_name.is_none()) {
         if let Some(intel_name) = intel_name {
             return ComfyInstallRecommendation {
                 gpu_name: Some(intel_name),
@@ -1752,11 +1750,13 @@ fn normalize_canonical_path(path: &Path) -> PathBuf {
 }
 
 fn command_available(program: &str, args: &[&str]) -> bool {
-    let mut cmd = match build_command(program, args, None, &[]) {
+    let cmd = match build_command(program, args, None, &[]) {
         Ok(cmd) => cmd,
         Err(_) => return false,
     };
-    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+    run_with_timeout_capturing_output(cmd, COMMAND_PROBE_TIMEOUT)
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn apply_background_command_flags(_cmd: &mut std::process::Command) {
@@ -1841,6 +1841,18 @@ fn ensure_git_available(app: &AppHandle) -> Result<(), String> {
 }
 
 fn get_hf_xet_preflight_internal(xet_enabled: bool) -> HfXetPreflightResponse {
+    if !xet_enabled {
+        return HfXetPreflightResponse {
+            xet_enabled: false,
+            hf_cli_available: false,
+            hf_backend: "disabled".to_string(),
+            hf_xet_installed: false,
+            hub_version: None,
+            detail: "HF/Xet acceleration is disabled in app settings; the default downloader will be used."
+                .to_string(),
+        };
+    }
+
     let uvx_hf_available = command_available("uvx", &["hf", "--help"]);
     let hf_native_available = command_available("hf", &["--help"]);
     let hf_cli_available = uvx_hf_available || hf_native_available;
@@ -1878,12 +1890,7 @@ fn get_hf_xet_preflight_internal(xet_enabled: bool) -> HfXetPreflightResponse {
                 !normalized.is_empty() && normalized != "n/a" && normalized != "none"
             };
 
-            let detail = if !xet_enabled {
-                format!(
-                    "Xet is installed but disabled in app settings (backend: {}).",
-                    hf_backend
-                )
-            } else if hf_xet_installed {
+            let detail = if hf_xet_installed {
                 format!(
                     "HF/Xet preflight OK via {} (huggingface_hub {}, hf_xet {}).",
                     hf_backend,
@@ -1918,9 +1925,16 @@ fn get_hf_xet_preflight_internal(xet_enabled: bool) -> HfXetPreflightResponse {
 }
 
 #[tauri::command]
-fn get_hf_xet_preflight(state: State<'_, AppState>) -> HfXetPreflightResponse {
-    let xet_enabled = state.context.config.settings().hf_xet_enabled;
-    get_hf_xet_preflight_internal(xet_enabled)
+async fn get_hf_xet_preflight(app: AppHandle) -> Result<HfXetPreflightResponse, String> {
+    let xet_enabled = app
+        .state::<AppState>()
+        .context
+        .config
+        .settings()
+        .hf_xet_enabled;
+    tauri::async_runtime::spawn_blocking(move || get_hf_xet_preflight_internal(xet_enabled))
+        .await
+        .map_err(|err| format!("HF/Xet preflight task failed: {err}"))
 }
 
 fn ensure_hf_xet_runtime_installed(always_upgrade: bool) -> Result<(), String> {
@@ -2171,6 +2185,17 @@ fn run_comfyui_preflight(
                     "Linux system packages",
                     format!("{} prerequisites are installed.", scan.distro),
                 );
+            } else if scan.distro == "nixos" {
+                ok = false;
+                push_preflight(
+                    &mut items,
+                    "fail",
+                    "Linux system packages",
+                    format!(
+                        "The current Nix environment is missing: {}. Run the packaged Arctic Helper or enter this repository's updated `nix develop` shell; NixOS prerequisites cannot be installed imperatively.",
+                        scan.missing_required.join(", ")
+                    ),
+                );
             } else {
                 push_preflight(
                     &mut items,
@@ -2384,7 +2409,6 @@ fn run_comfyui_preflight(
     };
     ComfyPreflightResponse { ok, summary, items }
 }
-
 
 fn download_http_file(url: &str, out_file: &Path) -> Result<(), String> {
     if let Some(parent) = out_file.parent() {
@@ -2674,8 +2698,14 @@ pub(crate) fn run_command_capture(
 ) -> Result<(String, String), String> {
     log::debug!("run_command_capture: {} {}", program, args.join(" "));
     let cmd = build_command(program, args, working_dir, &[])?;
-    let output = output_with_optional_timeout(program, cmd)
-        .map_err(|err| format!("Failed to run {program}: {err}"))?;
+    let is_hf_env_probe =
+        (program == "uvx" && args == ["hf", "env"]) || (program == "hf" && args == ["env"]);
+    let output = if is_hf_env_probe {
+        run_with_timeout_capturing_output(cmd, HF_ENV_PROBE_TIMEOUT)
+    } else {
+        output_with_optional_timeout(program, cmd)
+    }
+    .map_err(|err| format!("Failed to run {program}: {err}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
@@ -3564,6 +3594,11 @@ fn collect_cuda_runtime_library_paths(root: &Path) -> Vec<PathBuf> {
     };
 
     for sys in [
+        // NixOS exposes the active host GPU driver here. CUDA-enabled
+        // PyTorch wheels otherwise load their bundled CUDA runtime but fail
+        // to find the driver's libcuda.so.1 entry point.
+        "/run/opengl-driver/lib",
+        "/run/opengl-driver-32/lib",
         "/opt/cuda/lib64",
         "/usr/local/cuda/lib64",
         "/usr/lib/wsl/lib",
@@ -4261,22 +4296,21 @@ async fn start_comfyui_install(
                     normalize_optional_path(request.extra_model_root.as_deref())
                         .ok()
                         .flatten();
-                let _ =
-                    managed.context.config.update_settings(|settings| {
-                        settings.comfyui_root = Some(comfy_root.clone());
-                        settings.comfyui_last_install_dir = Some(install_dir.clone());
-                        settings.comfyui_pinned_memory_enabled = request.include_pinned_memory;
-                        settings.comfyui_torch_profile =
-                            Some(request.torch_profile.clone().unwrap_or_else(|| {
-                                get_comfyui_install_recommendation(None).torch_profile
-                            }));
-                        settings.comfyui_attention_backend =
-                            Some(selected_attention_backend(&request).to_string());
-                        settings.shared_models_root = normalized_shared_models.clone();
-                        settings.shared_models_use_default = normalized_shared_models
-                            .as_ref()
-                            .is_some_and(|_| request.extra_model_use_default);
-                    });
+                let _ = managed.context.config.update_settings(|settings| {
+                    settings.comfyui_root = Some(comfy_root.clone());
+                    settings.comfyui_last_install_dir = Some(install_dir.clone());
+                    settings.comfyui_pinned_memory_enabled = request.include_pinned_memory;
+                    settings.comfyui_torch_profile =
+                        Some(request.torch_profile.clone().unwrap_or_else(|| {
+                            get_comfyui_install_recommendation(None).torch_profile
+                        }));
+                    settings.comfyui_attention_backend =
+                        Some(selected_attention_backend(&request).to_string());
+                    settings.shared_models_root = normalized_shared_models.clone();
+                    settings.shared_models_use_default = normalized_shared_models
+                        .as_ref()
+                        .is_some_and(|_| request.extra_model_use_default);
+                });
                 let _ = app_for_task.emit(
                     "comfyui-install-progress",
                     DownloadProgressEvent {
@@ -4613,8 +4647,6 @@ async fn download_lora_asset(
     Ok(())
 }
 
-
-
 pub(crate) fn resolve_root_path(
     context: &AppContext,
     comfyui_root: Option<String>,
@@ -4757,7 +4789,6 @@ pub(crate) fn comfy_extra_model_config(comfy_root: &Path) -> Option<ComfyExtraMo
         is_default,
     })
 }
-
 
 #[tauri::command]
 fn inspect_comfyui_path(path: String) -> Result<ComfyPathInspection, String> {
@@ -5033,6 +5064,7 @@ pub(crate) fn start_comfyui_root_impl(
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
     let mut cmd = build_command(&py_exe_string, &arg_refs, Some(&root), &env_refs)?;
+    apply_torch_allocator_env_compat(&mut cmd);
 
     if nerdstats_enabled() {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
@@ -7017,5 +7049,14 @@ mod gpu_detection_tests {
             torch_profile_from_versions("2.11.0+rocm7.2", "7.2.41134").as_deref(),
             Some("torch211_rocm72")
         );
+    }
+
+    #[test]
+    fn disabled_hf_xet_preflight_does_not_require_a_cli_probe() {
+        let preflight = get_hf_xet_preflight_internal(false);
+        assert!(!preflight.xet_enabled);
+        assert!(!preflight.hf_cli_available);
+        assert_eq!(preflight.hf_backend, "disabled");
+        assert!(preflight.detail.contains("default downloader"));
     }
 }

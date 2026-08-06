@@ -32,11 +32,20 @@
             cargo
             cargo-tauri
             clippy
+            cmake
+            curl
             flatpak
             flatpak-builder
+            gcc
+            git
+            gnumake
+            ninja
             nodejs
+            python3
             rustc
             rustfmt
+            uv
+            wget
           ];
           shellHook = ''
             # Prefer the Nix-provided toolchain over rustup shims inherited

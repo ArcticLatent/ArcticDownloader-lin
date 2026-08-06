@@ -41,9 +41,7 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            .
-            src-tauri
+          workspaces: .
 
       - name: Check Linux application
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml
@@ -58,7 +56,10 @@ jobs:
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Check frontend JavaScript
-        run: node --check src-tauri/dist/main.js
+        run: npm run check:frontend
+
+      - name: Test frontend JavaScript
+        run: npm run test:frontend
 
       - name: Test shared Rust library
         run: cargo test --locked --lib
