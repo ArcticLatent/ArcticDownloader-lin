@@ -10,10 +10,11 @@ use crate::shared::{
     normalize_optional_path, normalize_release_version, parse_custom_launch_args,
     parse_hf_env_value, parse_semver_triplet, parse_yaml_bool, parse_yaml_scalar,
     path_name_is_comfyui, push_preflight, read_comfyui_installed_version, recover_lock,
-    remove_custom_node_dirs, resolve_comfyui_instance_name, show_main_window,
-    spawn_progress_emitter, start_comfyui_root_background, stop_comfyui_for_mutation,
-    wait_for_comfyui_start, write_install_state, write_install_summary, yaml_single_quote,
-    AmdGpuDetails, AppState, ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent,
+    remove_custom_node_dirs, resolve_comfyui_instance_name, run_with_timeout,
+    run_with_timeout_capturing_output, show_main_window, spawn_progress_emitter,
+    start_comfyui_root_background, stop_comfyui_for_mutation, wait_for_comfyui_start,
+    write_install_state, write_install_summary, yaml_single_quote, AmdGpuDetails, AppState,
+    ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent, GIT_COMMAND_TIMEOUT,
     InstallSummaryItem, IntelGpuDetails, PreflightItem,
 };
 use arctic_downloader::{
@@ -1481,6 +1482,33 @@ fn parse_sha256_manifest(path: &Path) -> Result<String, String> {
     Ok(token.to_ascii_lowercase())
 }
 
+/// Dispatches to a bounded-timeout run for `git` (network operations that
+/// can otherwise hang forever against an unreachable host or stalled
+/// server, with previously no way out short of killing the app) and plain
+/// `Command::status()` for everything else, unchanged.
+fn status_with_optional_timeout(
+    program: &str,
+    mut cmd: std::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    if program == "git" {
+        run_with_timeout(cmd, GIT_COMMAND_TIMEOUT)
+    } else {
+        cmd.status()
+    }
+}
+
+/// `Command::output()`-equivalent of [`status_with_optional_timeout`].
+fn output_with_optional_timeout(
+    program: &str,
+    mut cmd: std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    if program == "git" {
+        run_with_timeout_capturing_output(cmd, GIT_COMMAND_TIMEOUT)
+    } else {
+        cmd.output()
+    }
+}
+
 fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Result<(), String> {
     log::debug!("run_command: {} {}", program, args.join(" "));
     let mut cmd = std::process::Command::new(program);
@@ -1489,8 +1517,7 @@ fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Resu
         cmd.current_dir(dir);
     }
     apply_background_command_flags(&mut cmd);
-    let status = cmd
-        .status()
+    let status = status_with_optional_timeout(program, cmd)
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     if !status.success() {
         return Err(format!("Command failed: {} {}", program, args.join(" ")));
@@ -1511,8 +1538,7 @@ pub(crate) fn run_command_capture(
         cmd.current_dir(dir);
     }
     apply_background_command_flags(&mut cmd);
-    let output = cmd
-        .output()
+    let output = output_with_optional_timeout(program, cmd)
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1777,8 +1803,7 @@ fn run_command_env(
         cmd.env(key, value);
     }
     apply_background_command_flags(&mut cmd);
-    let output = cmd
-        .output()
+    let output = output_with_optional_timeout(program, cmd)
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

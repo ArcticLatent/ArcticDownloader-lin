@@ -10,10 +10,11 @@ use crate::shared::{
     normalize_optional_path, normalize_release_version, parse_custom_launch_args,
     parse_hf_env_value, parse_semver_triplet, parse_yaml_bool, parse_yaml_scalar,
     path_name_is_comfyui, push_preflight, read_comfyui_installed_version, recover_lock,
-    remove_custom_node_dirs, resolve_comfyui_instance_name, show_main_window,
-    spawn_progress_emitter, start_comfyui_root_background, stop_comfyui_for_mutation,
-    wait_for_comfyui_start, write_install_state, write_install_summary, yaml_single_quote,
-    AmdGpuDetails, AppState, ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent,
+    remove_custom_node_dirs, resolve_comfyui_instance_name, run_with_timeout,
+    run_with_timeout_capturing_output, show_main_window, spawn_progress_emitter,
+    start_comfyui_root_background, stop_comfyui_for_mutation, wait_for_comfyui_start,
+    write_install_state, write_install_summary, yaml_single_quote, AmdGpuDetails, AppState,
+    ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent, GIT_COMMAND_TIMEOUT,
     InstallSummaryItem, IntelGpuDetails, PreflightItem,
 };
 use arctic_downloader::{
@@ -2479,11 +2480,37 @@ fn download_http_file(url: &str, out_file: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Dispatches to a bounded-timeout run for `git` (network operations that
+/// can otherwise hang forever against an unreachable host or stalled
+/// server, with previously no way out short of killing the app) and plain
+/// `Command::status()` for everything else, unchanged.
+fn status_with_optional_timeout(
+    program: &str,
+    mut cmd: std::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    if program == "git" {
+        run_with_timeout(cmd, GIT_COMMAND_TIMEOUT)
+    } else {
+        cmd.status()
+    }
+}
+
+/// `Command::output()`-equivalent of [`status_with_optional_timeout`].
+fn output_with_optional_timeout(
+    program: &str,
+    mut cmd: std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    if program == "git" {
+        run_with_timeout_capturing_output(cmd, GIT_COMMAND_TIMEOUT)
+    } else {
+        cmd.output()
+    }
+}
+
 fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Result<(), String> {
     log::debug!("run_command: {} {}", program, args.join(" "));
-    let mut cmd = build_command(program, args, working_dir, &[])?;
-    let status = cmd
-        .status()
+    let cmd = build_command(program, args, working_dir, &[])?;
+    let status = status_with_optional_timeout(program, cmd)
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     if !status.success() {
         return Err(format!("Command failed: {} {}", program, args.join(" ")));
@@ -2498,9 +2525,8 @@ fn run_command_with_env(
     envs: &[(&str, &str)],
 ) -> Result<(), String> {
     log::debug!("run_command_with_env: {} {}", program, args.join(" "));
-    let mut cmd = build_command(program, args, working_dir, envs)?;
-    let status = cmd
-        .status()
+    let cmd = build_command(program, args, working_dir, envs)?;
+    let status = status_with_optional_timeout(program, cmd)
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     if !status.success() {
         return Err(format!("Command failed: {} {}", program, args.join(" ")));
@@ -2647,9 +2673,8 @@ pub(crate) fn run_command_capture(
     working_dir: Option<&Path>,
 ) -> Result<(String, String), String> {
     log::debug!("run_command_capture: {} {}", program, args.join(" "));
-    let mut cmd = build_command(program, args, working_dir, &[])?;
-    let output = cmd
-        .output()
+    let cmd = build_command(program, args, working_dir, &[])?;
+    let output = output_with_optional_timeout(program, cmd)
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2714,9 +2739,8 @@ fn run_command_env(
     envs: &[(&str, &str)],
 ) -> Result<(), String> {
     log::debug!("run_command_env: {} {}", program, args.join(" "));
-    let mut cmd = build_command(program, args, working_dir, envs)?;
-    let status = cmd
-        .status()
+    let cmd = build_command(program, args, working_dir, envs)?;
+    let status = status_with_optional_timeout(program, cmd)
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     if !status.success() {
         return Err(format!("Command failed: {} {}", program, args.join(" ")));

@@ -521,6 +521,108 @@ pub fn has_dns(host: &str, port: u16) -> bool {
         .unwrap_or(false)
 }
 
+/// A timeout budget generous enough for a slow `git clone`/`fetch` of a
+/// ComfyUI-sized repo over a poor connection, but bounded so an
+/// unreachable host or a stalled server doesn't hang the calling command
+/// forever -- previously the only way out was killing the whole app.
+pub const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Runs `cmd` (already fully configured -- program, args, cwd, env, and
+/// any `Stdio` the caller wants for stdin) to completion like
+/// `Command::status()`, but kills it and returns an error if it hasn't
+/// exited within `timeout`. Safe to use with inherited stdout/stderr
+/// (the common case for this codebase's `run_command`-style helpers)
+/// since nothing here pipes or reads them.
+pub fn run_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut child = cmd.spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("command timed out after {timeout:?}"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Runs `cmd` to completion like `Command::output()` (stdout/stderr
+/// captured, not inherited), but kills it and returns an error if it
+/// hasn't exited within `timeout`. Drains stdout/stderr on background
+/// threads while polling for exit, the same way `Command::output()`
+/// itself does internally -- a naive "poll `try_wait`, read pipes only
+/// after exit" implementation would let a command that produces more
+/// output than one OS pipe buffer (~64KB) deadlock against its own
+/// unread pipe and get killed by this timeout for a reason that has
+/// nothing to do with actually being stuck.
+pub fn run_with_timeout_capturing_output(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Dropping the child closes its ends of the pipes, so
+                    // the reader threads see EOF and these joins return
+                    // promptly rather than blocking further.
+                    let stdout = stdout_thread.join().unwrap_or_default();
+                    let stderr = stderr_thread.join().unwrap_or_default();
+                    let _ = (stdout, stderr);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("command timed out after {timeout:?}"),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    };
+
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// Derives a human-facing instance name from an install path's final
 /// component (falls back to `"ComfyUI"` if the path has none).
 pub fn comfyui_instance_name_from_path(path: &Path) -> String {
