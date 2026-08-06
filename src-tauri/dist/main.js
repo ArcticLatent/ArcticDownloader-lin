@@ -1831,6 +1831,27 @@ function trimDescription(text, max = 520) {
   return `${value.slice(0, max).trimEnd()}...`;
 }
 
+// Remote/catalog-sourced values (Civitai/HuggingFace metadata, catalog
+// entries) end up here as preview `src`/link `href` targets and as
+// `open_external_url` invoke arguments. None of that data is app-authored,
+// so it must never be trusted to carry a non-http(s) scheme (e.g. `file:`,
+// `asset:`, or something Tauri's asset protocol would resolve) across the
+// JS/Rust boundary or into the DOM as a live URL.
+function isSafeHttpUrl(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return false;
+  try {
+    // No base argument: a relative string (e.g. "#", "foo/bar") throws and
+    // is rejected rather than silently resolving against the app's own
+    // origin. These fields are only ever expected to hold absolute
+    // http(s) URLs from remote metadata.
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function isVideoPreviewUrl(url) {
   const value = String(url || "").toLowerCase();
   return value.endsWith(".mp4") || value.endsWith(".webm") || value.endsWith(".mov")
@@ -1838,7 +1859,8 @@ function isVideoPreviewUrl(url) {
 }
 
 function applyLoraPreview(previewUrl, previewKind) {
-  const url = String(previewUrl || "").trim();
+  const rawUrl = String(previewUrl || "").trim();
+  const url = isSafeHttpUrl(rawUrl) ? rawUrl : "";
   const kindRaw = String(previewKind || "").trim().toLowerCase();
   const kind = kindRaw === "video" || kindRaw === "image"
     ? kindRaw
@@ -3345,10 +3367,10 @@ function workflowExternalUrl(workflow) {
     String(workflow.patreon_url || "").trim() ||
     String(workflow.workflow_url || "").trim() ||
     String(workflow.workflow_link_url || "").trim();
-  if (directLink) return directLink;
+  if (directLink) return isSafeHttpUrl(directLink) ? directLink : "";
 
   const legacyUrl = String(workflow.workflow_json_url || "").trim();
-  if (!legacyUrl) return "";
+  if (!legacyUrl || !isSafeHttpUrl(legacyUrl)) return "";
   try {
     const parsed = new URL(legacyUrl);
     const path = parsed.pathname.toLowerCase();
@@ -3381,7 +3403,8 @@ function loadWorkflowPreview() {
     return;
   }
 
-  const previewUrl = String(workflow.preview_image_url || "").trim();
+  const rawPreviewUrl = String(workflow.preview_image_url || "").trim();
+  const previewUrl = isSafeHttpUrl(rawPreviewUrl) ? rawPreviewUrl : "";
   if (!previewUrl) {
     if (el.workflowPreviewImage) {
       el.workflowPreviewImage.classList.add("hidden");
@@ -3402,7 +3425,8 @@ function loadWorkflowPreview() {
     el.workflowPreviewCaption.textContent = workflowDisplayName(workflow);
   }
 
-  const ytUrl = String(workflow.youtube_url || "").trim();
+  const rawYtUrl = String(workflow.youtube_url || "").trim();
+  const ytUrl = isSafeHttpUrl(rawYtUrl) ? rawYtUrl : "";
   if (el.workflowYoutubeText) {
     el.workflowYoutubeText.textContent = ytUrl ? "Link" : "-";
   }
@@ -3440,7 +3464,8 @@ async function loadLoraMetadata() {
 
     el.metaCreator.textContent = meta.creator || "-";
     const creatorName = String(meta.creator || "").trim();
-    const creatorUrl = String(meta.creator_url || "").trim();
+    const rawCreatorUrl = String(meta.creator_url || "").trim();
+    const creatorUrl = isSafeHttpUrl(rawCreatorUrl) ? rawCreatorUrl : "";
     const fallbackCreatorUrl = creatorName && creatorName !== "-" && creatorName.toLowerCase() !== "unknown creator"
       ? `https://civitai.com/user/${encodeURIComponent(creatorName)}`
       : "";
@@ -4434,11 +4459,8 @@ el.checkUpdates.addEventListener("click", async () => {
 
 el.metaCreatorLink.addEventListener("click", async (event) => {
   const href = el.metaCreatorLink.getAttribute("href") || "";
-  if (!href || href === "#") {
-    event.preventDefault();
-    return;
-  }
   event.preventDefault();
+  if (!isSafeHttpUrl(href)) return;
   try {
     await invoke("open_external_url", { url: href });
   } catch (err) {
@@ -4448,11 +4470,8 @@ el.metaCreatorLink.addEventListener("click", async (event) => {
 
 el.workflowYoutubeLink?.addEventListener("click", async (event) => {
   const href = el.workflowYoutubeLink.getAttribute("href") || "";
-  if (!href || href === "#") {
-    event.preventDefault();
-    return;
-  }
   event.preventDefault();
+  if (!isSafeHttpUrl(href)) return;
   try {
     await invoke("open_external_url", { url: href });
   } catch (err) {

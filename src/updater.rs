@@ -463,12 +463,6 @@ async fn run_privileged_install(program: &str, args: &[&str]) -> Result<()> {
         Err(err) => attempts.push(format!("sudo {} => {err}", sudo_non_interactive.join(" "))),
     }
 
-    if run_install_command_direct("pkexec", &[program])
-        .await
-        .is_ok()
-    {
-        // Defensive noop for weird pkexec policies that reject direct no-arg checks.
-    }
     let mut pkexec_args = vec![program];
     pkexec_args.extend_from_slice(args);
     match run_install_command_direct("pkexec", &pkexec_args).await {
