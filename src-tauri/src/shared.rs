@@ -2144,6 +2144,24 @@ pub async fn download_workflow_asset(
 mod tests {
     use super::*;
 
+    /// Builds a unique per-test scratch directory path under the OS temp
+    /// dir. Deliberately does *not* use `{:?}` on a `std::time::Instant` --
+    /// its `Debug` output is platform-internal and unspecified, and on
+    /// Windows CI it produces characters (braces, colons) that aren't legal
+    /// in a path component, making every test that did this fail with
+    /// `ERROR_INVALID_NAME`/`ERROR_DIRECTORY` before the directory was ever
+    /// created. A nanosecond timestamp is digits-only and safe everywhere.
+    fn unique_test_dir(label: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "arctic-shared-test-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn default_true_is_true() {
         assert!(default_true());
@@ -2160,11 +2178,7 @@ mod tests {
 
     #[test]
     fn is_empty_dir_reports_directory_contents() {
-        let dir = std::env::temp_dir().join(format!(
-            "arctic-shared-test-{}-{:?}",
-            std::process::id(),
-            std::time::Instant::now()
-        ));
+        let dir = unique_test_dir("empty-dir");
         std::fs::create_dir_all(&dir).unwrap();
         assert!(is_empty_dir(&dir));
 
@@ -2308,11 +2322,7 @@ mod tests {
 
     #[test]
     fn choose_install_folder_resumes_in_progress_install_before_scanning() {
-        let dir = std::env::temp_dir().join(format!(
-            "arctic-shared-test-choose-{}-{:?}",
-            std::process::id(),
-            std::time::Instant::now()
-        ));
+        let dir = unique_test_dir("choose");
         std::fs::create_dir_all(&dir).unwrap();
         let existing = dir.join("ComfyUI-01");
         std::fs::create_dir_all(&existing).unwrap();
@@ -2329,11 +2339,7 @@ mod tests {
 
     #[test]
     fn custom_node_exists_checks_custom_nodes_subdir() {
-        let dir = std::env::temp_dir().join(format!(
-            "arctic-shared-test-node-{}-{:?}",
-            std::process::id(),
-            std::time::Instant::now()
-        ));
+        let dir = unique_test_dir("node");
         std::fs::create_dir_all(dir.join("custom_nodes").join("rgthree-comfy")).unwrap();
 
         assert!(custom_node_exists(&dir, "rgthree-comfy"));
@@ -2354,11 +2360,7 @@ mod tests {
 
     #[test]
     fn write_install_summary_round_trips_through_json() {
-        let dir = std::env::temp_dir().join(format!(
-            "arctic-shared-test-summary-{}-{:?}",
-            std::process::id(),
-            std::time::Instant::now()
-        ));
+        let dir = unique_test_dir("summary");
         std::fs::create_dir_all(&dir).unwrap();
 
         let items = vec![InstallSummaryItem {
