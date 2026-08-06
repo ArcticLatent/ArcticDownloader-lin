@@ -14,6 +14,7 @@ done
 
 rustup toolchain install stable --profile minimal --no-self-update
 rustup target add "$target" --toolchain stable
+rustup component add clippy --toolchain stable
 
 cd "$repo_root"
 cargo +stable xwin check \
@@ -21,3 +22,12 @@ cargo +stable xwin check \
   --target "$target" \
   --manifest-path src-tauri/Cargo.toml \
   "$@"
+
+cargo +stable xwin clippy \
+  --locked \
+  --target "$target" \
+  --manifest-path src-tauri/Cargo.toml \
+  --all-targets \
+  "$@" \
+  -- \
+  -D warnings

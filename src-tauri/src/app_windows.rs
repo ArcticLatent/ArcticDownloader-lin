@@ -632,7 +632,7 @@ fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
         if let Some(stripped) = raw.strip_prefix(r"\\?\") {
             return PathBuf::from(stripped);
         }
-        return PathBuf::from(raw);
+        PathBuf::from(raw)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -2459,6 +2459,7 @@ fn detect_launch_attention_backend_for_root(root: &Path) -> Option<String> {
     detect_attention_backend_for_root(root)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn comfyui_launch_args(
     listen_enabled: bool,
     pinned_memory_enabled: bool,
@@ -2569,7 +2570,7 @@ fn run_comfyui_install(
     let selected_profile = request
         .torch_profile
         .clone()
-        .unwrap_or_else(|| recommendation.torch_profile);
+        .unwrap_or(recommendation.torch_profile);
     if is_non_cuda_profile(&selected_profile)
         && (request.include_sage_attention
             || request.include_sage_attention3
@@ -3929,7 +3930,7 @@ fn open_folder(path: String) -> Result<String, String> {
         apply_background_command_flags(&mut cmd);
         cmd.spawn()
             .map_err(|err| format!("Failed to open folder: {err}"))?;
-        return Ok(open_target);
+        Ok(open_target)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -3953,7 +3954,7 @@ fn open_external_url(url: String) -> Result<(), String> {
         apply_background_command_flags(&mut cmd);
         cmd.spawn()
             .map_err(|err| format!("Failed to open link: {err}"))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -4814,13 +4815,11 @@ fn set_comfyui_launch_attention_backend(
                 );
             }
         }
-        "flash" => {
-            if !python_module_importable(&root, "flash_attn") {
-                return Err(
-                    "FlashAttention launch flag is unavailable because FlashAttention is not installed."
-                        .to_string(),
-                );
-            }
+        "flash" if !python_module_importable(&root, "flash_attn") => {
+            return Err(
+                "FlashAttention launch flag is unavailable because FlashAttention is not installed."
+                    .to_string(),
+            );
         }
         _ => {}
     }
