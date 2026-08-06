@@ -3058,11 +3058,9 @@ fn run_comfyui_install(
             Some(&comfy_dir),
         )?;
 
-        let nunchaku_whl = match selected_profile.as_str() {
-            "torch271_cu128" => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.0.2/nunchaku-1.0.2+torch2.7-cp312-cp312-win_amd64.whl",
-            "torch291_cu130" => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu13.0torch2.9-cp312-cp312-win_amd64.whl",
-            _ => "https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu12.8torch2.8-cp312-cp312-win_amd64.whl",
-        };
+        let nunchaku_whl = attention_wheel_url(&selected_profile, "nunchaku").ok_or_else(|| {
+            format!("No Nunchaku wheel available for torch profile {selected_profile}")
+        })?;
         install_wheel_no_deps(
             &uv_bin,
             &py_exe.to_string_lossy(),
@@ -3132,11 +3130,9 @@ fn run_comfyui_install(
     if request.include_sage_attention {
         write_install_state(&install_root, "in_progress", "addon_sageattention");
         emit_install_event(app, "step", "Installing SageAttention...");
-        let whl = match selected_profile.as_str() {
-            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu128torch2.7.1.post3-cp39-abi3-win_amd64.whl",
-            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu130torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl",
-            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention/sageattention-2.2.0%2Bcu128torch2.8.0.post3-cp39-abi3-win_amd64.whl",
-        };
+        let whl = attention_wheel_url(&selected_profile, "sage").ok_or_else(|| {
+            format!("No SageAttention wheel available for torch profile {selected_profile}")
+        })?;
         install_wheel_no_deps(
             &uv_bin,
             &py_exe.to_string_lossy(),
@@ -3149,11 +3145,9 @@ fn run_comfyui_install(
     if request.include_sage_attention3 {
         write_install_state(&install_root, "in_progress", "addon_sageattention3");
         emit_install_event(app, "step", "Installing SageAttention3...");
-        let whl = match selected_profile.as_str() {
-            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu128torch271-cp312-cp312-win_amd64.whl",
-            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu130torch291-cp312-cp312-win_amd64.whl",
-            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/SageAttention3/sageattn3-1.0.0%2Bcu128torch280-cp312-cp312-win_amd64.whl",
-        };
+        let whl = attention_wheel_url(&selected_profile, "sage3").ok_or_else(|| {
+            format!("No SageAttention3 wheel available for torch profile {selected_profile}")
+        })?;
 
         install_wheel_no_deps(
             &uv_bin,
@@ -3177,11 +3171,9 @@ fn run_comfyui_install(
     if request.include_flash_attention {
         write_install_state(&install_root, "in_progress", "addon_flashattention");
         emit_install_event(app, "step", "Installing FlashAttention...");
-        let whl = match selected_profile.as_str() {
-            "torch271_cu128" => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu128torch2.7.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
-            "torch291_cu130" => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu130torch2.9.1cxx11abiTRUE-cp312-cp312-win_amd64.whl",
-            _ => "https://huggingface.co/arcticlatent/windows/resolve/main/FlashAttention/flash_attn-2.8.3%2Bcu128torch2.8.0cxx11abiFALSE-cp312-cp312-win_amd64.whl",
-        };
+        let whl = attention_wheel_url(&selected_profile, "flash").ok_or_else(|| {
+            format!("No FlashAttention wheel available for torch profile {selected_profile}")
+        })?;
         install_wheel_no_deps(
             &uv_bin,
             &py_exe.to_string_lossy(),
