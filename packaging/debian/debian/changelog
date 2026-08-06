@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.2.6-1) unstable; urgency=medium
+
+  * Add NixOS packaging, unified Windows development, GPU-aware Torch selection, and fixes for GPU detection, ComfyUI Manager output, and platform-specific Torch profiles.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Wed, 05 Aug 2026 20:00:11 -0400
+
 arctic-comfyui-helper (0.2.5-1) unstable; urgency=medium
 
   * On high-RAM systems, text encoder support-file defaults now select the largest full non-quantized Tier A encoder when catalog file sizes are available, leaving other Tier A encoder alternatives unchecked unless selected manually.

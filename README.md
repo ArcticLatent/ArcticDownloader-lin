@@ -248,8 +248,16 @@ Prerequisite:
 Use one command:
 
 ```bash
+nix develop
+arctic-release-env-check
 bash ./scripts/release-linux.sh
 ```
+
+On ArcticOS, run `arctic-release-env-init` once after enabling the development
+container profile. It creates the `arctic-arch`, `arctic-ubuntu`, and
+`arctic-fedora` Distroboxes used to build distribution-native packages. Arch
+packages are built inside the Arch container instead of assuming the NixOS
+host provides `makepkg` and an Arch package database.
 
 By default this publishes to `ArcticLatent/Arctic-Helper`.  
 It will:

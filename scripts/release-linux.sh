@@ -5,8 +5,9 @@ VERSION=""
 REPOSITORY="ArcticLatent/Arctic-Helper"
 OUTPUT_DIR="dist"
 SKIP_CLEAN=0
-DEB_DISTROBOX="arctic-ubuntu"
-RPM_DISTROBOX="arctic-fedora"
+ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
+DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
+RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
 AUR_PACKAGE="arctic-comfyui-helper-bin"
 AUR_PKGREL="1"
 AUR_REPO_DIR="${HOME}/aur/arctic-comfyui-helper-bin"
@@ -23,6 +24,8 @@ Options:
                          GitHub repository (default: ArcticLatent/Arctic-Helper).
   --output-dir <path>    Output directory (default: dist).
   --skip-clean           Skip cargo clean during build.
+  --arch-distrobox <name>
+                         Arch package build container (default: arctic-arch).
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
   --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
   --aur-package <name>   AUR package name to update (default: arctic-comfyui-helper-bin).
@@ -58,6 +61,10 @@ while (($# > 0)); do
     --skip-clean)
       SKIP_CLEAN=1
       shift
+      ;;
+    --arch-distrobox)
+      ARCH_DISTROBOX="${2:-}"
+      shift 2
       ;;
     --deb-distrobox)
       DEB_DISTROBOX="${2:-}"
@@ -127,6 +134,17 @@ fi
 require_cmd gh
 require_cmd bash
 require_cmd git
+if ((SKIP_AUR == 0)); then
+  require_cmd ssh
+fi
+
+run_aur_git() {
+  if [[ -f "$HOME/.ssh/id_ed25519_aur" ]]; then
+    GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_ed25519_aur -o IdentitiesOnly=yes" git "$@"
+  else
+    git "$@"
+  fi
+}
 
 echo "Checking GitHub auth ..."
 gh auth status >/dev/null
@@ -136,7 +154,7 @@ BUILD_ARGS=(--version "$VERSION" --repository "$REPOSITORY" --tag "$TAG" --outpu
 if ((SKIP_CLEAN == 1)); then
   BUILD_ARGS+=(--skip-clean)
 fi
-BUILD_ARGS+=(--deb-distrobox "$DEB_DISTROBOX" --rpm-distrobox "$RPM_DISTROBOX")
+BUILD_ARGS+=(--arch-distrobox "$ARCH_DISTROBOX" --deb-distrobox "$DEB_DISTROBOX" --rpm-distrobox "$RPM_DISTROBOX")
 
 (cd "$ROOT_DIR" && bash scripts/build-release-linux.sh "${BUILD_ARGS[@]}")
 
@@ -159,12 +177,12 @@ fi
 
 if ((SKIP_AUR == 0)); then
   echo "Updating AUR package metadata for $AUR_PACKAGE ..."
-  (cd "$ROOT_DIR" && bash scripts/update-aur-bin.sh --version "$VERSION" --pkgrel "$AUR_PKGREL" --output-dir "$OUTPUT_DIR" --repository "$REPOSITORY")
+  (cd "$ROOT_DIR" && bash scripts/update-aur-bin.sh --version "$VERSION" --pkgrel "$AUR_PKGREL" --output-dir "$OUTPUT_DIR" --repository "$REPOSITORY" --arch-distrobox "$ARCH_DISTROBOX")
 
   if [[ ! -d "$AUR_REPO_DIR/.git" ]]; then
     echo "Cloning AUR repo into $AUR_REPO_DIR ..."
     mkdir -p "$(dirname "$AUR_REPO_DIR")"
-    git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" "$AUR_REPO_DIR"
+    run_aur_git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" "$AUR_REPO_DIR"
   fi
 
   cp "$ROOT_DIR/packaging/aur-bin/PKGBUILD" "$AUR_REPO_DIR/PKGBUILD"
@@ -175,7 +193,7 @@ if ((SKIP_AUR == 0)); then
     if [[ -n "$(git status --porcelain)" ]]; then
       git add PKGBUILD .SRCINFO
       git commit -m "Update to ${VERSION}-${AUR_PKGREL}"
-      git push origin master
+      run_aur_git push origin master
       echo "AUR package pushed: $AUR_PACKAGE"
     else
       echo "AUR package already up to date: $AUR_PACKAGE"

@@ -95,7 +95,7 @@ nix run 'tarball+https://github.com/ArcticLatent/Arctic-Helper/releases/latest/d
 Install into your user profile:
 
 ```bash
-nix profile install 'tarball+https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/arctic-comfyui-helper-nix-x86_64.tar.gz'
+nix profile add 'tarball+https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/arctic-comfyui-helper-nix-x86_64.tar.gz'
 ```
 
 Update a profile installation with `nix profile upgrade arctic-comfyui-helper`.

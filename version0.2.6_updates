@@ -1,0 +1,16 @@
+ArcticDownloader 0.2.6 update log
+
+Purpose:
+- Track the cross-platform changes included in the 0.2.6 release.
+
+Entries:
+- 2026-08-05
+  - Added binary NixOS release packaging and documented profile and declarative installation.
+  - Consolidated the Linux and Windows application into one repository with platform-specific backends and frontends.
+  - Added multi-GPU selection and filtered Torch profiles by the selected GPU backend and operating system.
+  - Improved mixed-GPU Linux detection, including headless NVIDIA 3D controllers.
+  - Updated Linux AMD profiles for ROCm 7.2 while keeping Windows ROCm SDK and Intel XPU profiles platform-specific.
+  - Fixed Windows ComfyUI Manager process output handling and verified Manager startup in the Windows VM.
+  - Moved ComfyUI Git update checks off the UI thread to prevent startup freezes.
+  - Increased the iterative Civitai HTML scan budget and corrected its diagnostic message.
+  - Updated public Nix profile instructions to use `nix profile add`.

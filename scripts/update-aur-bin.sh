@@ -6,6 +6,7 @@ PKGREL="1"
 OUTPUT_DIR="dist"
 AUR_DIR="packaging/aur-bin"
 REPOSITORY="ArcticLatent/Arctic-Helper"
+ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 
 usage() {
   cat <<'EOF'
@@ -19,6 +20,8 @@ Options:
   --aur-dir <path>       AUR package directory to update (default: packaging/aur-bin).
   --repository <owner/repo>
                          GitHub repository used for release URLs.
+  --arch-distrobox <name>
+                         Arch environment used for makepkg (default: arctic-arch).
   -h, --help             Show help.
 EOF
 }
@@ -43,6 +46,10 @@ while (($# > 0)); do
       ;;
     --repository)
       REPOSITORY="${2:-}"
+      shift 2
+      ;;
+    --arch-distrobox)
+      ARCH_DISTROBOX="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -144,10 +151,28 @@ awk \
 
 mv "$tmp" "$PKGBUILD_PATH"
 
-(
-  cd "$TARGET_AUR_DIR"
-  makepkg --printsrcinfo > "$SRCINFO_PATH"
-)
+if command -v makepkg >/dev/null 2>&1; then
+  (
+    cd "$TARGET_AUR_DIR"
+    makepkg --printsrcinfo > "$SRCINFO_PATH"
+  )
+else
+  command -v distrobox >/dev/null 2>&1 || {
+    echo "makepkg is unavailable and distrobox was not found." >&2
+    exit 1
+  }
+  printf -v target_aur_dir_q '%q' "$TARGET_AUR_DIR"
+  echo "Generating .SRCINFO in distrobox '$ARCH_DISTROBOX' ..."
+  distrobox enter "$ARCH_DISTROBOX" -- bash -lc "
+    set -euo pipefail
+    cd $target_aur_dir_q
+    command -v makepkg >/dev/null 2>&1 || {
+      echo 'makepkg is missing; run an Arch release build first.' >&2
+      exit 1
+    }
+    makepkg --printsrcinfo > .SRCINFO
+  "
+fi
 
 echo "Updated AUR binary package files:"
 echo "  PKGBUILD:  $PKGBUILD_PATH"

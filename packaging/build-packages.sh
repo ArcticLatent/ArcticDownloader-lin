@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGING_DIR="$ROOT_DIR/packaging"
 OUT_DIR="$PACKAGING_DIR/out"
+ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
 RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
 
@@ -17,12 +18,13 @@ Targets:
   deb      Build Debian package (.deb) with dpkg-buildpackage
   rpm      Build Fedora/RPM package (.rpm) with rpmbuild
   flatpak  Build Flatpak bundle (.flatpak) with flatpak-builder
-  all      Build all targets in order: arch (host), deb (distrobox), rpm (distrobox), flatpak (host)
+  all      Build all targets in order: arch/deb/rpm (distrobox), flatpak (host)
 
 Notes:
   - Run from anywhere inside the repo.
   - Build tools must already be installed on your system.
   - `all` expects distroboxes:
+      - Arch: arctic-arch (override with ARCTIC_ARCH_DISTROBOX)
       - Debian: arctic-ubuntu (override with ARCTIC_DEB_DISTROBOX)
       - Fedora: arctic-fedora (override with ARCTIC_RPM_DISTROBOX)
 EOF
@@ -185,13 +187,43 @@ build_flatpak() {
     cargo build --release --manifest-path src-tauri/Cargo.toml
   )
 
+  find_shared_library() {
+    local library_name="$1"
+    local candidate
+    local library_dir
+
+    candidate="$(ldconfig -p 2>/dev/null | awk -v name="$library_name" '$1 == name { path = $NF } END { if (path) print path }')"
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+
+    # NixOS does not populate an FHS ldconfig cache. Development shells expose
+    # their library closures as -L entries in NIX_LDFLAGS instead.
+    while IFS= read -r library_dir; do
+      [[ -n "$library_dir" ]] || continue
+      candidate="$library_dir/$library_name"
+      if [[ -f "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done < <(
+      {
+        printf '%s\n' "${NIX_LDFLAGS:-}" | tr ' ' '\n' | sed -n 's/^-L//p'
+        printf '%s\n' "${LD_LIBRARY_PATH:-}" | tr ':' '\n'
+      } | awk 'NF && !seen[$0]++'
+    )
+
+    return 1
+  }
+
   for lib in \
     libayatana-appindicator3.so.1 \
     libayatana-indicator3.so.7 \
     libayatana-ido3-0.4.so.0 \
     libdbusmenu-gtk3.so.4 \
     libdbusmenu-glib.so.4; do
-    lib_path="$(ldconfig -p 2>/dev/null | awk -v name="$lib" '$1 == name { path = $NF } END { if (path) print path }')"
+    lib_path="$(find_shared_library "$lib" || true)"
     if [[ -z "$lib_path" || ! -f "$lib_path" ]]; then
       echo "Required Flatpak tray library not found on host: $lib" >&2
       exit 1
@@ -225,6 +257,17 @@ build_flatpak() {
     --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
 
   echo "Flatpak artifacts: $OUT_DIR/flatpak"
+}
+
+build_arch_in_distrobox() {
+  require_cmd distrobox
+  echo "Building Arch package in distrobox '$ARCH_DISTROBOX' ..."
+  distrobox enter "$ARCH_DISTROBOX" -- bash -lc "
+    set -euo pipefail
+    export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+    cd '$ROOT_DIR'
+    bash packaging/build-packages.sh arch
+  "
 }
 
 build_deb_in_distrobox() {
@@ -269,7 +312,7 @@ main() {
       build_flatpak
       ;;
     all)
-      build_arch
+      build_arch_in_distrobox
       build_deb_in_distrobox
       build_rpm_in_distrobox
       build_flatpak

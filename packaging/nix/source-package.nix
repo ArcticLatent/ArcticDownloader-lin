@@ -30,7 +30,7 @@
 
 rustPlatform.buildRustPackage {
   pname = "arctic-comfyui-helper";
-  version = "0.2.5";
+  version = "0.2.6";
 
   # Keep local release artifacts and Cargo build directories out of the Nix
   # source closure. This matters when the release script is run with `path:`

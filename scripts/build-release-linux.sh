@@ -10,13 +10,15 @@ SKIP_CLEAN=0
 PUBLISH_GITHUB=0
 PUBLISH_AUR=0
 ARCH_AUR_ONLY=0
-DEB_DISTROBOX="arctic-ubuntu"
-RPM_DISTROBOX="arctic-fedora"
+ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
+DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
+RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
 AUR_PACKAGE="arctic-comfyui-helper-bin"
 AUR_PKGREL="1"
 AUR_REPO_DIR="${HOME}/aur/arctic-comfyui-helper-bin"
 DEB_SUDO_PASSWORD="${ARCTIC_DEB_SUDO_PASSWORD:-}"
 RPM_SUDO_PASSWORD="${ARCTIC_RPM_SUDO_PASSWORD:-}"
+ARCH_SUDO_PASSWORD="${ARCTIC_ARCH_SUDO_PASSWORD:-}"
 
 usage() {
   cat <<'USAGE'
@@ -36,12 +38,15 @@ Options:
   --publish-aur          Update and push the AUR binary package metadata.
   --publish-all          Publish both GitHub release assets and the AUR package.
   --archaur             Build only the Arch package, upload that Arch asset to GitHub, and update AUR.
+  --arch-distrobox <name>
+                         Arch package build container (default: arctic-arch).
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
   --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
   --aur-package <name>   AUR package name to update (default: arctic-comfyui-helper-bin).
   --aur-pkgrel <n>       AUR pkgrel value (default: 1).
   --aur-repo-dir <path>  Local AUR git repo checkout (default: ~/aur/arctic-comfyui-helper-bin).
   Environment variables for non-interactive sudo:
+    ARCTIC_ARCH_SUDO_PASSWORD
     ARCTIC_DEB_SUDO_PASSWORD
     ARCTIC_RPM_SUDO_PASSWORD
   -h, --help             Show help.
@@ -122,6 +127,10 @@ while (($# > 0)); do
       PUBLISH_AUR=1
       shift
       ;;
+    --arch-distrobox)
+      ARCH_DISTROBOX="${2:-}"
+      shift 2
+      ;;
     --deb-distrobox)
       DEB_DISTROBOX="${2:-}"
       shift 2
@@ -196,8 +205,8 @@ fi
 require_cmd cargo
 require_cmd sha256sum
 require_cmd bash
+require_cmd distrobox
 if ((ARCH_AUR_ONLY == 0)); then
-  require_cmd distrobox
   require_cmd flatpak
   require_cmd flatpak-builder
 fi
@@ -206,7 +215,16 @@ if ((PUBLISH_GITHUB == 1)); then
 fi
 if ((PUBLISH_AUR == 1)); then
   require_cmd git
+  require_cmd ssh
 fi
+
+run_aur_git() {
+  if [[ -f "$HOME/.ssh/id_ed25519_aur" ]]; then
+    GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_ed25519_aur -o IdentitiesOnly=yes" git "$@"
+  else
+    git "$@"
+  fi
+}
 
 update_simple_version() {
   local file="$1"
@@ -337,8 +355,39 @@ rm -rf "$PACKAGING_DIR/out"
 rm -rf "$OUT_ABS_DIR"
 mkdir -p "$OUT_ABS_DIR"
 
-echo "Building Arch package on host ..."
-(cd "$ROOT_DIR" && bash packaging/build-packages.sh arch)
+echo "Building Arch package in distrobox '$ARCH_DISTROBOX' ..."
+distrobox enter "$ARCH_DISTROBOX" -- bash -lc "
+  set -euo pipefail
+  SUDO_PASSWORD='${ARCH_SUDO_PASSWORD//\'/\'\"\'\"\'}'
+  as_root() {
+    if [[ \"\$(id -u)\" -eq 0 ]]; then
+      \"\$@\"
+    elif command -v sudo >/dev/null 2>&1; then
+      if [[ -n \"\$SUDO_PASSWORD\" ]]; then
+        printf '%s\n' \"\$SUDO_PASSWORD\" | sudo -S -p '' \"\$@\"
+      else
+        sudo \"\$@\"
+      fi
+    else
+      echo \"Need root privileges to install Arch build dependencies (missing sudo).\" >&2
+      exit 1
+    fi
+  }
+
+  as_root pacman -Syu --noconfirm --needed \
+    base-devel rust pkgconf openssl \
+    gtk3 webkit2gtk-4.1 xdg-desktop-portal-gtk
+
+  if pacman -Si libappindicator-gtk3 >/dev/null 2>&1; then
+    as_root pacman -S --noconfirm --needed libappindicator-gtk3
+  else
+    as_root pacman -S --noconfirm --needed libappindicator
+  fi
+
+  export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+  cd '$ROOT_DIR'
+  bash packaging/build-packages.sh arch
+"
 
 if ((ARCH_AUR_ONLY == 0)); then
 echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
@@ -432,9 +481,9 @@ if ! distrobox enter "$RPM_DISTROBOX" -- bash -lc "
   ensure_rpm_build_tools() {
     local missing=0
     for cmd in rpmbuild cargo rustc; do
-      command -v "\$cmd" >/dev/null 2>&1 || missing=1
+      command -v \"\$cmd\" >/dev/null 2>&1 || missing=1
     done
-    if [[ "\$missing" -eq 1 ]] \
+    if [[ \"\$missing\" -eq 1 ]] \
       || ! rpm -q openssl-devel >/dev/null 2>&1 \
       || ! rpm -q gtk3-devel >/dev/null 2>&1 \
       || ! rpm -q webkit2gtk4.1-devel >/dev/null 2>&1 \
@@ -571,12 +620,12 @@ fi
 
 if ((PUBLISH_AUR == 1)); then
   echo "Updating AUR package metadata for '$AUR_PACKAGE' ..."
-  (cd "$ROOT_DIR" && bash scripts/update-aur-bin.sh --version "$VERSION" --pkgrel "$AUR_PKGREL" --output-dir "$OUTPUT_DIR" --repository "$REPOSITORY")
+  (cd "$ROOT_DIR" && bash scripts/update-aur-bin.sh --version "$VERSION" --pkgrel "$AUR_PKGREL" --output-dir "$OUTPUT_DIR" --repository "$REPOSITORY" --arch-distrobox "$ARCH_DISTROBOX")
 
   if [[ ! -d "$AUR_REPO_DIR/.git" ]]; then
     echo "Cloning AUR repo into $AUR_REPO_DIR ..."
     mkdir -p "$(dirname "$AUR_REPO_DIR")"
-    git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" "$AUR_REPO_DIR"
+    run_aur_git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" "$AUR_REPO_DIR"
   fi
 
   cp "$ROOT_DIR/packaging/aur-bin/PKGBUILD" "$AUR_REPO_DIR/PKGBUILD"
@@ -587,7 +636,7 @@ if ((PUBLISH_AUR == 1)); then
     if [[ -n "$(git status --porcelain)" ]]; then
       git add PKGBUILD .SRCINFO
       git commit -m "Update to ${VERSION}-${AUR_PKGREL}"
-      git push origin master
+      run_aur_git push origin master
       echo "AUR package pushed: $AUR_PACKAGE"
     else
       echo "AUR package already up to date: $AUR_PACKAGE"
