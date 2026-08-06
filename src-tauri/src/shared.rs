@@ -50,7 +50,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
@@ -59,6 +62,66 @@ use tokio_util::sync::CancellationToken;
 /// should default to `true` when absent from a persisted/older config file.
 pub fn default_true() -> bool {
     true
+}
+
+/// Recovers from a poisoned `Mutex`/`RwLock` by taking the guard anyway,
+/// instead of propagating an error or panicking. A panic while holding one
+/// of `AppState`'s locks doesn't leave the (simple, owned) data behind it
+/// torn -- Rust's poisoning is a conservative "might be inconsistent"
+/// signal here, not proof of actual corruption -- so recovering keeps the
+/// app functional after a single panic instead of every future access to
+/// that lock failing, or silently no-op'ing, for the rest of the process's
+/// life. Used uniformly in place of the previous mix of some call sites
+/// hard-erroring on poison and others silently skipping their body.
+pub fn recover_lock<T>(result: Result<T, std::sync::PoisonError<T>>) -> T {
+    result.unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Runs `probe` (the platform-specific "how do I query this vendor's GPU"
+/// query -- `nvidia-smi`, a PowerShell `Get-CimInstance` script, `lspci`,
+/// etc.) on a background thread and returns the cached result immediately:
+/// callers get `T::default()` until the first successful probe completes,
+/// then the cached value on every call after. A failed/empty probe result
+/// is not cached and does not stick permanently -- `probe_started` resets
+/// so a later call retries instead of reporting "no GPU" forever (e.g. if
+/// the vendor's tool wasn't on PATH yet at the first check, right after a
+/// driver install or before a session PATH refresh).
+///
+/// `app_linux.rs` and `app_windows.rs` each had their own copy of this
+/// caching/retry pattern, three times per platform (NVIDIA/AMD/Intel) --
+/// identical except for the query function and (on Linux) an extra
+/// "probe complete" flag that, unlike this version, gave up retrying
+/// permanently after the very first attempt, success or failure.
+pub fn detect_gpu_details_cached<T>(
+    cache: &'static Mutex<Option<T>>,
+    probe_started: &'static AtomicBool,
+    has_result: impl Fn(&T) -> bool + Send + 'static,
+    probe: impl FnOnce() -> T + Send + 'static,
+) -> T
+where
+    T: Clone + Default + Send + 'static,
+{
+    if let Ok(guard) = cache.lock() {
+        if let Some(details) = guard.clone() {
+            return details;
+        }
+    }
+
+    if !probe_started.swap(true, Ordering::SeqCst) {
+        std::thread::spawn(move || {
+            let details = probe();
+            if let Ok(mut guard) = cache.lock() {
+                if has_result(&details) {
+                    *guard = Some(details);
+                } else {
+                    *guard = None;
+                    probe_started.store(false, Ordering::SeqCst);
+                }
+            }
+        });
+    }
+
+    T::default()
 }
 
 /// True if `path`'s final component is `ComfyUI` or `ComfyUI-<suffix>`
@@ -458,6 +521,108 @@ pub fn has_dns(host: &str, port: u16) -> bool {
         .unwrap_or(false)
 }
 
+/// A timeout budget generous enough for a slow `git clone`/`fetch` of a
+/// ComfyUI-sized repo over a poor connection, but bounded so an
+/// unreachable host or a stalled server doesn't hang the calling command
+/// forever -- previously the only way out was killing the whole app.
+pub const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Runs `cmd` (already fully configured -- program, args, cwd, env, and
+/// any `Stdio` the caller wants for stdin) to completion like
+/// `Command::status()`, but kills it and returns an error if it hasn't
+/// exited within `timeout`. Safe to use with inherited stdout/stderr
+/// (the common case for this codebase's `run_command`-style helpers)
+/// since nothing here pipes or reads them.
+pub fn run_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut child = cmd.spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("command timed out after {timeout:?}"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Runs `cmd` to completion like `Command::output()` (stdout/stderr
+/// captured, not inherited), but kills it and returns an error if it
+/// hasn't exited within `timeout`. Drains stdout/stderr on background
+/// threads while polling for exit, the same way `Command::output()`
+/// itself does internally -- a naive "poll `try_wait`, read pipes only
+/// after exit" implementation would let a command that produces more
+/// output than one OS pipe buffer (~64KB) deadlock against its own
+/// unread pipe and get killed by this timeout for a reason that has
+/// nothing to do with actually being stuck.
+pub fn run_with_timeout_capturing_output(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Dropping the child closes its ends of the pipes, so
+                    // the reader threads see EOF and these joins return
+                    // promptly rather than blocking further.
+                    let stdout = stdout_thread.join().unwrap_or_default();
+                    let stderr = stderr_thread.join().unwrap_or_default();
+                    let _ = (stdout, stderr);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("command timed out after {timeout:?}"),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    };
+
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// Derives a human-facing instance name from an install path's final
 /// component (falls back to `"ComfyUI"` if the path has none).
 pub fn comfyui_instance_name_from_path(path: &Path) -> String {
@@ -768,10 +933,7 @@ pub fn save_civitai_token(
 /// Cancels an in-flight ComfyUI install, if one is running.
 #[tauri::command]
 pub fn cancel_comfyui_install(state: State<'_, AppState>) -> Result<bool, String> {
-    let mut active = state
-        .install_cancel
-        .lock()
-        .map_err(|_| "install state lock poisoned".to_string())?;
+    let mut active = recover_lock(state.install_cancel.lock());
     if let Some(token) = active.as_ref() {
         token.cancel();
         *active = None;
@@ -784,10 +946,7 @@ pub fn cancel_comfyui_install(state: State<'_, AppState>) -> Result<bool, String
 /// True if the managed ComfyUI child process is still alive. Reaps it (sets
 /// the slot back to `None`) if it has already exited or become unqueryable.
 pub fn comfyui_process_running(state: &AppState) -> bool {
-    let mut guard = match state.comfyui_process.lock() {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
+    let mut guard = recover_lock(state.comfyui_process.lock());
     let Some(child) = guard.as_mut() else {
         return false;
     };
@@ -845,10 +1004,7 @@ pub fn wait_for_comfyui_start(state: &AppState, timeout: Duration) -> Result<(),
         }
 
         {
-            let mut guard = state
-                .comfyui_process
-                .lock()
-                .map_err(|_| "comfyui process lock poisoned".to_string())?;
+            let mut guard = recover_lock(state.comfyui_process.lock());
             if let Some(child) = guard.as_mut() {
                 match child.try_wait() {
                     Ok(Some(status)) => {
@@ -948,10 +1104,7 @@ pub fn set_comfyui_show_runtime_logs(
 /// (e.g. after an app restart, or a Flatpak host-spawned process on Linux).
 /// That fallback genuinely differs by platform and stays there.
 pub fn kill_managed_comfyui_child(state: &AppState) -> Result<bool, String> {
-    let mut guard = state
-        .comfyui_process
-        .lock()
-        .map_err(|_| "comfyui process lock poisoned".to_string())?;
+    let mut guard = recover_lock(state.comfyui_process.lock());
     let Some(child) = guard.as_mut() else {
         return Ok(false);
     };
@@ -1750,10 +1903,7 @@ pub async fn download_model_assets(
 
     let cancel = CancellationToken::new();
     {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
+        let mut active = recover_lock(state.active_cancel.lock());
         if active.is_some() {
             return Err("A download is already active. Cancel it first.".to_string());
         }
@@ -1770,20 +1920,14 @@ pub async fn download_model_assets(
         tx,
         Some(cancel),
     );
-    if let Ok(mut abort) = state.active_abort.lock() {
-        *abort = Some(handle.abort_handle());
-    }
+    *recover_lock(state.active_abort.lock()) = Some(handle.abort_handle());
     spawn_progress_emitter(app.clone(), "model".to_string(), rx);
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = handle.await;
         let managed = app_for_task.state::<AppState>();
-        if let Ok(mut active) = managed.active_cancel.lock() {
-            *active = None;
-        }
-        if let Ok(mut abort) = managed.active_abort.lock() {
-            *abort = None;
-        }
+        *recover_lock(managed.active_cancel.lock()) = None;
+        *recover_lock(managed.active_abort.lock()) = None;
 
         match result {
             Ok(Ok(outcomes)) => {
@@ -1905,10 +2049,7 @@ pub async fn download_model_assets_batch(
 
     let cancel = CancellationToken::new();
     {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
+        let mut active = recover_lock(state.active_cancel.lock());
         if active.is_some() {
             return Err("A download is already active. Cancel it first.".to_string());
         }
@@ -1991,20 +2132,14 @@ pub async fn download_model_assets_batch(
         );
     });
 
-    if let Ok(mut abort_slot) = state.active_abort.lock() {
-        *abort_slot = Some(abort.inner().abort_handle());
-    }
+    *recover_lock(state.active_abort.lock()) = Some(abort.inner().abort_handle());
 
     let managed = app.clone();
     tauri::async_runtime::spawn(async move {
         let _ = abort.await;
         let state = managed.state::<AppState>();
-        if let Ok(mut active) = state.active_cancel.lock() {
-            *active = None;
-        };
-        if let Ok(mut abort_slot) = state.active_abort.lock() {
-            *abort_slot = None;
-        };
+        *recover_lock(state.active_cancel.lock()) = None;
+        *recover_lock(state.active_abort.lock()) = None;
     });
 
     Ok(())
@@ -2036,10 +2171,7 @@ pub async fn download_workflow_asset(
 
     let cancel = CancellationToken::new();
     {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
+        let mut active = recover_lock(state.active_cancel.lock());
         if active.is_some() {
             return Err("A download is already active. Cancel it first.".to_string());
         }
@@ -2053,20 +2185,14 @@ pub async fn download_workflow_asset(
         tx,
         Some(cancel),
     );
-    if let Ok(mut abort) = state.active_abort.lock() {
-        *abort = Some(handle.abort_handle());
-    }
+    *recover_lock(state.active_abort.lock()) = Some(handle.abort_handle());
     spawn_progress_emitter(app.clone(), "workflow".to_string(), rx);
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = handle.await;
         let managed = app_for_task.state::<AppState>();
-        if let Ok(mut active) = managed.active_cancel.lock() {
-            *active = None;
-        }
-        if let Ok(mut abort) = managed.active_abort.lock() {
-            *abort = None;
-        }
+        *recover_lock(managed.active_cancel.lock()) = None;
+        *recover_lock(managed.active_abort.lock()) = None;
 
         match result {
             Ok(Ok(outcome)) => {

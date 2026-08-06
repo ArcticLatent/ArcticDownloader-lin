@@ -47,11 +47,25 @@ pub fn build_context() -> Result<AppContext> {
     let config = Arc::new(ConfigStore::new()?);
     let catalog = Arc::new(CatalogService::new(config.clone())?);
 
-    // Ensure catalog is always refreshed from remote before the UI boots.
-    if let Err(err) = runtime.block_on(catalog.refresh_from_remote()) {
-        warn!("Unable to refresh catalog from remote source: {err:#}");
-    } else {
-        info!("Catalog refreshed from remote at startup.");
+    // Refresh the catalog from the remote source in the background instead
+    // of blocking startup on it. `CatalogService::new()` above already
+    // loaded the last-cached catalog synchronously (a fast local file
+    // read), so the UI has something to show immediately; a slow or
+    // unavailable network connection previously added up to several
+    // seconds of dead time to every launch for no benefit over that cached
+    // fallback. `refresh_from_remote` updates `CatalogService`'s shared
+    // state in place once it completes, and the existing "Refresh Catalog"
+    // button already gives the user a way to pull in a background-
+    // completed refresh immediately if they want it mid-session.
+    {
+        let catalog = catalog.clone();
+        runtime.spawn(async move {
+            match catalog.refresh_from_remote().await {
+                Ok(true) => info!("Catalog refreshed from remote in the background."),
+                Ok(false) => {}
+                Err(err) => warn!("Unable to refresh catalog from remote source: {err:#}"),
+            }
+        });
     }
 
     let display_version = resolve_display_version(&config);

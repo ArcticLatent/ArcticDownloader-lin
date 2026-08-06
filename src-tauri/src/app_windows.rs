@@ -2,17 +2,19 @@ use crate::shared::{
     amd_gpu_details_cache, append_attention_launch_arg, apply_torch_allocator_env_compat,
     choose_install_folder, clear_directory_contents, comfyui_external_running,
     comfyui_runtime_running, custom_node_exists, custom_node_installed, default_true,
-    detect_amd_gpu_name, detect_existing_comfyui_root, detect_intel_gpu_name, detect_nvidia_gpu,
-    emit_comfyui_runtime_event, emit_comfyui_runtime_log_event, emit_install_event,
+    detect_amd_gpu_name, detect_existing_comfyui_root, detect_gpu_details_cached,
+    detect_intel_gpu_name, detect_nvidia_gpu, emit_comfyui_runtime_event,
+    emit_comfyui_runtime_log_event, emit_install_event,
     git_current_branch, has_dns, install_custom_node_and_record, intel_gpu_details_cache,
     is_empty_dir, is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
     normalize_optional_path, normalize_release_version, parse_custom_launch_args,
     parse_hf_env_value, parse_semver_triplet, parse_yaml_bool, parse_yaml_scalar,
-    path_name_is_comfyui, push_preflight, read_comfyui_installed_version,
-    remove_custom_node_dirs, resolve_comfyui_instance_name, show_main_window,
-    spawn_progress_emitter, start_comfyui_root_background, stop_comfyui_for_mutation,
-    wait_for_comfyui_start, write_install_state, write_install_summary, yaml_single_quote,
-    AmdGpuDetails, AppState, ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent,
+    path_name_is_comfyui, push_preflight, read_comfyui_installed_version, recover_lock,
+    remove_custom_node_dirs, resolve_comfyui_instance_name, run_with_timeout,
+    run_with_timeout_capturing_output, show_main_window, spawn_progress_emitter,
+    start_comfyui_root_background, stop_comfyui_for_mutation, wait_for_comfyui_start,
+    write_install_state, write_install_summary, yaml_single_quote, AmdGpuDetails, AppState,
+    ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent, GIT_COMMAND_TIMEOUT,
     InstallSummaryItem, IntelGpuDetails, PreflightItem,
 };
 use arctic_downloader::{
@@ -29,10 +31,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex, OnceLock,
-    },
+    sync::{atomic::AtomicBool, Mutex, OnceLock},
     time::Duration,
 };
 use tauri::{
@@ -229,32 +228,12 @@ fn query_nvidia_gpu_details_blocking() -> NvidiaGpuDetails {
 }
 
 pub(crate) fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
-    if let Ok(guard) = gpu_details_cache().lock() {
-        if let Some(details) = guard.clone() {
-            return details;
-        }
-    }
-
-    if !GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
-        std::thread::spawn(|| {
-            let details = query_nvidia_gpu_details_blocking();
-            if let Ok(mut guard) = gpu_details_cache().lock() {
-                if details.name.is_some() {
-                    *guard = Some(details);
-                } else {
-                    // Don't cache a negative result: if `nvidia-smi` isn't on
-                    // PATH yet (e.g. right after a driver install, or before
-                    // a session PATH refresh), this lets a later call retry
-                    // instead of permanently reporting "no GPU" for the rest
-                    // of the process, matching the AMD/Intel probes below.
-                    *guard = None;
-                    GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
-                }
-            }
-        });
-    }
-
-    NvidiaGpuDetails::default()
+    detect_gpu_details_cached(
+        gpu_details_cache(),
+        &GPU_DETAILS_PROBE_STARTED,
+        |d| d.name.is_some(),
+        query_nvidia_gpu_details_blocking,
+    )
 }
 
 fn query_amd_gpu_details_blocking() -> AmdGpuDetails {
@@ -284,27 +263,12 @@ fn query_amd_gpu_details_blocking() -> AmdGpuDetails {
 }
 
 pub(crate) fn detect_amd_gpu_details() -> AmdGpuDetails {
-    if let Ok(guard) = amd_gpu_details_cache().lock() {
-        if let Some(details) = guard.clone() {
-            return details;
-        }
-    }
-
-    if !AMD_GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
-        std::thread::spawn(|| {
-            let details = query_amd_gpu_details_blocking();
-            if let Ok(mut guard) = amd_gpu_details_cache().lock() {
-                if details.name.is_some() {
-                    *guard = Some(details);
-                } else {
-                    *guard = None;
-                    AMD_GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
-                }
-            }
-        });
-    }
-
-    AmdGpuDetails::default()
+    detect_gpu_details_cached(
+        amd_gpu_details_cache(),
+        &AMD_GPU_DETAILS_PROBE_STARTED,
+        |d| d.name.is_some(),
+        query_amd_gpu_details_blocking,
+    )
 }
 
 fn query_intel_gpu_details_blocking() -> IntelGpuDetails {
@@ -334,27 +298,12 @@ fn query_intel_gpu_details_blocking() -> IntelGpuDetails {
 }
 
 pub(crate) fn detect_intel_gpu_details() -> IntelGpuDetails {
-    if let Ok(guard) = intel_gpu_details_cache().lock() {
-        if let Some(details) = guard.clone() {
-            return details;
-        }
-    }
-
-    if !INTEL_GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
-        std::thread::spawn(|| {
-            let details = query_intel_gpu_details_blocking();
-            if let Ok(mut guard) = intel_gpu_details_cache().lock() {
-                if details.name.is_some() {
-                    *guard = Some(details);
-                } else {
-                    *guard = None;
-                    INTEL_GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
-                }
-            }
-        });
-    }
-
-    IntelGpuDetails::default()
+    detect_gpu_details_cached(
+        intel_gpu_details_cache(),
+        &INTEL_GPU_DETAILS_PROBE_STARTED,
+        |d| d.name.is_some(),
+        query_intel_gpu_details_blocking,
+    )
 }
 
 
@@ -1533,6 +1482,33 @@ fn parse_sha256_manifest(path: &Path) -> Result<String, String> {
     Ok(token.to_ascii_lowercase())
 }
 
+/// Dispatches to a bounded-timeout run for `git` (network operations that
+/// can otherwise hang forever against an unreachable host or stalled
+/// server, with previously no way out short of killing the app) and plain
+/// `Command::status()` for everything else, unchanged.
+fn status_with_optional_timeout(
+    program: &str,
+    mut cmd: std::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    if program == "git" {
+        run_with_timeout(cmd, GIT_COMMAND_TIMEOUT)
+    } else {
+        cmd.status()
+    }
+}
+
+/// `Command::output()`-equivalent of [`status_with_optional_timeout`].
+fn output_with_optional_timeout(
+    program: &str,
+    mut cmd: std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    if program == "git" {
+        run_with_timeout_capturing_output(cmd, GIT_COMMAND_TIMEOUT)
+    } else {
+        cmd.output()
+    }
+}
+
 fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Result<(), String> {
     log::debug!("run_command: {} {}", program, args.join(" "));
     let mut cmd = std::process::Command::new(program);
@@ -1541,8 +1517,7 @@ fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Resu
         cmd.current_dir(dir);
     }
     apply_background_command_flags(&mut cmd);
-    let status = cmd
-        .status()
+    let status = status_with_optional_timeout(program, cmd)
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     if !status.success() {
         return Err(format!("Command failed: {} {}", program, args.join(" ")));
@@ -1563,8 +1538,7 @@ pub(crate) fn run_command_capture(
         cmd.current_dir(dir);
     }
     apply_background_command_flags(&mut cmd);
-    let output = cmd
-        .output()
+    let output = output_with_optional_timeout(program, cmd)
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1829,8 +1803,7 @@ fn run_command_env(
         cmd.env(key, value);
     }
     apply_background_command_flags(&mut cmd);
-    let output = cmd
-        .output()
+    let output = output_with_optional_timeout(program, cmd)
         .map_err(|err| format!("Failed to run {program}: {err}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -3386,20 +3359,14 @@ async fn start_comfyui_install(
     request: ComfyInstallRequest,
 ) -> Result<(), String> {
     {
-        let mut active = state
-            .install_cancel
-            .lock()
-            .map_err(|_| "install state lock poisoned".to_string())?;
+        let mut active = recover_lock(state.install_cancel.lock());
         if active.is_some() {
             return Err("ComfyUI installation is already active.".to_string());
         }
         *active = Some(CancellationToken::new());
     }
 
-    let cancel = state
-        .install_cancel
-        .lock()
-        .map_err(|_| "install state lock poisoned".to_string())?
+    let cancel = recover_lock(state.install_cancel.lock())
         .as_ref()
         .cloned()
         .ok_or_else(|| "Failed to initialize install cancellation token.".to_string())?;
@@ -3455,9 +3422,7 @@ async fn start_comfyui_install(
             Err(err) => emit_install_event(&app_for_task, "failed", &err),
         }
         let managed = app_for_task.state::<AppState>();
-        if let Ok(mut active) = managed.install_cancel.lock() {
-            *active = None;
-        };
+        *recover_lock(managed.install_cancel.lock()) = None;
     });
 
     Ok(())
@@ -3666,10 +3631,7 @@ async fn download_lora_asset(
 
     let cancel = CancellationToken::new();
     {
-        let mut active = state
-            .active_cancel
-            .lock()
-            .map_err(|_| "download state lock poisoned".to_string())?;
+        let mut active = recover_lock(state.active_cancel.lock());
         if active.is_some() {
             return Err("A download is already active. Cancel it first.".to_string());
         }
@@ -3684,20 +3646,14 @@ async fn download_lora_asset(
         tx,
         Some(cancel),
     );
-    if let Ok(mut abort) = state.active_abort.lock() {
-        *abort = Some(handle.abort_handle());
-    }
+    *recover_lock(state.active_abort.lock()) = Some(handle.abort_handle());
     spawn_progress_emitter(app.clone(), "lora".to_string(), rx);
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = handle.await;
         let managed = app_for_task.state::<AppState>();
-        if let Ok(mut active) = managed.active_cancel.lock() {
-            *active = None;
-        }
-        if let Ok(mut abort) = managed.active_abort.lock() {
-            *abort = None;
-        }
+        *recover_lock(managed.active_cancel.lock()) = None;
+        *recover_lock(managed.active_abort.lock()) = None;
 
         match result {
             Ok(Ok(_outcome)) => {
@@ -4237,11 +4193,7 @@ pub(crate) fn start_comfyui_root_impl(
             spawn_comfyui_runtime_log_stream(app.clone(), "stderr", stderr);
         }
     }
-    let mut guard = state
-        .comfyui_process
-        .lock()
-        .map_err(|_| "comfyui process lock poisoned".to_string())?;
-    *guard = Some(child);
+    *recover_lock(state.comfyui_process.lock()) = Some(child);
     Ok(())
 }
 
@@ -6005,14 +5957,8 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
 #[tauri::command]
 fn cancel_active_download(state: State<'_, AppState>) -> Result<bool, String> {
-    let mut active = state
-        .active_cancel
-        .lock()
-        .map_err(|_| "download state lock poisoned".to_string())?;
-    let mut abort = state
-        .active_abort
-        .lock()
-        .map_err(|_| "download state lock poisoned".to_string())?;
+    let mut active = recover_lock(state.active_cancel.lock());
+    let mut abort = recover_lock(state.active_abort.lock());
     if let Some(token) = active.as_ref() {
         token.cancel();
         if let Some(handle) = abort.take() {
