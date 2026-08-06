@@ -10,6 +10,7 @@ SKIP_CLEAN=0
 PUBLISH_GITHUB=0
 PUBLISH_AUR=0
 ARCH_AUR_ONLY=0
+ASSEMBLE_ONLY=0
 ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
 RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
@@ -34,6 +35,8 @@ Options:
   --notes-file <path>    Optional markdown notes file copied into output dir.
                          Default: CHANGELOG_<version>.md in the repo root when present.
   --skip-clean           Skip cargo clean.
+  --assemble-only        Reuse package artifacts already present in packaging/out.
+                         Rebuild Nix assets, checksums, and the release manifest.
   --publish-github       Create/update the GitHub release and upload built assets.
   --publish-aur          Update and push the AUR binary package metadata.
   --publish-all          Publish both GitHub release assets and the AUR package.
@@ -106,6 +109,10 @@ while (($# > 0)); do
       ;;
     --skip-clean)
       SKIP_CLEAN=1
+      shift
+      ;;
+    --assemble-only)
+      ASSEMBLE_ONLY=1
       shift
       ;;
     --publish-github)
@@ -186,6 +193,48 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGING_DIR="$ROOT_DIR/packaging"
 OUT_ABS_DIR="$ROOT_DIR/$OUTPUT_DIR"
 AUR_REPO_DIR="${AUR_REPO_DIR/#\~/$HOME}"
+
+load_public_catalog_env() {
+  local env_file="${ARCTIC_ENV_FILE:-$ROOT_DIR/.env}"
+  local line name value
+
+  if [[ -f "$env_file" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      [[ -n "$line" && "$line" != \#* && "$line" == *=* ]] || continue
+      name="${line%%=*}"
+      value="${line#*=}"
+      name="$(printf '%s' "$name" | sed -E 's/[[:space:]]+$//')"
+      value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+      if [[ "$value" == \"*\" && "$value" == *\" ]] || [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:$((${#value} - 2))}"
+      fi
+      case "$name" in
+        ARCTIC_SUPABASE_URL|ARCTIC_SUPABASE_ANON_KEY|ARCTIC_SUPABASE_PUBLISHABLE_KEY)
+          if [[ -z "${!name:-}" ]]; then
+            export "$name=$value"
+          fi
+          ;;
+      esac
+    done < "$env_file"
+  fi
+
+  if [[ -z "${ARCTIC_SUPABASE_URL:-}" ]]; then
+    echo "Missing ARCTIC_SUPABASE_URL. Set it in .env or the current shell." >&2
+    exit 1
+  fi
+  if [[ -z "${ARCTIC_SUPABASE_ANON_KEY:-}" && -z "${ARCTIC_SUPABASE_PUBLISHABLE_KEY:-}" ]]; then
+    echo "Missing ARCTIC_SUPABASE_ANON_KEY or ARCTIC_SUPABASE_PUBLISHABLE_KEY." >&2
+    exit 1
+  fi
+
+  printf -v SUPABASE_URL_Q '%q' "$ARCTIC_SUPABASE_URL"
+  printf -v SUPABASE_ANON_KEY_Q '%q' "${ARCTIC_SUPABASE_ANON_KEY:-}"
+  printf -v SUPABASE_PUBLISHABLE_KEY_Q '%q' "${ARCTIC_SUPABASE_PUBLISHABLE_KEY:-}"
+  echo "Public Supabase catalog environment loaded for Linux release builds."
+}
+
+load_public_catalog_env
 # Ensure rustup cargo/rustc are visible even when invoked from fish or clean shells.
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -202,13 +251,15 @@ if [[ -n "$NOTES_FILE" && ! -f "$NOTES_FILE" ]]; then
   exit 1
 fi
 
-require_cmd cargo
 require_cmd sha256sum
 require_cmd bash
-require_cmd distrobox
-if ((ARCH_AUR_ONLY == 0)); then
-  require_cmd flatpak
-  require_cmd flatpak-builder
+if ((ASSEMBLE_ONLY == 0)); then
+  require_cmd cargo
+  require_cmd distrobox
+  if ((ARCH_AUR_ONLY == 0)); then
+    require_cmd flatpak
+    require_cmd flatpak-builder
+  fi
 fi
 if ((PUBLISH_GITHUB == 1)); then
   require_cmd gh
@@ -275,6 +326,9 @@ build_deb_with_podman() {
     --volume "$ROOT_DIR:/work:rw" \
     --workdir /work \
     --env HOME=/root \
+    --env ARCTIC_SUPABASE_URL \
+    --env ARCTIC_SUPABASE_ANON_KEY \
+    --env ARCTIC_SUPABASE_PUBLISHABLE_KEY \
     docker.io/library/ubuntu:24.04 \
     bash -lc '
       set -euo pipefail
@@ -307,6 +361,9 @@ build_rpm_with_podman() {
     --volume "$ROOT_DIR:/work:rw" \
     --workdir /work \
     --env HOME=/root \
+    --env ARCTIC_SUPABASE_URL \
+    --env ARCTIC_SUPABASE_ANON_KEY \
+    --env ARCTIC_SUPABASE_PUBLISHABLE_KEY \
     registry.fedoraproject.org/fedora:latest \
     bash -lc '
       set -euo pipefail
@@ -337,6 +394,7 @@ if [[ -n "$NOTES_FILE" ]]; then
   fi
 fi
 
+if ((ASSEMBLE_ONLY == 0)); then
 echo "Updating versions to $VERSION ..."
 update_simple_version "$ROOT_DIR/Cargo.toml" '0,/^version\s*=\s*"[^"]+"/{s//version = "'"$VERSION"'"/}'
 update_simple_version "$ROOT_DIR/src-tauri/Cargo.toml" '0,/^version\s*=\s*"[^"]+"/{s//version = "'"$VERSION"'"/}'
@@ -358,6 +416,9 @@ mkdir -p "$OUT_ABS_DIR"
 echo "Building Arch package in distrobox '$ARCH_DISTROBOX' ..."
 distrobox enter "$ARCH_DISTROBOX" -- bash -lc "
   set -euo pipefail
+  export ARCTIC_SUPABASE_URL=$SUPABASE_URL_Q
+  export ARCTIC_SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY_Q
+  export ARCTIC_SUPABASE_PUBLISHABLE_KEY=$SUPABASE_PUBLISHABLE_KEY_Q
   SUDO_PASSWORD='${ARCH_SUDO_PASSWORD//\'/\'\"\'\"\'}'
   as_root() {
     if [[ \"\$(id -u)\" -eq 0 ]]; then
@@ -378,11 +439,7 @@ distrobox enter "$ARCH_DISTROBOX" -- bash -lc "
     base-devel rust pkgconf openssl \
     gtk3 webkit2gtk-4.1 xdg-desktop-portal-gtk
 
-  if pacman -Si libappindicator-gtk3 >/dev/null 2>&1; then
-    as_root pacman -S --noconfirm --needed libappindicator-gtk3
-  else
-    as_root pacman -S --noconfirm --needed libappindicator
-  fi
+  as_root pacman -S --noconfirm --needed libayatana-appindicator
 
   export PATH=\"\$HOME/.cargo/bin:\$PATH\"
   cd '$ROOT_DIR'
@@ -393,6 +450,9 @@ if ((ARCH_AUR_ONLY == 0)); then
 echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
 if ! distrobox enter "$DEB_DISTROBOX" -- bash -lc "
   set -euo pipefail
+  export ARCTIC_SUPABASE_URL=$SUPABASE_URL_Q
+  export ARCTIC_SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY_Q
+  export ARCTIC_SUPABASE_PUBLISHABLE_KEY=$SUPABASE_PUBLISHABLE_KEY_Q
   SUDO_PASSWORD='${DEB_SUDO_PASSWORD//\'/\'\"\'\"\'}'
   as_root() {
     if [[ \"\$(id -u)\" -eq 0 ]]; then
@@ -462,6 +522,9 @@ fi
 echo "Building RPM package in distrobox '$RPM_DISTROBOX' ..."
 if ! distrobox enter "$RPM_DISTROBOX" -- bash -lc "
   set -euo pipefail
+  export ARCTIC_SUPABASE_URL=$SUPABASE_URL_Q
+  export ARCTIC_SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY_Q
+  export ARCTIC_SUPABASE_PUBLISHABLE_KEY=$SUPABASE_PUBLISHABLE_KEY_Q
   SUDO_PASSWORD='${RPM_SUDO_PASSWORD//\'/\'\"\'\"\'}'
   as_root() {
     if [[ \"\$(id -u)\" -eq 0 ]]; then
@@ -531,6 +594,19 @@ fi
 
 echo "Building Flatpak bundle on host ..."
 (cd "$ROOT_DIR" && bash packaging/build-packages.sh flatpak)
+fi
+else
+  echo "Reusing package artifacts from $PACKAGING_DIR/out ..."
+  mkdir -p "$OUT_ABS_DIR"
+  find "$OUT_ABS_DIR" -maxdepth 1 -type f \( \
+    -name '*.pkg.tar.*' -o \
+    -name '*.deb' -o \
+    -name '*.rpm' -o \
+    -name '*.src.rpm' -o \
+    -name '*.flatpak' -o \
+    -name 'arctic-comfyui-helper-nix-*.tar.gz' -o \
+    -name 'arctic-comfyui-helper-*-nixos-*.tar.gz' \
+  \) -delete
 fi
 
 if ((ARCH_AUR_ONLY == 1)); then

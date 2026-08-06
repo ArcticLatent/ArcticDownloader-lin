@@ -26,6 +26,9 @@
   procps,
   util-linux,
   xdg-utils,
+  arcticSupabaseUrl ? "",
+  arcticSupabaseAnonKey ? "",
+  arcticSupabasePublishableKey ? "",
 }:
 
 rustPlatform.buildRustPackage {
@@ -78,6 +81,10 @@ rustPlatform.buildRustPackage {
   # application a second time in the package derivation.
   doCheck = false;
 
+  ARCTIC_SUPABASE_URL = arcticSupabaseUrl;
+  ARCTIC_SUPABASE_ANON_KEY = arcticSupabaseAnonKey;
+  ARCTIC_SUPABASE_PUBLISHABLE_KEY = arcticSupabasePublishableKey;
+
   installPhase = ''
     runHook preInstall
 
@@ -95,24 +102,26 @@ rustPlatform.buildRustPackage {
 
   preFixup = ''
     gappsWrapperArgs+=(
-      --prefix PATH : ${lib.makeBinPath [
-        git
-        curl
-        wget
-        python3
-        gcc
-        gnumake
-        cmake
-        ninja
-        coreutils
-        findutils
-        gnugrep
-        gnused
-        pciutils
-        procps
-        util-linux
-        xdg-utils
-      ]}
+      --prefix PATH : ${
+        lib.makeBinPath [
+          git
+          curl
+          wget
+          python3
+          gcc
+          gnumake
+          cmake
+          ninja
+          coreutils
+          findutils
+          gnugrep
+          gnused
+          pciutils
+          procps
+          util-linux
+          xdg-utils
+        ]
+      }
       --set ARCTIC_PACKAGE_MANAGER nix
       --set ARCTIC_SKIP_AUTO_UPDATE 1
     )

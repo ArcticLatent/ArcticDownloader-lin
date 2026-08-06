@@ -14,3 +14,5 @@ Entries:
   - Moved ComfyUI Git update checks off the UI thread to prevent startup freezes.
   - Increased the iterative Civitai HTML scan budget and corrected its diagnostic message.
   - Updated public Nix profile instructions to use `nix profile add`.
+  - Loaded and validated the public Supabase catalog environment across every Linux release target, including pure Nix builds.
+  - Added resumable release assembly, AppStream tooling for Flatpak builds on NixOS, and corrected Arch Ayatana packaging metadata.

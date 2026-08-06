@@ -13,6 +13,8 @@
 - Made ComfyUI update-status checks asynchronous so slow Git operations no longer freeze the application during startup.
 - Improved Windows process output handling so ComfyUI Manager and custom nodes can safely write non-UTF-8 output or run with in-app runtime logs disabled.
 - Replaced the deprecated Nix profile installation command with `nix profile add` in the public documentation.
+- Ensured Linux, container, Flatpak, and NixOS release builds embed the configured public Supabase catalog endpoint and read key.
+- Added a resumable Linux release assembly mode and declared the Flatpak/AppStream tooling in the Nix development shell.
 
 ## Fixes
 
@@ -20,4 +22,4 @@
 - Fixed unavailable GPU choices remaining visible after hardware detection completed.
 - Fixed ComfyUI Manager startup failures on Windows caused by an invalid standard-output handle.
 - Fixed misleading repeated HTML scan warnings while inspecting Civitai download responses.
-
+- Fixed Arch packaging to use the actual Ayatana AppIndicator dependency and avoid an unintended debug-package release asset.

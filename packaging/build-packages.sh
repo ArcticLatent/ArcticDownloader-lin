@@ -162,6 +162,7 @@ build_rpm() {
 }
 
 build_flatpak() {
+  require_cmd appstreamcli
   require_cmd flatpak-builder
   require_cmd flatpak
   require_cmd cargo

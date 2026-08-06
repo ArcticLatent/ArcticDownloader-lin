@@ -3,14 +3,16 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;
       };
-    in {
+    in
+    {
       packages.${system} = rec {
         arctic-comfyui-helper = pkgs.callPackage ./packaging/nix/source-package.nix { };
         default = arctic-comfyui-helper;
@@ -25,7 +27,16 @@
       devShells.${system} = {
         default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];
-          packages = with pkgs; [ cargo rustc rustfmt clippy cargo-tauri ];
+          packages = with pkgs; [
+            appstream
+            cargo
+            cargo-tauri
+            clippy
+            flatpak
+            flatpak-builder
+            rustc
+            rustfmt
+          ];
         };
 
         # Windows cross-check shell for Linux/NixOS developers. The actual

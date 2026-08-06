@@ -39,6 +39,44 @@ fi
 [[ -n "$TAG" ]] || TAG="v$VERSION"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+load_public_catalog_env() {
+  local env_file="${ARCTIC_ENV_FILE:-$ROOT_DIR/.env}"
+  local line name value
+
+  if [[ -f "$env_file" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      [[ -n "$line" && "$line" != \#* && "$line" == *=* ]] || continue
+      name="${line%%=*}"
+      value="${line#*=}"
+      name="$(printf '%s' "$name" | sed -E 's/[[:space:]]+$//')"
+      value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+      if [[ "$value" == \"*\" && "$value" == *\" ]] || [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:$((${#value} - 2))}"
+      fi
+      case "$name" in
+        ARCTIC_SUPABASE_URL|ARCTIC_SUPABASE_ANON_KEY|ARCTIC_SUPABASE_PUBLISHABLE_KEY)
+          if [[ -z "${!name:-}" ]]; then
+            export "$name=$value"
+          fi
+          ;;
+      esac
+    done < "$env_file"
+  fi
+
+  if [[ -z "${ARCTIC_SUPABASE_URL:-}" ]]; then
+    echo "Missing ARCTIC_SUPABASE_URL. Set it in .env or the current shell." >&2
+    exit 1
+  fi
+  if [[ -z "${ARCTIC_SUPABASE_ANON_KEY:-}" && -z "${ARCTIC_SUPABASE_PUBLISHABLE_KEY:-}" ]]; then
+    echo "Missing ARCTIC_SUPABASE_ANON_KEY or ARCTIC_SUPABASE_PUBLISHABLE_KEY." >&2
+    exit 1
+  fi
+}
+
+load_public_catalog_env
+
 if [[ "$OUTPUT_DIR" = /* ]]; then
   OUT_DIR="$OUTPUT_DIR"
 else
@@ -54,7 +92,24 @@ command -v nix >/dev/null 2>&1 || {
 }
 
 mkdir -p "$OUT_DIR" "$STAGING_DIR/native"
-nix_output="$(nix build "path:$ROOT_DIR" --no-link --print-out-paths)"
+nix_output="$(nix build \
+  --impure \
+  --no-link \
+  --print-out-paths \
+  --expr "
+    let
+      flake = builtins.getFlake \"path:$ROOT_DIR\";
+      pkgs = import flake.inputs.nixpkgs {
+        system = \"x86_64-linux\";
+        config.allowUnfree = true;
+      };
+    in
+    pkgs.callPackage $ROOT_DIR/packaging/nix/source-package.nix {
+      arcticSupabaseUrl = builtins.getEnv \"ARCTIC_SUPABASE_URL\";
+      arcticSupabaseAnonKey = builtins.getEnv \"ARCTIC_SUPABASE_ANON_KEY\";
+      arcticSupabasePublishableKey = builtins.getEnv \"ARCTIC_SUPABASE_PUBLISHABLE_KEY\";
+    }
+  ")"
 
 install -Dm755 "$nix_output/bin/.arctic-comfyui-helper-wrapped" \
   "$STAGING_DIR/native/arctic-comfyui-helper"

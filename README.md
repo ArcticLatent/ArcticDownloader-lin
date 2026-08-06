@@ -212,7 +212,10 @@ Release binary output:
 Windows releases are built from this repository by
 `.github/workflows/release-windows.yml` on a native GitHub Windows runner. Configure:
 
-- `ARCTIC_RELEASE_TOKEN` with Contents: write access to `ArcticLatent/Arctic-Helper`
+- The following Actions secrets on the private `ArcticLatent/ArcticDownloader-lin`
+  source repository (the repository where the workflow runs).
+- `ARCTIC_RELEASE_TOKEN`: a fine-grained token with Contents: write access to
+  `ArcticLatent/Arctic-Helper`.
 - `ARCTIC_SUPABASE_URL`
 - `ARCTIC_SUPABASE_PUBLISHABLE_KEY`
 
@@ -259,7 +262,8 @@ container profile. It creates the `arctic-arch`, `arctic-ubuntu`, and
 packages are built inside the Arch container instead of assuming the NixOS
 host provides `makepkg` and an Arch package database.
 
-By default this publishes to `ArcticLatent/Arctic-Helper`.  
+By default this publishes to `ArcticLatent/Arctic-Helper` and updates the AUR
+binary package.
 It will:
 1. Prompt for version (example: `0.1.1`)
 2. Prompt for release notes (end with `END` line)
@@ -275,6 +279,13 @@ Build-only:
 
 ```bash
 bash ./scripts/build-release-linux.sh --version 0.1.1 --repository ArcticLatent/Arctic-Helper
+```
+
+If package builds completed but a later assembly step failed, reuse the contents
+of `packaging/out` without rebuilding every distribution package:
+
+```bash
+bash ./scripts/build-release-linux.sh --version 0.1.1 --repository ArcticLatent/Arctic-Helper --assemble-only
 ```
 
 Verify-only:

@@ -4,13 +4,13 @@ pkgver=0.2.6
 pkgrel=1
 pkgdesc='ComfyUI installer and model manager'
 arch=('x86_64')
-url='https://github.com/ArcticLatent/ArcticDownloader-lin'
+url='https://github.com/ArcticLatent/Arctic-Helper'
 license=('custom')
-options=('!buildflags')
+options=('!buildflags' '!debug')
 depends=(
   'gtk3'
   'webkit2gtk-4.1'
-  'libappindicator'
+  'libayatana-appindicator'
   'xdg-desktop-portal-gtk'
 )
 makedepends=(
