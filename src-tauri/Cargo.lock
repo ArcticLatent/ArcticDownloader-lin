@@ -199,6 +199,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "tokio-util",
+ "windows 0.61.3",
 ]
 
 [[package]]
