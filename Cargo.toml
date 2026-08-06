@@ -30,3 +30,7 @@ tokio-util = { version = "0.7", features = ["io", "rt"] }
 [target.'cfg(windows)'.dependencies]
 tao = "0.34"
 wry = "0.53"
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }

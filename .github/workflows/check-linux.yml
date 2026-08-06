@@ -19,7 +19,9 @@ jobs:
       # Matches packaging/debian/debian/control's Build-Depends: the Tauri
       # Linux backend links against GTK/WebKitGTK/appindicator via pkg-config
       # build scripts, so `cargo check`/`cargo test` fail without these dev
-      # packages present even though nothing gets packaged here.
+      # packages present even though nothing gets packaged here. libdbus-1-dev
+      # is for the `keyring` crate's secret-service backend (Civitai token
+      # storage), which links against libdbus via pkg-config at build time.
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
@@ -28,7 +30,8 @@ jobs:
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
-            libssl-dev
+            libssl-dev \
+            libdbus-1-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

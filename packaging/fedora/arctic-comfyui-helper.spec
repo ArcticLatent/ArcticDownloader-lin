@@ -15,6 +15,7 @@ BuildRequires:  pkgconfig(gtk+-3.0)
 BuildRequires:  pkgconfig(webkit2gtk-4.1)
 BuildRequires:  pkgconfig(ayatana-appindicator3-0.1)
 BuildRequires:  openssl-devel
+BuildRequires:  pkgconfig(dbus-1)
 
 Requires:       gtk3
 Requires:       webkit2gtk4.1

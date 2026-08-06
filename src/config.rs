@@ -9,6 +9,69 @@ use std::{
 };
 
 const SETTINGS_FILE: &str = "settings.json";
+// A fixed "account" name under this app's keychain service entry -- there's
+// only ever one Civitai token per install, no per-user accounts within it.
+const CIVITAI_TOKEN_KEYCHAIN_ACCOUNT: &str = "civitai-token";
+
+/// Best-effort OS-keychain access for the Civitai API token. Every function
+/// here returns `None`/swallows its error rather than propagating one: a
+/// missing or unavailable keychain (no Secret Service daemon running, a
+/// minimal/headless Linux setup, a locked keychain, etc.) is a completely
+/// normal, expected condition for a chunk of this app's userbase, not a
+/// fault -- callers fall back to the plaintext `civitai_token` settings
+/// field when these return nothing, so a keychain failure never blocks
+/// reading or saving the token, only which storage it ends up in.
+mod civitai_keychain {
+    use super::CIVITAI_TOKEN_KEYCHAIN_ACCOUNT;
+    use crate::app::APP_ID;
+
+    fn entry() -> Option<keyring::Entry> {
+        match keyring::Entry::new(APP_ID, CIVITAI_TOKEN_KEYCHAIN_ACCOUNT) {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                log::debug!("Civitai token keychain entry unavailable: {err}");
+                None
+            }
+        }
+    }
+
+    pub fn load() -> Option<String> {
+        let entry = entry()?;
+        match entry.get_password() {
+            Ok(token) => Some(token),
+            Err(keyring::Error::NoEntry) => None,
+            Err(err) => {
+                log::debug!("Failed to read Civitai token from OS keychain: {err}");
+                None
+            }
+        }
+    }
+
+    /// Returns `true` if the token is now stored in the keychain (so the
+    /// caller can omit it from the plaintext settings file).
+    pub fn store(token: &str) -> bool {
+        let Some(entry) = entry() else { return false };
+        match entry.set_password(token) {
+            Ok(()) => true,
+            Err(err) => {
+                log::debug!("Failed to store Civitai token in OS keychain: {err}");
+                false
+            }
+        }
+    }
+
+    /// Best-effort delete; a missing/unavailable keychain is not an error
+    /// here either, there's simply nothing to clean up.
+    pub fn clear() {
+        let Some(entry) = entry() else { return };
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(err) => {
+                log::debug!("Failed to clear Civitai token from OS keychain: {err}");
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ConfigStore {
@@ -38,7 +101,7 @@ impl ConfigStore {
             .with_context(|| format!("failed to create cache directory {cache_dir:?}"))?;
 
         let settings_path = config_dir.join(SETTINGS_FILE);
-        let settings = if settings_path.exists() {
+        let mut settings: AppSettings = if settings_path.exists() {
             let data = fs::read(&settings_path)
                 .with_context(|| format!("failed to read settings file {settings_path:?}"))?;
             serde_json::from_slice(&data)
@@ -46,6 +109,23 @@ impl ConfigStore {
         } else {
             AppSettings::default()
         };
+
+        // The OS keychain is the preferred store for the Civitai token; if
+        // it already has one, it wins over whatever's in the plaintext
+        // file (which may just be stale/pre-migration). Otherwise, if the
+        // file has a plaintext token from before this existed (or from a
+        // session where the keychain was unavailable), try to migrate it
+        // into the keychain now so future saves stop touching the file --
+        // `settings.civitai_token` stays populated in memory either way,
+        // this only changes where the *next* write persists it.
+        match civitai_keychain::load() {
+            Some(token) => settings.civitai_token = Some(token),
+            None => {
+                if let Some(token) = settings.civitai_token.as_deref() {
+                    civitai_keychain::store(token);
+                }
+            }
+        }
 
         Ok(Self {
             root_dir,
@@ -95,7 +175,24 @@ impl ConfigStore {
 
     fn persist_locked(&self, settings: &AppSettings) -> Result<()> {
         let path = self.config_path().join(SETTINGS_FILE);
-        let data = serde_json::to_vec_pretty(settings)?;
+
+        // Keep the Civitai token out of the plaintext config file whenever
+        // the OS keychain will actually take it; fall back to writing it
+        // in the file (today's behavior, unchanged) if the keychain is
+        // unavailable. `settings` itself (the in-memory copy other code
+        // reads via `ConfigStore::settings()`) is never touched here --
+        // only the on-disk serialization is redacted.
+        let mut on_disk = settings.clone();
+        match settings.civitai_token.as_deref() {
+            Some(token) => {
+                if civitai_keychain::store(token) {
+                    on_disk.civitai_token = None;
+                }
+            }
+            None => civitai_keychain::clear(),
+        }
+
+        let data = serde_json::to_vec_pretty(&on_disk)?;
         fs::write(&path, data).with_context(|| format!("failed to write settings to {path:?}"))?;
         Ok(())
     }
