@@ -20,6 +20,7 @@ repo/
 /packaging/out/rpm/rpmbuild/
 /packaging/out/rpm/rpmbuild/**
 /dist/
+/node_modules/
 
 
 # Added by cargo

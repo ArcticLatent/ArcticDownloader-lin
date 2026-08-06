@@ -35,6 +35,12 @@ Flatpak/Linux-specific UI/admin bits are intentionally not part of this app.
   - Linux backend: `src-tauri/src/app_linux.rs`
   - Windows backend: `src-tauri/src/app_windows.rs`
   - Shared Linux/Windows frontend: `src-tauri/dist/`
+    - Composition/startup: `main.js` and `features/bootstrap.js`
+    - Catalog and model selection: `features/catalog.js`
+    - ComfyUI install/runtime: `features/comfyui.js`
+    - GPU/Torch selection: `features/gpu-torch.js`
+    - Event registration and progress UI: `features/event-handlers.js` and `features/download-progress.js`
+    - Shared state, DOM references, and utilities: `lib/`
   - Windows config overlay: `src-tauri/tauri.windows.conf.json`
 
 Key identifiers and branding:
@@ -163,6 +169,9 @@ Linux/NixOS, from the repository root:
 
 ```bash
 nix develop
+npm ci
+npm run check:frontend
+npm run test:frontend
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo tauri dev
 ```

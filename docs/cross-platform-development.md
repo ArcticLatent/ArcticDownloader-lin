@@ -17,12 +17,22 @@ these consolidation changes are committed and pushed.
 This boundary deliberately preserves the behavior of both existing applications. It
 also lets common code be extracted gradually without blocking day-to-day releases.
 
+The shared frontend is split by responsibility. `main.js` is only the composition
+root; `features/bootstrap.js`, `catalog.js`, `comfyui.js`, `gpu-torch.js`,
+`event-handlers.js`, and `download-progress.js` own application behavior, while
+`lib/app-context.js` owns the shared state and DOM references. Feature factories use
+explicit dependency injection and import only `lib/`, so the module graph has no
+feature-to-feature cycles.
+
 ## Daily development on NixOS
 
 Run and test the Linux app:
 
 ```bash
 nix develop
+npm ci
+npm run check:frontend
+npm run test:frontend
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo tauri dev
 ```
@@ -53,6 +63,8 @@ second compile check on GitHub's native `windows-latest` runner.
 - Put OS process handling and installer commands in the matching `app_*.rs` module.
 - Keep a command name and payload identical on both platforms when the frontend calls it.
 - Put UI changes in `src-tauri/dist/`; both targets now load that frontend.
+- Keep `main.js` as composition/startup wiring. Put behavior in the matching
+  `features/` module and reusable pure helpers in `lib/`.
 - Add platform-specific UI behavior through `get_platform_capabilities`, not a second
   frontend fork.
 - Before opening a pull request, run the Linux tests and `scripts/check-windows.sh`.
