@@ -371,6 +371,65 @@ pub fn remove_custom_node_dirs(root: &Path, names: &[&str]) {
     }
 }
 
+/// Repo URL, install folder name, and every folder name a built-in custom
+/// node has ever been installed under by any version of this app (used for
+/// detection/removal, so a toggle or addon-state check never misses an
+/// install made under an older name).
+///
+/// `app_linux.rs` and `app_windows.rs` each define their own `CustomNodeSpec`
+/// table (data genuinely differs by platform in at least one case -- see
+/// that table's doc comment) and reference it by `flag_key` from the
+/// install/toggle/addon-state flows, so a URL/folder-name update only has
+/// to be made in one place per platform instead of three near-identical
+/// hand-copied literals.
+#[derive(Debug, Clone, Copy)]
+pub struct CustomNodeSpec {
+    pub flag_key: &'static str,
+    pub display_name: &'static str,
+    pub repo_url: &'static str,
+    pub install_folder_name: &'static str,
+    pub known_folder_names: &'static [&'static str],
+}
+
+/// True if any of `spec`'s known folder-name variants exists under
+/// `root/custom_nodes/`.
+pub fn custom_node_installed(root: &Path, spec: &CustomNodeSpec) -> bool {
+    spec.known_folder_names
+        .iter()
+        .any(|name| custom_node_exists(root, name))
+}
+
+/// Runs `install` (the actual clone/dependency-install for `spec`, which
+/// stays platform-specific -- different retry/venv-resolution plumbing --
+/// and is passed in rather than called directly from here) and records the
+/// outcome into `summary` the same way for every built-in custom node:
+/// mark the install-state step, push an `ok`/`failed` summary row, and emit
+/// a warning event on failure.
+pub fn install_custom_node_and_record(
+    app: &AppHandle,
+    install_root: &Path,
+    spec: &CustomNodeSpec,
+    summary: &mut Vec<InstallSummaryItem>,
+    install: impl FnOnce() -> Result<(), String>,
+) {
+    write_install_state(install_root, "in_progress", spec.flag_key);
+    match install() {
+        Ok(()) => summary.push(InstallSummaryItem {
+            name: spec.display_name.to_string(),
+            status: "ok".to_string(),
+            detail: "Installed successfully.".to_string(),
+        }),
+        Err(err) => {
+            summary.push(InstallSummaryItem {
+                name: spec.display_name.to_string(),
+                status: "failed".to_string(),
+                detail: err.clone(),
+            });
+            emit_install_event(app, "warn", &format!("{} failed: {err}", spec.display_name));
+        }
+    }
+}
+
 /// Reads `__version__` out of `root/comfyui_version.py`, if present.
 pub fn read_comfyui_installed_version(root: &Path) -> Option<String> {
     let path = root.join("comfyui_version.py");
@@ -434,7 +493,16 @@ pub fn normalize_release_version(input: &str) -> Option<String> {
 }
 
 /// Splits a custom launch-args string into argv-style tokens, honoring
-/// single/double quotes and backslash escapes. Errors on an unclosed quote.
+/// single/double quotes. Backslash is only treated as an escape character
+/// *inside* a quoted string (so `\"`/`\\` can embed a literal quote or
+/// backslash there); outside quotes it's preserved literally. Errors on an
+/// unclosed quote.
+///
+/// Backslash is deliberately not an escape character outside quotes: these
+/// args frequently contain unquoted Windows paths (e.g.
+/// `--extra-model-paths-config C:\Users\name\file.yaml`, the natural way to
+/// paste one), and treating `\` as an escape there silently ate every
+/// backslash, turning that into `C:Usersnamefile.yaml` with no error raised.
 pub fn parse_custom_launch_args(input: &str) -> Result<Vec<String>, String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -454,11 +522,6 @@ pub fn parse_custom_launch_args(input: &str) -> Result<Vec<String>, String> {
             },
             None => match ch {
                 '"' | '\'' => quote = Some(ch),
-                '\\' => {
-                    if let Some(next) = chars.next() {
-                        current.push(next);
-                    }
-                }
                 c if c.is_whitespace() => {
                     if !current.is_empty() {
                         args.push(std::mem::take(&mut current));
@@ -804,7 +867,13 @@ pub fn wait_for_comfyui_start(state: &AppState, timeout: Duration) -> Result<(),
         }
 
         if started_at.elapsed() > timeout {
-            if comfyui_process_running(state) || comfyui_external_running(state) {
+            // Only the port actually accepting connections counts as
+            // "started" here. A merely-alive process (stuck loading a model
+            // index, stuck in a Python traceback loop) must not be reported
+            // as success — callers use `Ok(())` to flip the tray to
+            // "running" and open the browser at 127.0.0.1:8188, which would
+            // otherwise point at a dead port.
+            if comfyui_external_running(state) {
                 return Ok(());
             }
             return Err("ComfyUI did not become ready on 127.0.0.1:8188 in time.".to_string());
@@ -883,15 +952,46 @@ pub fn kill_managed_comfyui_child(state: &AppState) -> Result<bool, String> {
         .comfyui_process
         .lock()
         .map_err(|_| "comfyui process lock poisoned".to_string())?;
-    if let Some(child) = guard.as_mut() {
-        child
-            .kill()
-            .map_err(|err| format!("Failed to stop ComfyUI: {err}"))?;
-        let _ = child.wait();
-        *guard = None;
-        return Ok(true);
+    let Some(child) = guard.as_mut() else {
+        return Ok(false);
+    };
+
+    #[cfg(unix)]
+    {
+        // Give ComfyUI a chance to shut down cleanly (flush state, release
+        // CUDA contexts, let an in-flight workflow reach a checkpoint)
+        // before force-killing it. `Child::kill()` alone sends SIGKILL
+        // immediately, with no such chance -- this mirrors the
+        // SIGTERM-then-wait-then-SIGKILL pattern already used by the
+        // "no managed handle" fallback paths in app_linux.rs
+        // (kill_python_processes_for_root, kill_host_comfyui_for_root) so
+        // the common case (app-started ComfyUI) isn't the ungraceful one.
+        let pid = child.id().to_string();
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    *guard = None;
+                    return Ok(true);
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                _ => break,
+            }
+        }
     }
-    Ok(false)
+
+    child
+        .kill()
+        .map_err(|err| format!("Failed to stop ComfyUI: {err}"))?;
+    let _ = child.wait();
+    *guard = None;
+    Ok(true)
 }
 
 /// Derives a human-facing instance name for `comfyui_root` (or the
@@ -1891,12 +1991,19 @@ pub async fn download_model_assets_batch(
         );
     });
 
+    if let Ok(mut abort_slot) = state.active_abort.lock() {
+        *abort_slot = Some(abort.inner().abort_handle());
+    }
+
     let managed = app.clone();
     tauri::async_runtime::spawn(async move {
         let _ = abort.await;
         let state = managed.state::<AppState>();
         if let Ok(mut active) = state.active_cancel.lock() {
             *active = None;
+        };
+        if let Ok(mut abort_slot) = state.active_abort.lock() {
+            *abort_slot = None;
         };
     });
 
@@ -2134,6 +2241,30 @@ mod tests {
     #[test]
     fn parse_custom_launch_args_rejects_unclosed_quote() {
         assert!(parse_custom_launch_args(r#"--foo "unterminated"#).is_err());
+    }
+
+    #[test]
+    fn parse_custom_launch_args_preserves_unquoted_windows_paths() {
+        // Pasting a Windows path unquoted (the natural thing to do) must not
+        // silently eat every backslash.
+        assert_eq!(
+            parse_custom_launch_args(
+                r"--extra-model-paths-config C:\Users\name\file.yaml"
+            )
+            .unwrap(),
+            vec![
+                "--extra-model-paths-config",
+                r"C:\Users\name\file.yaml"
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_custom_launch_args_still_honors_backslash_escapes_inside_quotes() {
+        assert_eq!(
+            parse_custom_launch_args(r#"--name "say \"hi\"""#).unwrap(),
+            vec!["--name", r#"say "hi""#]
+        );
     }
 
     #[test]

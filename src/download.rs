@@ -374,10 +374,24 @@ impl DownloadManager {
                     status: DownloadStatus::Downloaded,
                 }),
                 Err(err) => {
-                    if matches!(
+                    // Check the error's concrete type before redacting: the
+                    // redaction below rebuilds the error from its rendered
+                    // text, which would otherwise erase the `DownloadError`
+                    // type needed for this downcast.
+                    let is_unauthorized = matches!(
                         err.downcast_ref::<DownloadError>(),
                         Some(DownloadError::Unauthorized)
-                    ) {
+                    );
+                    // `url` may have the Civitai token appended as a `?token=`
+                    // query param (required so the request survives Civitai's
+                    // redirect to its CDN, which drops the Authorization
+                    // header) -- any error surfaced from `download_direct`
+                    // can carry that URL in its context chain, so redact the
+                    // raw token before it reaches a progress event, log line,
+                    // or downstream caller.
+                    let err = redact_error(err, token_value.as_deref());
+
+                    if is_unauthorized {
                         let message = if token_value.is_some() {
                             "Civitai rejected the token (401/403). Check that your API token is valid and active."
                         } else {
@@ -1483,6 +1497,52 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
 
 fn is_cancelled(cancel: Option<&CancellationToken>) -> bool {
     cancel.map(|token| token.is_cancelled()).unwrap_or(false)
+}
+
+/// Rebuilds `err` with every occurrence of `secret` scrubbed from its
+/// rendered (`{:#}`, i.e. full context-chain) text. Used to keep a Civitai
+/// API token -- embedded in a download URL because the Authorization header
+/// doesn't survive Civitai's redirect to its CDN -- out of any error string
+/// that reaches a progress event, log line, or UI toast. Rebuilding is
+/// necessary because `anyhow::Error`'s context chain has no in-place
+/// string-mutation API; callers that need to `downcast_ref` a specific error
+/// type must do so on the original error *before* calling this, since the
+/// rebuilt error is a plain string-backed `anyhow::Error`.
+fn redact_error(err: anyhow::Error, secret: Option<&str>) -> anyhow::Error {
+    match secret {
+        Some(secret) if !secret.is_empty() => {
+            let rendered = format!("{err:#}").replace(secret, "***");
+            anyhow!(rendered)
+        }
+        _ => err,
+    }
+}
+
+#[cfg(test)]
+mod redact_error_tests {
+    use super::redact_error;
+    use anyhow::anyhow;
+
+    #[test]
+    fn strips_the_secret_from_every_layer_of_context() {
+        let err = anyhow!("request failed for https://civitai.com/api/download/models/1?token=sekret123")
+            .context("download failed for https://civitai.com/api/download/models/1?token=sekret123 (status 403)");
+
+        let redacted = redact_error(err, Some("sekret123"));
+
+        let rendered = format!("{redacted:#}");
+        assert!(
+            !rendered.contains("sekret123"),
+            "token leaked into: {rendered}"
+        );
+    }
+
+    #[test]
+    fn leaves_the_error_untouched_when_there_is_no_secret() {
+        let err = anyhow!("some unrelated failure");
+        let redacted = redact_error(err, None);
+        assert_eq!(format!("{redacted:#}"), "some unrelated failure");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

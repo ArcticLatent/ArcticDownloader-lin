@@ -1,20 +1,19 @@
 use crate::shared::{
     amd_gpu_details_cache, append_attention_launch_arg, apply_torch_allocator_env_compat,
     choose_install_folder, clear_directory_contents, comfyui_external_running,
-    comfyui_runtime_running, custom_node_exists, default_true, detect_amd_gpu_name,
-    detect_existing_comfyui_root, detect_intel_gpu_name, detect_nvidia_gpu,
+    comfyui_runtime_running, custom_node_exists, custom_node_installed, default_true,
+    detect_amd_gpu_name, detect_existing_comfyui_root, detect_intel_gpu_name, detect_nvidia_gpu,
     emit_comfyui_runtime_event, emit_comfyui_runtime_log_event, emit_install_event,
-    git_current_branch, has_dns, intel_gpu_details_cache, is_empty_dir,
-    is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
+    git_current_branch, has_dns, install_custom_node_and_record, intel_gpu_details_cache,
+    is_empty_dir, is_recoverable_preclone_dir, kill_managed_comfyui_child, nerdstats_enabled,
     normalize_optional_path, normalize_release_version, parse_custom_launch_args,
     parse_hf_env_value, parse_semver_triplet, parse_yaml_bool, parse_yaml_scalar,
     path_name_is_comfyui, push_preflight, read_comfyui_installed_version,
     remove_custom_node_dirs, resolve_comfyui_instance_name, show_main_window,
     spawn_progress_emitter, start_comfyui_root_background, stop_comfyui_for_mutation,
     wait_for_comfyui_start, write_install_state, write_install_summary, yaml_single_quote,
-    AmdGpuDetails, AppState, ComfyExtraModelConfig, DownloadProgressEvent, InstallSummaryItem,
-    IntelGpuDetails,
-    PreflightItem,
+    AmdGpuDetails, AppState, ComfyExtraModelConfig, CustomNodeSpec, DownloadProgressEvent,
+    InstallSummaryItem, IntelGpuDetails, PreflightItem,
 };
 use arctic_downloader::{
     app::{build_context, drain_lossy_lines, AppContext},
@@ -240,7 +239,17 @@ pub(crate) fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
         std::thread::spawn(|| {
             let details = query_nvidia_gpu_details_blocking();
             if let Ok(mut guard) = gpu_details_cache().lock() {
-                *guard = Some(details);
+                if details.name.is_some() {
+                    *guard = Some(details);
+                } else {
+                    // Don't cache a negative result: if `nvidia-smi` isn't on
+                    // PATH yet (e.g. right after a driver install, or before
+                    // a session PATH refresh), this lets a later call retry
+                    // instead of permanently reporting "no GPU" for the rest
+                    // of the process, matching the AMD/Intel probes below.
+                    *guard = None;
+                    GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
+                }
             }
         });
     }
@@ -530,7 +539,16 @@ pub(crate) fn normalize_path(raw: &str) -> Result<PathBuf, String> {
             .map_err(|err| err.to_string())?
             .join(path);
     }
-    Ok(strip_windows_verbatim_prefix(&path))
+    // Best-effort canonicalize (falls back to the input unchanged if the
+    // path doesn't exist yet, e.g. a fresh install target that hasn't been
+    // created). Unlike this function's other callers -- `resolve_root_path`
+    // canonicalizes explicitly, `set_comfyui_root`/`set_comfyui_install_base`
+    // too -- this path didn't, so a root containing a reparse
+    // point/junction could be stored one way at install time and resolved
+    // a different way at launch time, silently discarding saved launch
+    // settings because the two forms compared unequal.
+    let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+    Ok(strip_windows_verbatim_prefix(&canonical))
 }
 
 pub(crate) fn write_extra_model_paths_yaml(
@@ -1252,12 +1270,19 @@ fn powershell_download(url: &str, out_file: &Path) -> Result<(), String> {
         .parent()
         .ok_or_else(|| "Invalid output path.".to_string())?;
     std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    // `url` and `out_file` are frequently derived from a user-chosen install
+    // folder (e.g. a path containing an apostrophe like `O'Brien`), so they
+    // must be escaped for PowerShell's single-quoted string literals before
+    // being spliced into `-Command`. Without this, a quote in the path
+    // breaks out of the string and the remainder is executed as PowerShell.
+    let url_escaped = powershell_single_quote(url);
+    let out_file_escaped = powershell_single_quote(&out_file.display().to_string());
     let command = format!(
         "try {{ Invoke-WebRequest '{}' -OutFile '{}' -UseBasicParsing -ErrorAction Stop }} catch {{ curl.exe -L '{}' -o '{}' }}",
-        url,
-        out_file.display(),
-        url,
-        out_file.display()
+        url_escaped,
+        out_file_escaped,
+        url_escaped,
+        out_file_escaped
     );
     let mut cmd = std::process::Command::new("powershell");
     cmd.args([
@@ -1289,12 +1314,21 @@ fn download_http_file(url: &str, out_file: &Path) -> Result<(), String> {
 
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
+        // Bound connection setup so an unreachable/stalled host fails fast
+        // instead of hanging indefinitely; `timeout` is a generous overall
+        // safety net (not a per-chunk stall timeout) sized to still allow a
+        // large, slow multi-GB model download to complete.
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(2 * 60 * 60))
         .build()
         .map_err(|err| format!("Failed to build HTTP client: {err}"))?;
 
     let mut response = client
         .get(url)
-        .header("User-Agent", "ArcticComfyUIHelper/0.3.4")
+        .header(
+            "User-Agent",
+            format!("ArcticComfyUIHelper/{}", env!("CARGO_PKG_VERSION")),
+        )
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(|err| format!("HTTP download failed for {url}: {err}"))?;
@@ -1517,13 +1551,32 @@ fn powershell_single_quote(raw: &str) -> String {
 }
 
 fn vswhere_path() -> Option<PathBuf> {
-    let candidate =
-        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
-    if candidate.exists() {
-        Some(candidate)
-    } else {
-        None
+    // The VS Installer normally lives under `Program Files (x86)` on x86_64
+    // Windows, but on ARM64 Windows (a real PyTorch/ComfyUI target) it can
+    // live under plain `Program Files` instead -- checking only the former
+    // made `visual_cpp_build_tools_installed()` always report "not
+    // installed" there, triggering a redundant/unwanted elevated reinstall
+    // even when Build Tools were already present.
+    let mut candidates = Vec::new();
+    for env_var in ["ProgramFiles(x86)", "ProgramFiles"] {
+        if let Ok(base) = std::env::var(env_var) {
+            candidates.push(
+                PathBuf::from(base)
+                    .join("Microsoft Visual Studio")
+                    .join("Installer")
+                    .join("vswhere.exe"),
+            );
+        }
     }
+    // Defensive fallback if neither env var is set.
+    candidates.push(PathBuf::from(
+        r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe",
+    ));
+    candidates.push(PathBuf::from(
+        r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe",
+    ));
+
+    candidates.into_iter().find(|candidate| candidate.exists())
 }
 
 fn visual_cpp_build_tools_installed() -> bool {
@@ -2267,6 +2320,70 @@ fn install_custom_node(
     )?;
 
     Ok(())
+}
+
+/// The app's built-in custom nodes (Windows). See [`CustomNodeSpec`]'s doc
+/// comment for why this table exists; referenced by `flag_key` from the
+/// fresh-install flow (`run_comfyui_install`), the addon-state check
+/// (`get_comfyui_addon_state`), and the enable/disable toggle
+/// (`apply_comfyui_component_toggle`) instead of each hand-copying the repo
+/// URL/folder name.
+///
+/// ComfyUI-Manager's `install_folder_name` is lowercase (`comfyui-manager`)
+/// to match this platform's actual fresh-install behavior, unlike Linux's
+/// `ComfyUI-Manager`; NTFS is case-insensitive so this has never caused a
+/// functional bug, but the two casings were previously hand-typed
+/// inconsistently across the install/toggle/addon-state call sites (the
+/// toggle-enable path in particular used to create the capitalized form).
+/// `known_folder_names` covers both so detection/removal never misses an
+/// install made under either casing by an older app version.
+const CUSTOM_NODES: &[CustomNodeSpec] = &[
+    CustomNodeSpec {
+        flag_key: "node_comfyui_manager",
+        display_name: "comfyui-manager",
+        repo_url: "https://github.com/Comfy-Org/ComfyUI-Manager",
+        install_folder_name: "comfyui-manager",
+        known_folder_names: &["comfyui-manager", "ComfyUI-Manager"],
+    },
+    CustomNodeSpec {
+        flag_key: "node_comfyui_easy_use",
+        display_name: "ComfyUI-Easy-Use",
+        repo_url: "https://github.com/yolain/ComfyUI-Easy-Use",
+        install_folder_name: "ComfyUI-Easy-Use",
+        known_folder_names: &["ComfyUI-Easy-Use"],
+    },
+    CustomNodeSpec {
+        flag_key: "node_rgthree_comfy",
+        display_name: "rgthree-comfy",
+        repo_url: "https://github.com/rgthree/rgthree-comfy",
+        install_folder_name: "rgthree-comfy",
+        known_folder_names: &["rgthree-comfy"],
+    },
+    CustomNodeSpec {
+        flag_key: "node_comfyui_gguf",
+        display_name: "ComfyUI-GGUF",
+        repo_url: "https://github.com/city96/ComfyUI-GGUF",
+        install_folder_name: "ComfyUI-GGUF",
+        known_folder_names: &["ComfyUI-GGUF"],
+    },
+    CustomNodeSpec {
+        flag_key: "node_comfyui_kjnodes",
+        display_name: "comfyui-kjnodes",
+        repo_url: "https://github.com/kijai/ComfyUI-KJNodes",
+        install_folder_name: "comfyui-kjnodes",
+        known_folder_names: &["comfyui-kjnodes", "ComfyUI-KJNodes"],
+    },
+    CustomNodeSpec {
+        flag_key: "node_comfyui_crystools",
+        display_name: "comfyui-crystools",
+        repo_url: "https://github.com/crystian/comfyui-crystools.git",
+        install_folder_name: "comfyui-crystools",
+        known_folder_names: &["comfyui-crystools", "ComfyUI-Crystools"],
+    },
+];
+
+fn custom_node_spec(flag_key: &str) -> Option<&'static CustomNodeSpec> {
+    CUSTOM_NODES.iter().find(|spec| spec.flag_key == flag_key)
 }
 
 fn reassert_requests_dependency_stack(
@@ -3086,155 +3203,28 @@ fn run_comfyui_install(
         )?;
     }
 
-    if request.node_comfyui_manager {
-        write_install_state(&install_root, "in_progress", "node_comfyui_manager");
-        match install_custom_node(
-            app,
-            &comfy_dir,
-            &addon_root,
-            &py_exe,
-            "https://github.com/Comfy-Org/ComfyUI-Manager",
-            "comfyui-manager",
-        ) {
-            Ok(_) => summary.push(InstallSummaryItem {
-                name: "comfyui-manager".to_string(),
-                status: "ok".to_string(),
-                detail: "Installed successfully.".to_string(),
-            }),
-            Err(err) => {
-                summary.push(InstallSummaryItem {
-                    name: "comfyui-manager".to_string(),
-                    status: "failed".to_string(),
-                    detail: err.clone(),
-                });
-                emit_install_event(app, "warn", &format!("comfyui-manager failed: {err}"));
-            }
+    let requested_custom_nodes: [(bool, &CustomNodeSpec); 6] = [
+        (request.node_comfyui_manager, &CUSTOM_NODES[0]),
+        (request.node_comfyui_easy_use, &CUSTOM_NODES[1]),
+        (request.node_rgthree_comfy, &CUSTOM_NODES[2]),
+        (request.node_comfyui_gguf, &CUSTOM_NODES[3]),
+        (request.node_comfyui_kjnodes, &CUSTOM_NODES[4]),
+        (request.node_comfyui_crystools, &CUSTOM_NODES[5]),
+    ];
+    for (requested, spec) in requested_custom_nodes {
+        if !requested {
+            continue;
         }
-    }
-    if request.node_comfyui_easy_use {
-        write_install_state(&install_root, "in_progress", "node_comfyui_easy_use");
-        match install_custom_node(
-            app,
-            &comfy_dir,
-            &addon_root,
-            &py_exe,
-            "https://github.com/yolain/ComfyUI-Easy-Use",
-            "ComfyUI-Easy-Use",
-        ) {
-            Ok(_) => summary.push(InstallSummaryItem {
-                name: "ComfyUI-Easy-Use".to_string(),
-                status: "ok".to_string(),
-                detail: "Installed successfully.".to_string(),
-            }),
-            Err(err) => {
-                summary.push(InstallSummaryItem {
-                    name: "ComfyUI-Easy-Use".to_string(),
-                    status: "failed".to_string(),
-                    detail: err.clone(),
-                });
-                emit_install_event(app, "warn", &format!("ComfyUI-Easy-Use failed: {err}"));
-            }
-        }
-    }
-    if request.node_rgthree_comfy {
-        write_install_state(&install_root, "in_progress", "node_rgthree_comfy");
-        match install_custom_node(
-            app,
-            &comfy_dir,
-            &addon_root,
-            &py_exe,
-            "https://github.com/rgthree/rgthree-comfy",
-            "rgthree-comfy",
-        ) {
-            Ok(_) => summary.push(InstallSummaryItem {
-                name: "rgthree-comfy".to_string(),
-                status: "ok".to_string(),
-                detail: "Installed successfully.".to_string(),
-            }),
-            Err(err) => {
-                summary.push(InstallSummaryItem {
-                    name: "rgthree-comfy".to_string(),
-                    status: "failed".to_string(),
-                    detail: err.clone(),
-                });
-                emit_install_event(app, "warn", &format!("rgthree-comfy failed: {err}"));
-            }
-        }
-    }
-    if request.node_comfyui_gguf {
-        write_install_state(&install_root, "in_progress", "node_comfyui_gguf");
-        match install_custom_node(
-            app,
-            &comfy_dir,
-            &addon_root,
-            &py_exe,
-            "https://github.com/city96/ComfyUI-GGUF",
-            "ComfyUI-GGUF",
-        ) {
-            Ok(_) => summary.push(InstallSummaryItem {
-                name: "ComfyUI-GGUF".to_string(),
-                status: "ok".to_string(),
-                detail: "Installed successfully.".to_string(),
-            }),
-            Err(err) => {
-                summary.push(InstallSummaryItem {
-                    name: "ComfyUI-GGUF".to_string(),
-                    status: "failed".to_string(),
-                    detail: err.clone(),
-                });
-                emit_install_event(app, "warn", &format!("ComfyUI-GGUF failed: {err}"));
-            }
-        }
-    }
-    if request.node_comfyui_kjnodes {
-        write_install_state(&install_root, "in_progress", "node_comfyui_kjnodes");
-        match install_custom_node(
-            app,
-            &comfy_dir,
-            &addon_root,
-            &py_exe,
-            "https://github.com/kijai/ComfyUI-KJNodes",
-            "comfyui-kjnodes",
-        ) {
-            Ok(_) => summary.push(InstallSummaryItem {
-                name: "comfyui-kjnodes".to_string(),
-                status: "ok".to_string(),
-                detail: "Installed successfully.".to_string(),
-            }),
-            Err(err) => {
-                summary.push(InstallSummaryItem {
-                    name: "comfyui-kjnodes".to_string(),
-                    status: "failed".to_string(),
-                    detail: err.clone(),
-                });
-                emit_install_event(app, "warn", &format!("comfyui-kjnodes failed: {err}"));
-            }
-        }
-    }
-    if request.node_comfyui_crystools {
-        write_install_state(&install_root, "in_progress", "node_comfyui_crystools");
-        match install_custom_node(
-            app,
-            &comfy_dir,
-            &addon_root,
-            &py_exe,
-            "https://github.com/crystian/comfyui-crystools.git",
-            "comfyui-crystools",
-        ) {
-            Ok(_) => summary.push(InstallSummaryItem {
-                name: "comfyui-crystools".to_string(),
-                status: "ok".to_string(),
-                detail: "Installed successfully.".to_string(),
-            }),
-            Err(err) => {
-                summary.push(InstallSummaryItem {
-                    name: "comfyui-crystools".to_string(),
-                    status: "failed".to_string(),
-                    detail: err.clone(),
-                });
-                emit_install_event(app, "warn", &format!("comfyui-crystools failed: {err}"));
-            }
-        }
+        install_custom_node_and_record(app, &install_root, spec, &mut summary, || {
+            install_custom_node(
+                app,
+                &comfy_dir,
+                &addon_root,
+                &py_exe,
+                spec.repo_url,
+                spec.install_folder_name,
+            )
+        });
     }
 
     if include_insight_face || request.include_nunchaku {
@@ -3309,7 +3299,11 @@ async fn start_comfyui_install(
     let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
 
     let app_for_task = app.clone();
-    tauri::async_runtime::spawn(async move {
+    // `run_comfyui_install` is fully synchronous (git/pip/HTTP calls with no
+    // `.await` points) and can run for many minutes; `spawn_blocking` (not
+    // `spawn`) keeps it off the async runtime's worker threads so it can't
+    // starve other concurrent async work (update checks, other downloads).
+    tauri::async_runtime::spawn_blocking(move || {
         let result = run_comfyui_install(&app_for_task, &request, &shared_runtime_root, &cancel);
         match result {
             Ok(comfy_root) => {
@@ -3382,6 +3376,13 @@ fn set_comfyui_root(
             &std::fs::canonicalize(&path).unwrap_or(path),
         ))
     };
+    if let Some(resolved) = normalized.as_ref() {
+        if is_forbidden_install_path(resolved) {
+            return Err(
+                "That folder can't be used as a ComfyUI root (system directory).".to_string(),
+            );
+        }
+    }
     state
         .context
         .config
@@ -3683,6 +3684,19 @@ pub(crate) fn resolve_root_path(
         if !trimmed.is_empty() {
             let path = std::path::PathBuf::from(trimmed);
             if let Some(normalized) = normalize_existing(path) {
+                // `comfyui_root` here is caller-supplied (any invoke from the
+                // webview can pass an arbitrary existing path, not just the
+                // app's own configured root), and this function feeds
+                // filesystem-mutating commands (model/workflow downloads,
+                // extra_model_paths.yaml writes). Refuse system directories
+                // even though the path exists, same as the install-time
+                // guard in `is_forbidden_install_path`.
+                if is_forbidden_install_path(&normalized) {
+                    return Err(
+                        "That folder can't be used as a ComfyUI root (system directory)."
+                            .to_string(),
+                    );
+                }
                 return Ok(normalized);
             }
         }
@@ -3947,33 +3961,13 @@ fn open_external_url(url: String) -> Result<(), String> {
         return Err("Only http/https links are allowed.".to_string());
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", "start", "", trimmed]);
-        apply_background_command_flags(&mut cmd);
-        cmd.spawn()
-            .map_err(|err| format!("Failed to open link: {err}"))?;
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let mut cmd = std::process::Command::new("open");
-        cmd.arg(trimmed);
-        cmd.spawn()
-            .map_err(|err| format!("Failed to open link: {err}"))?;
-        return Ok(());
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let mut cmd = std::process::Command::new("xdg-open");
-        cmd.arg(trimmed);
-        cmd.spawn()
-            .map_err(|err| format!("Failed to open link: {err}"))?;
-        return Ok(());
-    }
+    // `url` frequently originates from remote, non-app-controlled data
+    // (Civitai creator links, catalog "tutorial"/workflow links), so it must
+    // never be handed to a shell that re-parses metacharacters. Unlike
+    // `cmd /C start`, `open::that` invokes ShellExecuteW directly on
+    // Windows (and `xdg-open`/`open` as a plain argv entry elsewhere),
+    // passing the URL as a single opaque argument with no reinterpretation.
+    open::that(trimmed).map_err(|err| format!("Failed to open link: {err}"))
 }
 
 pub(crate) fn start_comfyui_root_impl(
@@ -4543,12 +4537,12 @@ fn get_comfyui_addon_state(
         nunchaku: has_nunchaku,
         insight_face: pip_has_package(&root, "insightface"),
         trellis2: custom_node_exists(&root, "ComfyUI-Trellis2"),
-        node_comfyui_manager: custom_node_exists(&root, "ComfyUI-Manager"),
-        node_comfyui_easy_use: custom_node_exists(&root, "ComfyUI-Easy-Use"),
-        node_rgthree_comfy: custom_node_exists(&root, "rgthree-comfy"),
-        node_comfyui_gguf: custom_node_exists(&root, "ComfyUI-GGUF"),
-        node_comfyui_kjnodes: custom_node_exists(&root, "comfyui-kjnodes"),
-        node_comfyui_crystools: custom_node_exists(&root, "comfyui-crystools"),
+        node_comfyui_manager: custom_node_installed(&root, &CUSTOM_NODES[0]),
+        node_comfyui_easy_use: custom_node_installed(&root, &CUSTOM_NODES[1]),
+        node_rgthree_comfy: custom_node_installed(&root, &CUSTOM_NODES[2]),
+        node_comfyui_gguf: custom_node_installed(&root, &CUSTOM_NODES[3]),
+        node_comfyui_kjnodes: custom_node_installed(&root, &CUSTOM_NODES[4]),
+        node_comfyui_crystools: custom_node_installed(&root, &CUSTOM_NODES[5]),
     })
 }
 
@@ -5556,100 +5550,23 @@ async fn apply_comfyui_component_toggle(
                         Ok("Removed Trellis2.".to_string())
                     }
                 }
-                "node_comfyui_manager" => {
+                key @ ("node_comfyui_manager" | "node_comfyui_easy_use" | "node_rgthree_comfy"
+                    | "node_comfyui_gguf" | "node_comfyui_kjnodes" | "node_comfyui_crystools") => {
+                    let spec = custom_node_spec(key)
+                        .expect("key matched one of CUSTOM_NODES' flag_key values above");
                     if enabled {
                         ensure_git_available(&app_clone)?;
                         install_named_custom_node(
                             &app_clone,
                             &root_clone,
                             &py_exe_clone,
-                            "https://github.com/Comfy-Org/ComfyUI-Manager",
-                            "ComfyUI-Manager",
+                            spec.repo_url,
+                            spec.install_folder_name,
                         )?;
-                        Ok("Installed ComfyUI-Manager.".to_string())
+                        Ok(format!("Installed {}.", spec.display_name))
                     } else {
-                        remove_custom_node_dirs(&root_clone, &["ComfyUI-Manager", "comfyui-manager"]);
-                        Ok("Removed ComfyUI-Manager.".to_string())
-                    }
-                }
-                "node_comfyui_easy_use" => {
-                    if enabled {
-                        ensure_git_available(&app_clone)?;
-                        install_named_custom_node(
-                            &app_clone,
-                            &root_clone,
-                            &py_exe_clone,
-                            "https://github.com/yolain/ComfyUI-Easy-Use",
-                            "ComfyUI-Easy-Use",
-                        )?;
-                        Ok("Installed ComfyUI-Easy-Use.".to_string())
-                    } else {
-                        remove_custom_node_dirs(&root_clone, &["ComfyUI-Easy-Use"]);
-                        Ok("Removed ComfyUI-Easy-Use.".to_string())
-                    }
-                }
-                "node_rgthree_comfy" => {
-                    if enabled {
-                        ensure_git_available(&app_clone)?;
-                        install_named_custom_node(
-                            &app_clone,
-                            &root_clone,
-                            &py_exe_clone,
-                            "https://github.com/rgthree/rgthree-comfy",
-                            "rgthree-comfy",
-                        )?;
-                        Ok("Installed rgthree-comfy.".to_string())
-                    } else {
-                        remove_custom_node_dirs(&root_clone, &["rgthree-comfy"]);
-                        Ok("Removed rgthree-comfy.".to_string())
-                    }
-                }
-                "node_comfyui_gguf" => {
-                    if enabled {
-                        ensure_git_available(&app_clone)?;
-                        install_named_custom_node(
-                            &app_clone,
-                            &root_clone,
-                            &py_exe_clone,
-                            "https://github.com/city96/ComfyUI-GGUF",
-                            "ComfyUI-GGUF",
-                        )?;
-                        Ok("Installed ComfyUI-GGUF.".to_string())
-                    } else {
-                        remove_custom_node_dirs(&root_clone, &["ComfyUI-GGUF"]);
-                        Ok("Removed ComfyUI-GGUF.".to_string())
-                    }
-                }
-                "node_comfyui_kjnodes" => {
-                    if enabled {
-                        ensure_git_available(&app_clone)?;
-                        install_named_custom_node(
-                            &app_clone,
-                            &root_clone,
-                            &py_exe_clone,
-                            "https://github.com/kijai/ComfyUI-KJNodes",
-                            "comfyui-kjnodes",
-                        )?;
-                        Ok("Installed comfyui-kjnodes.".to_string())
-                    } else {
-                        remove_custom_node_dirs(&root_clone, &["comfyui-kjnodes", "ComfyUI-KJNodes"]);
-                        Ok("Removed comfyui-kjnodes.".to_string())
-                    }
-                }
-                "node_comfyui_crystools" => {
-                    if enabled {
-                        ensure_git_available(&app_clone)?;
-                        install_named_custom_node(
-                            &app_clone,
-                            &root_clone,
-                            &py_exe_clone,
-                            "https://github.com/crystian/comfyui-crystools.git",
-                            "comfyui-crystools",
-                        )?;
-                        Ok("Installed comfyui-crystools.".to_string())
-                    } else {
-                        remove_custom_node_dirs(&root_clone, &["comfyui-crystools", "ComfyUI-Crystools"]);
-                        Ok("Removed comfyui-crystools.".to_string())
+                        remove_custom_node_dirs(&root_clone, spec.known_folder_names);
+                        Ok(format!("Removed {}.", spec.display_name))
                     }
                 }
                 _ => Err("Unknown component toggle target.".to_string()),
