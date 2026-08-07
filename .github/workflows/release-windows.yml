@@ -1,20 +1,12 @@
 name: Release Windows
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       version:
         description: "Release version (example: 0.4.0)"
         required: true
         type: string
-      publish:
-        description: "Publish to the public release repository after verification"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -45,13 +37,8 @@ jobs:
         id: vars
         shell: powershell
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $version = "${{ inputs.version }}".TrimStart("v")
-            $tag = "v$version"
-          } else {
-            $tag = "${{ github.ref_name }}"
-            $version = $tag.TrimStart("v")
-          }
+          $version = "${{ inputs.version }}".TrimStart("v")
+          $tag = "v$version"
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
@@ -86,28 +73,3 @@ jobs:
           path: |
             dist/${{ env.WINDOWS_ASSET }}
             dist/update.json
-
-      - name: Publish to public release repository
-        if: github.event_name != 'workflow_dispatch' || inputs.publish
-        shell: powershell
-        env:
-          GH_TOKEN: ${{ secrets.ARCTIC_RELEASE_TOKEN }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
-            throw "Configure the ARCTIC_RELEASE_TOKEN repository secret with Contents: write access to $env:RELEASE_REPOSITORY."
-          }
-
-          $tag = "${{ steps.vars.outputs.tag }}"
-          gh release view $tag --repo $env:RELEASE_REPOSITORY *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $tag `
-              --repo $env:RELEASE_REPOSITORY `
-              --title "Arctic ComfyUI Helper ${{ steps.vars.outputs.version }}" `
-              --notes "Arctic ComfyUI Helper $tag"
-          }
-
-          gh release upload $tag `
-            "dist/$env:WINDOWS_ASSET" `
-            "dist/update.json" `
-            --repo $env:RELEASE_REPOSITORY `
-            --clobber

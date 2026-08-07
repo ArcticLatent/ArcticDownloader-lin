@@ -225,18 +225,15 @@ Windows releases are built from this repository by
 
 - The following Actions secrets on the private `ArcticLatent/ArcticDownloader-lin`
   source repository (the repository where the workflow runs).
-- `ARCTIC_RELEASE_TOKEN`: a fine-grained token with Contents: write access to
-  `ArcticLatent/Arctic-Helper`.
 - `ARCTIC_SUPABASE_URL`
 - `ARCTIC_SUPABASE_PUBLISHABLE_KEY`
 - `ARCTIC_UPDATE_SIGNING_KEY`: the base64 Ed25519 private key used only while
   generating the signed update manifest. See
   [Update manifest signing](docs/cross-platform-development.md#update-manifest-signing).
 
-Tagging `vX.Y.Z` builds `Arctic-ComfyUI-Helper.exe`, verifies `update.json`, stores a
-workflow artifact, and uploads both files to the public release repository.
-For a non-publishing rehearsal, dispatch the workflow manually with the matching version
-and leave `publish` disabled; enable it only after that build-and-verify run succeeds.
+Dispatching the workflow with `X.Y.Z` builds `Arctic-ComfyUI-Helper.exe`, verifies
+`update.json`, and stores both as a workflow artifact. The all-platform publisher
+downloads and verifies that artifact before uploading it with the local GitHub login.
 
 The local PowerShell flow remains available for emergency/native Windows releases:
 
@@ -273,8 +270,8 @@ bash ./scripts/publish-release-all.sh --version 0.2.6
 The command prompts once for the local manifest-signing key when needed and
 once for confirmation. It rehearses Windows without publishing, builds and
 verifies Linux, publishes the GitHub assets (including the native Arch
-`.pkg.tar.*` package), tags the source, waits for the native Windows publisher,
-and verifies the downloaded public release. Add `--yes` to skip the
+`.pkg.tar.*` package), tags the source, uploads the verified native Windows
+artifact, and verifies the downloaded public release. Add `--yes` to skip the
 confirmation or `--resume` after inspecting a partially completed release.
 
 For a Linux-only release, use:

@@ -20,16 +20,16 @@ Usage:
   scripts/publish-release-all.sh --version <x.y.z> [options]
 
 Builds, verifies, and publishes a complete Linux and Windows release. The
-script performs a non-publishing Windows rehearsal first, publishes Linux and
-Arch package assets, creates the source tag, waits for the tag-triggered
-Windows publication, and verifies the downloaded public release.
+script builds and verifies Windows first, publishes Linux and Arch package
+assets, creates the source tag, uploads the verified Windows files with the
+local GitHub login, and verifies the downloaded public release.
 
 Options:
   --version <x.y.z>      Required release version.
   --notes-file <path>    Release notes (default: CHANGELOG_<version>.md).
   --output-dir <path>    Linux artifact directory (default: dist).
   --skip-windows-rehearsal
-                         Skip the initial non-publishing Windows build.
+                         Defer the Windows build until after Linux publication.
   --resume               Continue a partially published release/tag.
   --yes                  Skip the single publication confirmation.
   -h, --help             Show help.
@@ -137,7 +137,6 @@ can_push_release="$(gh api "repos/$RELEASE_REPOSITORY" --jq '.permissions.push')
 [[ "$can_push_release" == "true" ]] || fail "the active GitHub account cannot publish to $RELEASE_REPOSITORY"
 
 required_secrets=(
-  ARCTIC_RELEASE_TOKEN
   ARCTIC_SUPABASE_PUBLISHABLE_KEY
   ARCTIC_SUPABASE_URL
   ARCTIC_UPDATE_SIGNING_KEY
@@ -270,28 +269,36 @@ if manifest.get("sha256", "").lower() != actual_hash:
 PY
 }
 
-TEMP_DIR="$(mktemp -d)"
+build_windows_artifacts() {
+  local stage="$1"
+  local known_runs="$TEMP_DIR/windows-runs-before-$stage"
 
-if ((SKIP_WINDOWS_REHEARSAL == 0)); then
-  echo "Starting non-publishing Windows rehearsal ..."
-  known_runs="$TEMP_DIR/windows-runs-before-rehearsal"
+  echo "Starting Windows $stage build ..."
   capture_windows_runs "$known_runs"
   gh workflow run "$WINDOWS_WORKFLOW" \
     --repo "$SOURCE_REPOSITORY" \
     --ref "$SOURCE_BRANCH" \
-    -f "version=$VERSION" \
-    -f publish=false
-  rehearsal_run_id="$(wait_for_new_windows_run "$known_runs" "$local_head" workflow_dispatch)"
-  echo "Waiting for Windows rehearsal run $rehearsal_run_id ..."
-  gh run watch "$rehearsal_run_id" --repo "$SOURCE_REPOSITORY" --exit-status
-  rehearsal_dir="$TEMP_DIR/windows-rehearsal"
-  mkdir -p "$rehearsal_dir"
-  gh run download "$rehearsal_run_id" \
+    -f "version=$VERSION"
+  windows_run_id="$(wait_for_new_windows_run "$known_runs" "$local_head" workflow_dispatch)"
+  echo "Waiting for Windows build run $windows_run_id ..."
+  gh run watch "$windows_run_id" --repo "$SOURCE_REPOSITORY" --exit-status
+
+  windows_dir="$TEMP_DIR/windows-build"
+  mkdir -p "$windows_dir"
+  gh run download "$windows_run_id" \
     --repo "$SOURCE_REPOSITORY" \
     --name "arctic-comfyui-helper-windows-$VERSION" \
-    --dir "$rehearsal_dir"
-  verify_windows_files "$rehearsal_dir"
-  echo "Windows rehearsal verified."
+    --dir "$windows_dir"
+  verify_windows_files "$windows_dir"
+  echo "Windows artifacts verified."
+}
+
+TEMP_DIR="$(mktemp -d)"
+windows_dir=""
+windows_run_id=""
+
+if ((SKIP_WINDOWS_REHEARSAL == 0)); then
+  build_windows_artifacts "pre-publish"
 fi
 
 echo "Building, verifying, and publishing Linux $TAG ..."
@@ -303,9 +310,6 @@ linux_args=(
 )
 nix develop -c bash scripts/release-linux.sh "${linux_args[@]}"
 
-known_runs="$TEMP_DIR/windows-runs-before-publish"
-capture_windows_runs "$known_runs"
-
 if ((remote_tag_exists == 0)); then
   if ((local_tag_exists == 0)); then
     git tag -a "$TAG" -m "Release $TAG"
@@ -315,20 +319,21 @@ if ((remote_tag_exists == 0)); then
       || fail "local tag $TAG no longer points to the release commit $local_head"
   fi
   git push origin "refs/tags/$TAG"
-  windows_event="push"
 else
-  echo "Tag $TAG already exists; dispatching an idempotent Windows publication."
-  gh workflow run "$WINDOWS_WORKFLOW" \
-    --repo "$SOURCE_REPOSITORY" \
-    --ref "$SOURCE_BRANCH" \
-    -f "version=$VERSION" \
-    -f publish=true
-  windows_event="workflow_dispatch"
+  echo "Tag $TAG already exists; continuing the idempotent publication."
 fi
 
-windows_run_id="$(wait_for_new_windows_run "$known_runs" "$local_head" "$windows_event")"
-echo "Waiting for Windows publishing run $windows_run_id ..."
-gh run watch "$windows_run_id" --repo "$SOURCE_REPOSITORY" --exit-status
+if ((SKIP_WINDOWS_REHEARSAL == 1)); then
+  build_windows_artifacts "post-publish"
+fi
+
+[[ -n "$windows_dir" ]] || fail "Windows artifacts were not built"
+echo "Publishing verified Windows artifacts with the local GitHub login ..."
+gh release upload "$TAG" \
+  "$windows_dir/Arctic-ComfyUI-Helper.exe" \
+  "$windows_dir/update.json" \
+  --repo "$RELEASE_REPOSITORY" \
+  --clobber
 
 echo "Downloading and verifying the completed public release ..."
 VERIFY_DIR="$(mktemp -d "$ROOT_DIR/.release-verify.XXXXXX")"

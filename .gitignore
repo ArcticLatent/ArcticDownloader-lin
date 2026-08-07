@@ -19,6 +19,7 @@ repo/
 /packaging/out/**
 /packaging/out/rpm/rpmbuild/
 /packaging/out/rpm/rpmbuild/**
+/packaging/flatpak/staging/
 /dist/
 /node_modules/
 

@@ -78,25 +78,25 @@ second compile check on GitHub's native `windows-latest` runner.
 
 ## Windows releases
 
-`.github/workflows/release-windows.yml` builds on a real Windows runner and publishes to
-`ArcticLatent/Arctic-Helper`. The source repository needs these Actions secrets:
+`.github/workflows/release-windows.yml` builds on a real Windows runner and stores the
+result as an Actions artifact. The source repository needs these Actions secrets:
 
-- `ARCTIC_RELEASE_TOKEN`: a fine-grained token with Contents: write permission for the
-  public release repository.
 - `ARCTIC_SUPABASE_URL`: catalog project URL embedded in the release build.
 - `ARCTIC_SUPABASE_PUBLISHABLE_KEY`: public read key embedded in the release build.
 - `ARCTIC_UPDATE_SIGNING_KEY`: private half of the update-manifest signing keypair. See
   "Update manifest signing" below.
 
 Both Cargo manifests and `src-tauri/tauri.conf.json` must contain the release version.
-Push a matching `vX.Y.Z` tag, or run the workflow manually with `X.Y.Z`. Manual runs
-default to build-and-verify only; explicitly enable the `publish` input after the dry run
-succeeds. Tag-triggered runs publish automatically. The workflow:
+Run the workflow manually with `X.Y.Z`, normally through
+`scripts/publish-release-all.sh`. The workflow:
 
 1. builds and checks `Arctic-ComfyUI-Helper.exe` on Windows;
 2. generates, signs, and verifies `update.json` against the public release URL and SHA-256;
 3. retains both as a GitHub Actions artifact;
-4. creates or updates the matching public release and uploads both files.
+4. exposes both files to the local publisher as a workflow artifact.
+
+The local publisher creates or updates the public release using the authenticated `gh`
+account, so no cross-repository release token is required in GitHub Actions.
 
 MSI/NSIS installers can be added later with `cargo tauri build` on this same native runner.
 The standalone executable remains the current compatibility-preserving artifact.
@@ -106,7 +106,7 @@ The standalone executable remains the current compatibility-preserving artifact.
 `src/updater.rs` checks a downloaded update package's SHA-256 against the hash in the
 manifest -- but until the manifest itself is authenticated, that hash only proves the
 download matches *the manifest*, not that the manifest came from a real release rather
-than a compromised `ARCTIC_RELEASE_TOKEN`, CI runner, or GitHub account. Both
+than a compromised release publisher, CI runner, or GitHub account. Both
 `update.json` (Windows, and the legacy Linux fallback) and `linux-release.json` now carry
 an Ed25519 `signature` field over their content, checked in `src/update_signing.rs`
 against a public key embedded in the binary. The app refuses to trust a manifest that is

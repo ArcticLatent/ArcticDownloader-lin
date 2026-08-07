@@ -4,7 +4,7 @@
 //! SHA-256 against the hash in the manifest -- but until this module, that
 //! hash came from the *same* manifest the checksum is meant to protect, over
 //! the same channel (GitHub Releases). Anyone able to edit a release (a
-//! compromised `ARCTIC_RELEASE_TOKEN`, a compromised GitHub account, a
+//! compromised release publisher, a compromised GitHub account, a
 //! malicious release publisher) could publish any binary with a matching hash
 //! and it would pass. Requiring a signature over the manifest, checked against
 //! a public key baked into the binary, means an attacker also needs the private
