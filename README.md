@@ -344,3 +344,9 @@ instead of attempting to modify the immutable Nix store.
 
 - This is the internal repo and can include technical/implementation notes.
 - `README.public.md` is maintained separately for public release consumption.
+
+## License
+
+Copyright 2026 Arctic Latent.
+
+Licensed under the [Apache License 2.0](LICENSE).

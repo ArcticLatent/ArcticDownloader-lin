@@ -5,7 +5,7 @@ Summary:        ComfyUI installer and model manager
 %global debug_package %{nil}
 %global _debugsource_packages 0
 
-License:        Proprietary
+License:        Apache-2.0
 URL:            https://github.com/ArcticLatent/ArcticDownloader-lin
 Source0:        %{name}-%{version}.tar.gz
 
@@ -58,7 +58,7 @@ install -Dpm0644 src-tauri/dist/icon.svg \
   %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/io.github.ArcticHelper.svg
 
 %files
-%license README.public.md
+%license LICENSE
 %doc README.md
 %{_bindir}/arctic-comfyui-helper
 %{_datadir}/applications/io.github.ArcticHelper.desktop

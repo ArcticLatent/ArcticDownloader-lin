@@ -99,10 +99,7 @@ nix_output="$(nix build \
   --expr "
     let
       flake = builtins.getFlake \"path:$ROOT_DIR\";
-      pkgs = import flake.inputs.nixpkgs {
-        system = \"x86_64-linux\";
-        config.allowUnfree = true;
-      };
+      pkgs = import flake.inputs.nixpkgs { system = \"x86_64-linux\"; };
     in
     pkgs.callPackage $ROOT_DIR/packaging/nix/source-package.nix {
       arcticSupabaseUrl = builtins.getEnv \"ARCTIC_SUPABASE_URL\";
@@ -119,6 +116,8 @@ install -Dm644 "$ROOT_DIR/src-tauri/dist/icon.svg" \
   "$STAGING_DIR/native/io.github.ArcticHelper.svg"
 install -Dm644 "$ROOT_DIR/README.public.md" \
   "$STAGING_DIR/native/README.md"
+install -Dm644 "$ROOT_DIR/LICENSE" \
+  "$STAGING_DIR/native/LICENSE"
 
 native_name="arctic-comfyui-helper-${VERSION}-nixos-x86_64.tar.gz"
 native_artifact="$OUT_DIR/$native_name"
@@ -133,7 +132,8 @@ tar \
   arctic-comfyui-helper \
   io.github.ArcticHelper.desktop \
   io.github.ArcticHelper.svg \
-  README.md
+  README.md \
+  LICENSE
 
 native_sha256="$(sha256sum "$native_artifact" | awk '{print $1}')"
 native_url="https://github.com/$REPOSITORY/releases/download/$TAG/$native_name"

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 description = "Signs and verifies Arctic ComfyUI Helper update manifests. Release-time tooling only -- not shipped in the app."
+license = "Apache-2.0"
 
 [[bin]]
 name = "manifest-signer"

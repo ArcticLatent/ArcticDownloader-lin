@@ -59,6 +59,7 @@ rustPlatform.buildRustPackage {
       ../../tools/manifest-signer
       ../../vendor
       ../../README.public.md
+      ../../LICENSE
       ../../packaging/linux/io.github.ArcticHelper.desktop
     ];
   };
@@ -103,6 +104,8 @@ rustPlatform.buildRustPackage {
       "$out/share/icons/hicolor/scalable/apps/io.github.ArcticHelper.svg"
     install -Dm644 README.public.md \
       "$out/share/doc/arctic-comfyui-helper/README.md"
+    install -Dm644 LICENSE \
+      "$out/share/licenses/arctic-comfyui-helper/LICENSE"
 
     runHook postInstall
   '';
@@ -138,7 +141,7 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "ComfyUI installer and model manager";
     homepage = "https://github.com/ArcticLatent/Arctic-Helper";
-    license = lib.licenses.unfree;
+    license = lib.licenses.asl20;
     mainProgram = "arctic-comfyui-helper";
     platforms = [ "x86_64-linux" ];
   };

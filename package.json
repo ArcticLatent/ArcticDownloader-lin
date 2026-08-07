@@ -1,5 +1,6 @@
 {
   "type": "module",
+  "license": "Apache-2.0",
   "scripts": {
     "check:frontend": "node scripts/check-frontend.mjs && eslint \"src-tauri/dist/**/*.js\" && tsc -p jsconfig.json --noEmit",
     "check:types": "tsc -p jsconfig.json --noEmit",

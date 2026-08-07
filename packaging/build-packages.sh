@@ -240,6 +240,8 @@ build_flatpak() {
     "$staging_dir/io.github.ArcticHelper.svg"
   install -Dm644 "$flatpak_dir/io.github.ArcticHelper.metainfo.xml" \
     "$staging_dir/io.github.ArcticHelper.metainfo.xml"
+  install -Dm644 "$ROOT_DIR/LICENSE" \
+    "$staging_dir/LICENSE"
 
   flatpak-builder \
     --force-clean \

@@ -27,6 +27,7 @@ modules:
       - install -D io.github.ArcticHelper.desktop /app/share/applications/io.github.ArcticHelper.desktop
       - install -D io.github.ArcticHelper.svg /app/share/icons/hicolor/scalable/apps/io.github.ArcticHelper.svg
       - install -D io.github.ArcticHelper.metainfo.xml /app/share/metainfo/io.github.ArcticHelper.metainfo.xml
+      - install -D LICENSE /app/share/licenses/arctic-comfyui-helper/LICENSE
     sources:
       - type: file
         path: staging/Arctic-ComfyUI-Helper
@@ -46,3 +47,5 @@ modules:
         path: staging/io.github.ArcticHelper.svg
       - type: file
         path: staging/io.github.ArcticHelper.metainfo.xml
+      - type: file
+        path: staging/LICENSE
