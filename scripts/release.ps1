@@ -145,6 +145,26 @@ $tauriCargo = Join-Path $root "src-tauri\Cargo.toml"
 $rootCargo = Join-Path $root "Cargo.toml"
 $tauriConf = Join-Path $root "src-tauri\tauri.conf.json"
 
+function Get-CargoTargetDirectory([string]$CargoExe, [string]$ManifestPath) {
+    $metadataOutput = & $CargoExe metadata --format-version 1 --no-deps --manifest-path $ManifestPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo metadata failed while resolving the workspace target directory"
+    }
+
+    try {
+        $metadata = ($metadataOutput -join [Environment]::NewLine) | ConvertFrom-Json
+    } catch {
+        throw "cargo metadata returned invalid JSON: $($_.Exception.Message)"
+    }
+
+    $targetDirectory = [string]$metadata.target_directory
+    if ([string]::IsNullOrWhiteSpace($targetDirectory)) {
+        throw "cargo metadata did not return target_directory"
+    }
+
+    return $targetDirectory
+}
+
 Write-Host "Updating versions to $Version ..."
 Update-CargoVersion -Path $rootCargo -NewVersion $Version
 Update-CargoVersion -Path $tauriCargo -NewVersion $Version
@@ -167,7 +187,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "cargo tauri build --no-bundle failed"
 }
 
-$binary = Join-Path $root "src-tauri\target\release\$AssetName"
+$targetDirectory = Get-CargoTargetDirectory -CargoExe $cargo -ManifestPath $tauriCargo
+$binary = Join-Path (Join-Path $targetDirectory "release") $AssetName
 if (-not (Test-Path $binary)) {
     throw "Release binary not found: $binary"
 }

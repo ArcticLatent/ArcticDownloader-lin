@@ -1,5 +1,5 @@
 param(
-    [string]$ExecutablePath = "src-tauri\target\release\Arctic-ComfyUI-Helper.exe",
+    [string]$ExecutablePath = "target\release\Arctic-ComfyUI-Helper.exe",
     [ValidateRange(30, 86400)]
     [int]$DurationSeconds = 1800,
     [ValidateRange(1, 60)]

@@ -216,7 +216,7 @@ Outputs are written to `dist/`:
 - `<prefix>-<timestamp>-summary.txt` with growth slopes and a leak-risk assessment
 
 Release binary output:
-- `src-tauri\target\release\Arctic-ComfyUI-Helper.exe`
+- `target\release\Arctic-ComfyUI-Helper.exe` (the Cargo workspace target directory)
 
 ## Automated Release Flow
 

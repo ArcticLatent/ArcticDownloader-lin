@@ -105,6 +105,26 @@ if (-not (Test-Path $rootManifest)) {
     throw "Missing root manifest at $rootManifest"
 }
 
+function Get-CargoTargetDirectory([string]$CargoExe, [string]$ManifestPath) {
+    $metadataOutput = & $CargoExe metadata --format-version 1 --no-deps --manifest-path $ManifestPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo metadata failed while resolving the workspace target directory"
+    }
+
+    try {
+        $metadata = ($metadataOutput -join [Environment]::NewLine) | ConvertFrom-Json
+    } catch {
+        throw "cargo metadata returned invalid JSON: $($_.Exception.Message)"
+    }
+
+    $targetDirectory = [string]$metadata.target_directory
+    if ([string]::IsNullOrWhiteSpace($targetDirectory)) {
+        throw "cargo metadata did not return target_directory"
+    }
+
+    return $targetDirectory
+}
+
 function Read-CargoVersion([string]$Path) {
     $raw = Get-Content $Path -Raw
     $m = [regex]::Match($raw, '(?m)^version\s*=\s*"([^"]+)"\s*$')
@@ -136,7 +156,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "cargo build --release --manifest-path src-tauri/Cargo.toml failed"
 }
 
-$binary = Join-Path $root "src-tauri\target\release\$AssetName"
+$targetDirectory = Get-CargoTargetDirectory -CargoExe $cargo -ManifestPath $tauriManifest
+$binary = Join-Path (Join-Path $targetDirectory "release") $AssetName
 if (-not (Test-Path $binary)) {
     throw "Expected binary not found at $binary"
 }
