@@ -1,13 +1,10 @@
 //! Platform-agnostic helpers shared by `app_linux.rs` and `app_windows.rs`.
 //!
-//! `app_linux.rs` and `app_windows.rs` are still almost entirely separate
-//! files (see `docs/cross-platform-development.md`'s consolidation
-//! roadmap), but a number of small functions inside them are pure logic
-//! with no OS-specific behavior and were maintained as byte-identical
-//! copies in both files. This module is the first extraction slice: it
-//! holds only functions that were verified identical between the two
-//! backends and have no dependency on anything that differs by platform,
-//! so moving them here changes nothing about runtime behavior.
+//! The Linux and Windows backends are composed from parallel platform
+//! modules (see `docs/cross-platform-development.md`), while this module
+//! owns logic verified to have the same semantics on both platforms. It
+//! also contains shared orchestration that reaches platform-specific leaf
+//! functions through `platform.rs`.
 //!
 //! When extending this module, only add a function here if it does not
 //! call into anything that has (or could reasonably grow) a
@@ -29,6 +26,7 @@ pub use events::{
 };
 pub use gpu::{amd_gpu_details_cache, intel_gpu_details_cache, AmdGpuDetails, IntelGpuDetails};
 
+use crate::contracts::PreflightItem;
 use crate::platform::{
     comfy_extra_model_config, detect_amd_gpu_details, detect_intel_gpu_details,
     detect_nvidia_gpu_details, effective_download_root, git_latest_release_tag, normalize_path,
@@ -55,12 +53,6 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
-
-/// `#[serde(default = "default_true")]` helper for settings fields that
-/// should default to `true` when absent from a persisted/older config file.
-pub fn default_true() -> bool {
-    true
-}
 
 /// Recovers from a poisoned `Mutex`/`RwLock` by taking the guard anyway,
 /// instead of propagating an error or panicking. A panic while holding one
@@ -525,6 +517,31 @@ pub fn has_dns(host: &str, port: u16) -> bool {
 /// forever -- previously the only way out was killing the whole app.
 pub const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Uses a bounded timeout for Git network operations and the ordinary
+/// `Command::status` path for local tools.
+pub(crate) fn status_with_optional_timeout(
+    program: &str,
+    mut command: std::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    if program == "git" {
+        run_with_timeout(command, GIT_COMMAND_TIMEOUT)
+    } else {
+        command.status()
+    }
+}
+
+/// `Command::output` equivalent of [`status_with_optional_timeout`].
+pub(crate) fn output_with_optional_timeout(
+    program: &str,
+    mut command: std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    if program == "git" {
+        run_with_timeout_capturing_output(command, GIT_COMMAND_TIMEOUT)
+    } else {
+        command.output()
+    }
+}
+
 /// Runs `cmd` (already fully configured -- program, args, cwd, env, and
 /// any `Stdio` the caller wants for stdin) to completion like
 /// `Command::status()`, but kills it and returns an error if it hasn't
@@ -813,14 +830,6 @@ pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
     let _ = window.unminimize();
     let _ = window.set_focus();
     Ok(())
-}
-
-/// One row of a ComfyUI install/uninstall preflight check.
-#[derive(Debug, Serialize)]
-pub struct PreflightItem {
-    pub status: String, // pass | warn | fail
-    pub title: String,
-    pub detail: String,
 }
 
 /// Appends a preflight result row to `items`.
@@ -2289,11 +2298,6 @@ mod tests {
             "arctic-shared-test-{label}-{}-{nonce}",
             std::process::id()
         ))
-    }
-
-    #[test]
-    fn default_true_is_true() {
-        assert!(default_true());
     }
 
     #[test]

@@ -145,13 +145,17 @@ is a runtime environment-variable override of the embedded key, for testing the 
 pipeline end to end against a throwaway keypair; it carries the same "requires control of
 the machine's environment" caveat as the existing `ARCTIC_UPDATE_MANIFEST_URL` override.
 
-## Consolidation roadmap
+## Consolidation status
 
-The repository boundary is complete, but the two large backend modules still contain
-duplicated code. Consolidate them incrementally:
+The cross-platform boundary is complete for the 0.2.6 release. Shared contracts and
+behavior live in `contracts.rs`, `shared.rs`, and `platform.rs`; Linux and Windows keep
+only behavior whose operating-system semantics genuinely differ. Further movement is a
+readability choice, not required platform parity work.
 
-1. Extract matching Tauri commands and DTOs into small shared modules. **In progress**:
-   `src-tauri/src/shared.rs` (~76 functions, 16 structs, its own `#[cfg(test)]` suite)
+1. Extract matching Tauri commands and DTOs into small shared modules. **Complete**:
+   `src-tauri/src/contracts.rs` owns the common application snapshots, update/preflight
+   responses, install request, and attention-change request payloads. This prevents the
+   frontend wire format from drifting between platform builds. `src-tauri/src/shared.rs`
    holds pure, side-effect-free helpers verified identical between `app_linux.rs`
    and `app_windows.rs` before moving — install-folder/state bookkeeping
    (`InstallState`, `write_install_state`, `find_in_progress_install`,
@@ -237,9 +241,9 @@ duplicated code. Consolidate them incrementally:
    `gpu_detection_pending` and `is_nvidia_hopper_sm90` were checked too and are
    Linux-only with no Windows counterpart at all — not candidates, just unique code.
 
-   **Separately, readability-only**: `app_linux.rs` (and `app_windows.rs`) are still
-   ~6,800/6,100-line single files with no internal organization -- a real problem this
-   roadmap item didn't address, since it was asking "should GPU detection be shared
+   **Separately, readability-only**: the old ~6,800/~6,100-line platform files have been
+   reduced to roughly 3,600/2,500 lines and are backed by focused sibling modules. This
+   roadmap item originally asked "should GPU detection be shared
    between platforms" (no) rather than "should Linux's own GPU detection live in its own
    file within `app_linux/`" (yes, and it doesn't conflict with the answer above). The
    Linux-only GPU-probing/caching block above -- `NvidiaGpuDetails`,
@@ -550,19 +554,17 @@ duplicated code. Consolidate them incrementally:
 
    **This closes out the roadmap items originally listed as remaining candidates.** Both
    `app_linux.rs` and `app_windows.rs` have gone from one undifferentiated file each to a
-   directory module with the same eight-piece shape: `gpu_detection.rs`, `tray.rs`,
+   directory module with the same eight-module core: `gpu_detection.rs`, `tray.rs`,
    `custom_nodes.rs`, `addons.rs`, `install_state.rs`, `runtime.rs`, `install.rs`,
-   `torch_env.rs`, plus whatever remains in the top-level file itself (the
-   `run()`/`generate_handler!` wiring, the handful of small standalone Tauri commands never
-   large enough to justify their own file, and the process-management/GitHub-release
-   helpers noted as a candidate in the sixth slice above but not yet acted on). That last
-   group -- and anything discovered by actually reading the remaining file rather than
-   assuming it's now "just wiring" -- is the next candidate if this gets picked up again;
-   check with the same rigor as every slice above rather than assuming what's left is
-   trivial just because the obvious pieces are gone.
+   `torch_env.rs`. Linux additionally isolates GTK/icon integration in `desktop.rs`;
+   Windows isolates Job Object lifetime handling in `process_guard.rs`. The top-level
+   files retain `run()`/`generate_handler!` wiring, small commands, and cohesive workflows
+   that remain platform-specific (Linux distro/guided GPU setup and Windows host tooling).
+   Those are intentionally not forced behind a shared abstraction.
 3. Move ComfyUI install/runtime operations into platform adapters behind shared commands.
-   **Started, scoped to runtime start/stop/status only** — install was investigated and
-   found not to fit this round (see below). The runtime orchestration functions
+   **Complete at the useful adapter boundary.** Install was investigated and found to
+   have genuine platform semantics that should remain separate (see below). The runtime
+   orchestration functions
    (`start_comfyui_root`, `start_comfyui_root_background`, `stop_comfyui_root`,
    `stop_comfyui_for_mutation`, `resolve_comfyui_instance_name`) are byte-identical on
    both platforms and now live in `shared.rs`. They call down into leaf functions that
@@ -589,8 +591,8 @@ duplicated code. Consolidate them incrementally:
      `comfyui_torch_profile`; Windows doesn't set it in the same place, and
      `selected_attention_backend` has a different return type — `&str` on Linux vs.
      `Option<&str>` on Windows). This is genuine divergence accumulated over time, not
-     surface duplication, and needs real design work (or a decision to leave it split)
-     rather than a mechanical extraction. Not attempted here.
+     surface duplication. It is intentionally left split rather than hidden behind a
+     misleading common implementation.
    - **Follow-up done**: `get_comfyui_extra_model_config`, `get_effective_download_destination`,
      `set_comfyui_extra_model_config`, and the pure `normalize_optional_path` wrapper
      (previously blocked only by `normalize_path` having no adapter) now live in

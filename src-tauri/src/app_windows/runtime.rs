@@ -8,9 +8,8 @@
 //!   Python runtime via `resolve_uv_binary`/`ensure_uv_python_installed` when
 //!   no working interpreter is found); Linux's just returns an error.
 //! - `start_comfyui_root_impl` calls Windows-only `apply_intel_xpu_launch_env`
-//!   and `track_comfy_job_object` (left in the parent -- single-caller,
-//!   Windows-toolchain-specific, not "runtime plumbing" as such) that have
-//!   no Linux equivalent at all.
+//!   and the Job Object guard in sibling module `process_guard`; neither has
+//!   a Linux equivalent.
 //! - `restart_comfyui_after_mutation` does not wait for ComfyUI to finish
 //!   starting before updating tray status; Linux's calls
 //!   `wait_for_comfyui_start` first.

@@ -1,7 +1,8 @@
-// Directory-module split, in progress: see docs/cross-platform-development.md
-// ("Consolidation roadmap") for what's been pulled out so far and why.
+// Platform backend composed from focused sibling modules; see
+// docs/cross-platform-development.md ("Consolidation status").
 mod addons;
 mod custom_nodes;
+mod desktop;
 mod gpu_detection;
 mod install;
 mod install_state;
@@ -31,6 +32,7 @@ pub(crate) use addons::{
 pub(crate) use custom_nodes::{
     custom_node_spec, install_custom_node, install_named_custom_node, CUSTOM_NODES,
 };
+use desktop::{install_linux_gdk_log_filter, main_window_icon};
 pub(crate) use gpu_detection::{
     detect_amd_gpu_details, detect_intel_gpu_details, detect_nvidia_gpu_details,
     fake_amd_allow_rocm_setup_enabled, fake_intel_allow_xpu_setup_enabled, gpu_detection_pending,
@@ -48,15 +50,20 @@ pub(crate) use torch_env::{
 };
 pub(crate) use tray::{setup_tray, tray_enabled_for_platform, update_tray_comfy_status};
 
+use crate::contracts::{
+    AppSnapshot, AttentionBackendChangeRequest, ComfyInstallRecommendation, ComfyInstallRequest,
+    ComfyPathInspection, ComfyPreflightResponse, HfXetPreflightResponse,
+    LaunchAttentionFlagRequest, PreflightItem, UpdateCheckResponse,
+};
 use crate::shared::{
-    custom_node_exists, default_true, detect_amd_gpu_name, detect_existing_comfyui_root,
-    detect_intel_gpu_name, detect_nvidia_gpu, fake_amd_enabled, fake_intel_enabled,
-    git_current_branch, has_dns, nerdstats_enabled, normalize_release_version, parse_hf_env_value,
+    custom_node_exists, detect_amd_gpu_name, detect_existing_comfyui_root, detect_intel_gpu_name,
+    detect_nvidia_gpu, fake_amd_enabled, fake_intel_enabled, git_current_branch, has_dns,
+    nerdstats_enabled, normalize_release_version, output_with_optional_timeout, parse_hf_env_value,
     parse_semver_triplet, parse_yaml_bool, parse_yaml_scalar, push_preflight,
-    read_comfyui_installed_version, recover_lock, run_with_timeout,
-    run_with_timeout_capturing_output, show_main_window, spawn_progress_emitter,
+    read_comfyui_installed_version, recover_lock, run_with_timeout_capturing_output,
+    show_main_window, spawn_progress_emitter, status_with_optional_timeout,
     stop_comfyui_for_mutation, yaml_single_quote, AppState, ComfyExtraModelConfig,
-    DownloadProgressEvent, PreflightItem, GIT_COMMAND_TIMEOUT,
+    DownloadProgressEvent,
 };
 use arctic_downloader::{
     app::build_context,
@@ -74,86 +81,8 @@ use std::{
     sync::{Mutex, OnceLock},
     time::Duration,
 };
-use tauri::image::Image;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tokio_util::sync::CancellationToken;
-
-#[derive(Debug, Serialize)]
-struct AppSnapshot {
-    version: String,
-    total_ram_gb: Option<f64>,
-    ram_tier: Option<String>,
-    nvidia_gpu_name: Option<String>,
-    nvidia_gpu_vram_mb: Option<u64>,
-    amd_gpu_name: Option<String>,
-    intel_gpu_name: Option<String>,
-    gpu_detection_pending: bool,
-    model_count: usize,
-    lora_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct UpdateCheckResponse {
-    available: bool,
-    version: Option<String>,
-    notes: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct HfXetPreflightResponse {
-    xet_enabled: bool,
-    hf_cli_available: bool,
-    hf_backend: String,
-    hf_xet_installed: bool,
-    hub_version: Option<String>,
-    detail: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ComfyInstallRecommendation {
-    gpu_name: Option<String>,
-    driver_version: Option<String>,
-    torch_profile: String,
-    torch_label: String,
-    reason: String,
-    detection_pending: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ComfyInstallRequest {
-    install_root: String,
-    #[serde(default)]
-    extra_model_root: Option<String>,
-    #[serde(default)]
-    extra_model_use_default: bool,
-    torch_profile: Option<String>,
-    include_sage_attention: bool,
-    include_sage_attention3: bool,
-    include_flash_attention: bool,
-    include_insight_face: bool,
-    include_nunchaku: bool,
-    #[serde(default)]
-    include_trellis2: bool,
-    #[serde(default = "default_true")]
-    include_pinned_memory: bool,
-    node_comfyui_manager: bool,
-    node_comfyui_easy_use: bool,
-    node_rgthree_comfy: bool,
-    node_comfyui_gguf: bool,
-    node_comfyui_kjnodes: bool,
-    #[serde(default)]
-    node_comfyui_crystools: bool,
-    #[serde(default)]
-    force_fresh: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct ComfyPreflightResponse {
-    ok: bool,
-    summary: String,
-    items: Vec<PreflightItem>,
-}
 
 #[derive(Debug, Serialize)]
 struct RocmGuidedStatus {
@@ -194,12 +123,6 @@ struct LinuxOsRelease {
     version_codename: String,
     ubuntu_codename: String,
     pretty_name: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ComfyPathInspection {
-    selected: String,
-    detected_root: Option<String>,
 }
 
 const UV_PYTHON_VERSION: &str = "3.12.10";
@@ -2260,33 +2183,6 @@ fn download_http_file(url: &str, out_file: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Dispatches to a bounded-timeout run for `git` (network operations that
-/// can otherwise hang forever against an unreachable host or stalled
-/// server, with previously no way out short of killing the app) and plain
-/// `Command::status()` for everything else, unchanged.
-fn status_with_optional_timeout(
-    program: &str,
-    mut cmd: std::process::Command,
-) -> std::io::Result<std::process::ExitStatus> {
-    if program == "git" {
-        run_with_timeout(cmd, GIT_COMMAND_TIMEOUT)
-    } else {
-        cmd.status()
-    }
-}
-
-/// `Command::output()`-equivalent of [`status_with_optional_timeout`].
-fn output_with_optional_timeout(
-    program: &str,
-    mut cmd: std::process::Command,
-) -> std::io::Result<std::process::Output> {
-    if program == "git" {
-        run_with_timeout_capturing_output(cmd, GIT_COMMAND_TIMEOUT)
-    } else {
-        cmd.output()
-    }
-}
-
 fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Result<(), String> {
     log::debug!("run_command: {} {}", program, args.join(" "));
     let cmd = build_command(program, args, working_dir, &[])?;
@@ -2977,24 +2873,6 @@ fn pip_has_package(root: &Path, package: &str) -> bool {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AttentionBackendChangeRequest {
-    #[serde(default)]
-    comfyui_root: Option<String>,
-    target_backend: String, // none | sage | sage3 | flash | nunchaku
-    #[serde(default)]
-    torch_profile: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LaunchAttentionFlagRequest {
-    #[serde(default)]
-    comfyui_root: Option<String>,
-    target_backend: String, // none | sage | sage3 | flash
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ComfyComponentToggleRequest {
     #[serde(default)]
     comfyui_root: Option<String>,
@@ -3404,18 +3282,6 @@ async fn update_selected_comfyui(
     ))
 }
 
-fn main_window_icon() -> Option<Image<'static>> {
-    static MAIN_ICON: OnceLock<Option<Image<'static>>> = OnceLock::new();
-    MAIN_ICON
-        .get_or_init(|| {
-            Image::from_bytes(include_bytes!("../icons/icon.png"))
-                .ok()
-                .or_else(|| Image::from_bytes(include_bytes!("../icons/favicon.ico")).ok())
-                .or_else(|| Image::from_bytes(include_bytes!("../icons/icon.ico")).ok())
-        })
-        .clone()
-}
-
 #[tauri::command]
 fn cancel_active_download(state: State<'_, AppState>) -> Result<bool, String> {
     let mut active = recover_lock(state.active_cancel.lock());
@@ -3614,51 +3480,6 @@ pub fn run() {
         ])
         .run(tauri_context)
         .expect("failed to run tauri application");
-}
-
-#[cfg(target_os = "linux")]
-fn install_linux_gdk_log_filter() {
-    static INSTALLED: OnceLock<()> = OnceLock::new();
-    if INSTALLED.get().is_some() {
-        return;
-    }
-
-    glib::log_set_writer_func(|level, fields| {
-        let mut domain: Option<&str> = None;
-        let mut message: Option<&str> = None;
-        for field in fields {
-            match field.key() {
-                "GLIB_DOMAIN" => domain = field.value_str(),
-                "MESSAGE" => message = field.value_str(),
-                _ => {}
-            }
-        }
-
-        if matches!(level, glib::LogLevel::Critical)
-            && domain == Some("Gdk")
-            && message
-                .map(|m| m.contains("gdk_window_thaw_toplevel_updates"))
-                .unwrap_or(false)
-        {
-            return glib::LogWriterOutput::Handled;
-        }
-
-        if matches!(level, glib::LogLevel::Warning)
-            && domain == Some("libayatana-appindicator")
-            && message
-                .map(|m| {
-                    m.contains("libayatana-appindicator is deprecated")
-                        && m.contains("libayatana-appindicator-glib")
-                })
-                .unwrap_or(false)
-        {
-            return glib::LogWriterOutput::Handled;
-        }
-
-        glib::log_writer_default(level, fields)
-    });
-
-    let _ = INSTALLED.set(());
 }
 
 // Renamed from `gpu_detection_tests`: the one test that was actually about
