@@ -264,7 +264,20 @@ Prerequisite:
 
 ## Automated Linux Release Flow
 
-Use one command:
+Publish Linux and Windows together with one guarded command:
+
+```bash
+bash ./scripts/publish-release-all.sh --version 0.2.6
+```
+
+The command prompts once for the local manifest-signing key when needed and
+once for confirmation. It rehearses Windows without publishing, builds and
+verifies Linux, publishes GitHub and AUR assets, tags the source, waits for the
+native Windows publisher, and verifies the downloaded public release. Add
+`--yes` to skip the confirmation, `--skip-aur` when AUR is intentionally out of
+scope, or `--resume` after inspecting a partially completed release.
+
+For a Linux-only release, use:
 
 ```bash
 nix develop

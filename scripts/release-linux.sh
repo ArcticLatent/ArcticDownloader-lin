@@ -4,6 +4,7 @@ set -euo pipefail
 VERSION=""
 REPOSITORY="ArcticLatent/Arctic-Helper"
 OUTPUT_DIR="dist"
+INPUT_NOTES_FILE=""
 SKIP_CLEAN=0
 ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
@@ -23,6 +24,8 @@ Options:
   --repository <owner/repo>
                          GitHub repository (default: ArcticLatent/Arctic-Helper).
   --output-dir <path>    Output directory (default: dist).
+  --notes-file <path>    Release notes markdown file. Defaults to
+                         CHANGELOG_<version>.md when it exists; otherwise prompt.
   --skip-clean           Skip cargo clean during build.
   --arch-distrobox <name>
                          Arch package build container (default: arctic-arch).
@@ -56,6 +59,10 @@ while (($# > 0)); do
       ;;
     --output-dir)
       OUTPUT_DIR="${2:-}"
+      shift 2
+      ;;
+    --notes-file)
+      INPUT_NOTES_FILE="${2:-}"
       shift 2
       ;;
     --skip-clean)
@@ -121,14 +128,27 @@ AUR_REPO_DIR="${AUR_REPO_DIR/#\~/$HOME}"
 NOTES_TMP="$(mktemp)"
 trap 'rm -f "$NOTES_TMP"' EXIT
 
-echo
-echo "Paste release notes. End with a single line containing END"
-while IFS= read -r line; do
-  [[ "$line" == "END" ]] && break
-  printf '%s\n' "$line" >> "$NOTES_TMP"
-done
-if [[ ! -s "$NOTES_TMP" ]]; then
-  printf 'Release %s\n' "$TAG" > "$NOTES_TMP"
+if [[ -z "$INPUT_NOTES_FILE" && -f "$ROOT_DIR/CHANGELOG_$VERSION.md" ]]; then
+  INPUT_NOTES_FILE="$ROOT_DIR/CHANGELOG_$VERSION.md"
+fi
+
+if [[ -n "$INPUT_NOTES_FILE" ]]; then
+  if [[ ! -f "$INPUT_NOTES_FILE" ]]; then
+    echo "Release notes file not found: $INPUT_NOTES_FILE" >&2
+    exit 1
+  fi
+  cp "$INPUT_NOTES_FILE" "$NOTES_TMP"
+  echo "Using release notes from $INPUT_NOTES_FILE"
+else
+  echo
+  echo "Paste release notes. End with a single line containing END"
+  while IFS= read -r line; do
+    [[ "$line" == "END" ]] && break
+    printf '%s\n' "$line" >> "$NOTES_TMP"
+  done
+  if [[ ! -s "$NOTES_TMP" ]]; then
+    printf 'Release %s\n' "$TAG" > "$NOTES_TMP"
+  fi
 fi
 
 require_cmd gh
