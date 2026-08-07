@@ -1,5 +1,6 @@
 export const PATH_SEP = "/";
 
+/** @param {unknown} value */
 export function normalizeSlashes(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -12,6 +13,7 @@ export function normalizeSlashes(value) {
   return normalized;
 }
 
+/** @param {unknown} path */
 export function parentDir(path) {
   const normalized = normalizeSlashes(path);
   const index = normalized.lastIndexOf(PATH_SEP);

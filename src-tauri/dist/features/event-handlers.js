@@ -10,6 +10,7 @@ import { normalizeSlashes, parentDir } from "../lib/path.js";
 import { debounce } from "../lib/timing.js";
 import { isSafeHttpUrl } from "../lib/url.js";
 
+/** @param {ArcticEventHandlerDependencies} dependencies */
 export function registerEventHandlers({
   addCompleted,
   applyAttentionBackendFromToggle,
@@ -847,6 +848,7 @@ async function initEventListeners() {
     }
 
     const key = `${p.kind || "download"}:${p.index || "?"}:${p.artifact || "item"}`;
+    /** @type {ArcticTransfer} */
     const current = state.transfers.get(key) || {
       id: key,
       kind: p.kind || "download",
@@ -1025,12 +1027,14 @@ el.downloadModel.addEventListener("click", async () => {
   beginBusyDownload("Starting model download...");
   try {
     if (items.length === 1) {
+      const item = items[0];
+      if (!item) return;
       await invoke("download_model_assets", {
-        modelId: items[0].modelId,
-        variantId: items[0].variantId,
+        modelId: item.modelId,
+        variantId: item.variantId,
         ramTier,
         vramTier,
-        selectedArtifactKeys: items[0].selectedArtifactKeys,
+        selectedArtifactKeys: item.selectedArtifactKeys,
         comfyuiRoot: el.comfyRoot.value,
       });
     } else {

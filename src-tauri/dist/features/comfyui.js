@@ -1,6 +1,7 @@
 import { comfyTorchProfiles, el, invoke, state } from "../lib/app-context.js";
 import { normalizeSlashes, parentDir, PATH_SEP } from "../lib/path.js";
 
+/** @param {ArcticComfyUiDependencies} dependencies */
 export function createComfyUiFeature({
   hideStartupOverlay,
   logComfyLine,
@@ -14,10 +15,13 @@ export function createComfyUiFeature({
   torchProfileLabel,
   waitForNextPaint,
 }) {
+  /** @type {Map<string, {status: ArcticRecord, at: number}>} */
   const comfyUpdateStatusCache = new Map();
+  /** @type {Map<string, Promise<ArcticRecord>>} */
   const comfyUpdateStatusInflight = new Map();
   const COMFY_UPDATE_STATUS_CACHE_MS = 4000;
 
+  /** @param {string} rootPath */
   function clearComfyUpdateStatusCache(rootPath) {
     comfyUpdateStatusCache.delete(normalizeSlashes(rootPath));
   }
@@ -65,19 +69,28 @@ function updateComfyUpdateButton() {
   btn.disabled = true;
 }
 
+/** @param {unknown} name */
 function comfyInstallOrder(name) {
   const lower = String(name || "").trim().toLowerCase();
   if (lower === "comfyui") return 0;
   const match = /^comfyui-(\d+)$/.exec(lower);
   if (!match) return -1;
-  const parsed = Number.parseInt(match[1], 10);
+  const ordinal = match[1];
+  if (!ordinal) return -1;
+  const parsed = Number.parseInt(ordinal, 10);
   return Number.isFinite(parsed) ? parsed : -1;
 }
 
+/**
+ * @param {ArcticComfyInstall[]} installs
+ * @returns {ArcticComfyInstall | null}
+ */
 function newestComfyInstall(installs) {
   if (!Array.isArray(installs) || installs.length === 0) return null;
-  let best = installs[0];
-  let bestOrder = comfyInstallOrder(best?.name);
+  const first = installs[0];
+  if (!first) return null;
+  let best = first;
+  let bestOrder = comfyInstallOrder(best.name);
   for (const item of installs.slice(1)) {
     const order = comfyInstallOrder(item?.name);
     if (order > bestOrder) {
@@ -88,13 +101,18 @@ function newestComfyInstall(installs) {
   return best;
 }
 
+/** @param {unknown} rootPath */
 function comfyInstallNameFromRoot(rootPath) {
   const normalized = normalizeSlashes(String(rootPath || "").trim());
   if (!normalized) return "ComfyUI";
   const parts = normalized.split(PATH_SEP).filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : "ComfyUI";
+  return parts.at(-1) || "ComfyUI";
 }
 
+/**
+ * @param {unknown} installDir
+ * @param {unknown} comfyRoot
+ */
 function setComfyQuickActions(installDir, comfyRoot) {
   const install = String(installDir || "").trim();
   const root = String(comfyRoot || "").trim();
@@ -116,6 +134,7 @@ function setComfyQuickActions(installDir, comfyRoot) {
   }
 }
 
+/** @returns {ArcticComfyInstallRequest} */
 function buildComfyInstallRequest() {
   const extraModelRoot = String(el.comfyExtraModelRoot?.value || "").trim();
   return {
@@ -164,6 +183,7 @@ function resetComfySelectionsToDefaults() {
   applyComfyAddonRules();
 }
 
+/** @param {unknown} comfyuiRoot */
 async function loadInstalledAddonState(comfyuiRoot) {
   const root = String(comfyuiRoot || el.comfyRoot.value || "").trim();
   if (!root) return;
@@ -251,14 +271,17 @@ function attentionAddonEntries() {
   ].filter((entry) => Boolean(entry.box));
 }
 
+/** @param {HTMLInputElement} box */
 function attentionEntryForBox(box) {
   return attentionAddonEntries().find((entry) => entry.box === box) || null;
 }
 
+/** @param {HTMLInputElement | null} [exceptBox] */
 function checkedAttentionEntries(exceptBox = null) {
   return attentionAddonEntries().filter((entry) => entry.box !== exceptBox && entry.box.checked);
 }
 
+/** @param {HTMLInputElement} changedBox */
 function enforceExclusiveAttentionSelectionLocal(changedBox) {
   if (!changedBox?.checked) return;
   checkedAttentionEntries(changedBox).forEach((entry) => {
@@ -277,14 +300,17 @@ function attentionFlagEntries() {
   ].filter((entry) => Boolean(entry.box));
 }
 
+/** @param {HTMLInputElement} box */
 function attentionFlagEntryForBox(box) {
   return attentionFlagEntries().find((entry) => entry.box === box) || null;
 }
 
+/** @param {HTMLInputElement | null} [exceptBox] */
 function checkedAttentionFlagEntries(exceptBox = null) {
   return attentionFlagEntries().filter((entry) => entry.box !== exceptBox && entry.box.checked);
 }
 
+/** @param {HTMLInputElement} changedBox */
 function enforceExclusiveAttentionFlagSelectionLocal(changedBox) {
   if (!changedBox?.checked) return;
   checkedAttentionFlagEntries(changedBox).forEach((entry) => {
@@ -292,6 +318,7 @@ function enforceExclusiveAttentionFlagSelectionLocal(changedBox) {
   });
 }
 
+/** @param {HTMLInputElement} changedBox */
 async function applyAttentionBackendFromToggle(changedBox) {
   if (!changedBox) return;
   if (state.comfyMode !== "manage") {
@@ -316,7 +343,10 @@ async function applyAttentionBackendFromToggle(changedBox) {
   if (changedBox.checked) {
     targetBackend = changed.backend;
     if (others.length > 0) {
-      confirmMessage = `Are you sure you want to install '${changed.label}'?\nInstalling '${changed.label}' will automatically remove '${others[0].label}'.`;
+      const installed = others[0];
+      if (installed) {
+        confirmMessage = `Are you sure you want to install '${changed.label}'?\nInstalling '${changed.label}' will automatically remove '${installed.label}'.`;
+      }
     }
   } else {
     confirmMessage = `Are you sure you want to remove '${changed.label}'?`;
@@ -353,6 +383,7 @@ async function applyAttentionBackendFromToggle(changedBox) {
   }
 }
 
+/** @param {HTMLInputElement} changedBox */
 async function applyLaunchAttentionFlagFromToggle(changedBox) {
   if (!changedBox) return;
   enforceExclusiveAttentionFlagSelectionLocal(changedBox);
@@ -399,6 +430,11 @@ async function applyLaunchAttentionFlagFromToggle(changedBox) {
   }
 }
 
+/**
+ * @param {HTMLInputElement} changedBox
+ * @param {string} component
+ * @param {string} label
+ */
 async function applyComponentToggleFromCheckbox(changedBox, component, label) {
   if (!changedBox || state.comfyComponentBusy) return;
   const launchSettingOnly = [
@@ -508,6 +544,7 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
   }
 }
 
+/** @type {number | null} */
 let runtimeStatusPollTimer = null;
 let runtimeStatusPollInFlight = false;
 
@@ -540,6 +577,7 @@ async function refreshComfyRuntimeStatus() {
   updateComfyRuntimeButton();
 }
 
+/** @param {number | null} [delayMs] */
 function scheduleRuntimeStatusPoll(delayMs = null) {
   const delay = delayMs ?? (state.comfyRuntimeStarting ? 1400 : 6500);
   if (runtimeStatusPollTimer) {
@@ -602,6 +640,12 @@ function updateComfyModeUi() {
   }
 }
 
+/**
+ * @template T
+ * @param {string} message
+ * @param {() => Promise<T>} work
+ * @returns {Promise<T>}
+ */
 async function runWithManagedInstallOverlay(message, work) {
   state.comfyInstallSwitchBusy = true;
   updateComfyModeUi();
@@ -616,6 +660,7 @@ async function runWithManagedInstallOverlay(message, work) {
   }
 }
 
+/** @param {unknown} rootPath */
 async function loadComfyExtraModelConfigForRoot(rootPath) {
   const root = normalizeSlashes(String(rootPath || "").trim());
   if (!root) return;
@@ -639,6 +684,7 @@ async function loadComfyExtraModelConfigForRoot(rootPath) {
   }
 }
 
+/** @param {unknown} rootPath */
 async function persistComfyExtraModelConfigForRoot(rootPath) {
   const root = normalizeSlashes(String(rootPath || "").trim());
   if (!root) return;
@@ -655,8 +701,13 @@ async function persistComfyExtraModelConfigForRoot(rootPath) {
   }
 }
 
+/**
+ * @param {string} basePath
+ * @param {string | null} [preferredRoot]
+ */
 async function refreshExistingInstallations(basePath, preferredRoot = null) {
   const base = normalizeSlashes(basePath);
+  /** @type {ArcticComfyInstall[]} */
   let installs = [];
   try {
     installs = await invoke("list_comfyui_installations", { basePath: base || null });
@@ -713,13 +764,15 @@ async function refreshExistingInstallations(basePath, preferredRoot = null) {
     const fallback = state.comfyMode === "manage"
       ? newestComfyInstall(installs)
       : (installs.find((x) => normalizeSlashes(x.root) === currentPreferred) || installs[0]);
-    el.comfyExistingInstall.value = (fallback || installs[0]).root;
+    const selected = fallback || installs[0];
+    if (selected) el.comfyExistingInstall.value = selected.root;
   }
   updateComfyModeUi();
   refreshComfyUiUpdateStatus(el.comfyExistingInstall.value).catch(() => {});
   return installs;
 }
 
+/** @param {string} rootPath */
 async function applySelectedExistingInstallation(rootPath) {
   const root = normalizeSlashes(rootPath);
   if (!root) return;
@@ -738,6 +791,7 @@ async function applySelectedExistingInstallation(rootPath) {
   }
 }
 
+/** @param {string | null} [rootPath] */
 async function refreshComfyUiUpdateStatus(rootPath = null) {
   const root = normalizeSlashes(rootPath || el.comfyExistingInstall?.value || el.comfyRoot.value || "");
   state.comfyUpdateChecking = true;
@@ -797,6 +851,12 @@ async function refreshComfyUiUpdateStatus(rootPath = null) {
   }
 }
 
+/**
+ * @param {string} selectedPath
+ * @param {boolean} [persistInstallBase]
+ * @param {boolean} [keepCurrentMode]
+ * @param {boolean} [emitDetectionLog]
+ */
 async function syncComfyInstallSelection(
   selectedPath,
   persistInstallBase = true,
@@ -887,6 +947,7 @@ async function syncComfyInstallSelection(
   }
 }
 
+/** @param {ArcticRecord | null} result */
 function renderPreflight(result) {
   if (!el.preflightList || !el.preflightSummary) return;
   const items = Array.isArray(result?.items) ? result.items : [];
@@ -965,6 +1026,7 @@ async function refreshComfyResumeState() {
   }
 }
 
+/** @param {boolean} forceFresh */
 async function startComfyInstall(forceFresh) {
   if (state.comfyInstallBusy) {
     const cancelled = await invoke("cancel_comfyui_install");

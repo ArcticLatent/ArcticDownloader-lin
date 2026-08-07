@@ -3,16 +3,25 @@ import { formatBytes } from "../lib/display-format.js";
 const DOT_SEP = " \u2022 ";
 const COMPLETED_HISTORY_MAX = 200;
 
+/**
+ * @param {ArcticTransfer} item
+ * @param {number} [now]
+ */
 export function smoothedReceived(item, now = Date.now()) {
   const target = Math.max(0, Number(item.received || 0));
-  if (!Number.isFinite(item.displayReceived)) item.displayReceived = 0;
-  if (!Number.isFinite(item.displayTs)) item.displayTs = now;
-  if (item.displayReceived > target) item.displayReceived = target;
+  let displayReceived = Number(item.displayReceived);
+  let displayTs = Number(item.displayTs);
+  if (!Number.isFinite(displayReceived)) displayReceived = 0;
+  if (!Number.isFinite(displayTs)) displayTs = now;
+  if (displayReceived > target) displayReceived = target;
 
-  const dtMs = Math.max(16, now - item.displayTs);
+  const dtMs = Math.max(16, now - displayTs);
   item.displayTs = now;
-  const delta = target - item.displayReceived;
-  if (delta <= 0) return item.displayReceived;
+  const delta = target - displayReceived;
+  if (delta <= 0) {
+    item.displayReceived = displayReceived;
+    return displayReceived;
+  }
 
   const minStep = 128 * 1024;
   const easedStep = delta * 0.25;
@@ -21,10 +30,12 @@ export function smoothedReceived(item, now = Date.now()) {
     delta,
     Math.max(minStep, Math.min(rateCapStep, Math.max(minStep, easedStep))),
   );
-  item.displayReceived += advance;
-  return item.displayReceived;
+  displayReceived += advance;
+  item.displayReceived = displayReceived;
+  return displayReceived;
 }
 
+/** @param {ArcticDownloadProgressDependencies} dependencies */
 export function createDownloadProgress({
   state,
   elements,
@@ -34,8 +45,10 @@ export function createDownloadProgress({
   workflowExternalUrl,
 }) {
   const el = elements;
+  /** @type {number | null} */
   let progressSmoothTimer = null;
 
+  /** @param {string} text */
   function setProgress(text) {
     el.progressLine.textContent = text || "Idle";
   }
@@ -46,7 +59,9 @@ export function createDownloadProgress({
       const active = [...state.transfers.values()]
         .filter((item) => item.phase !== "finished" && item.phase !== "failed");
       if (!active.length && state.busyDownloads <= 0) {
-        window.clearInterval(progressSmoothTimer);
+        if (progressSmoothTimer !== null) {
+          window.clearInterval(progressSmoothTimer);
+        }
         progressSmoothTimer = null;
         return;
       }
@@ -122,6 +137,7 @@ export function createDownloadProgress({
     }
   }
 
+  /** @param {string} label */
   function beginBusyDownload(label) {
     state.busyDownloads += 1;
     if (!state.activeDownloadKind) {
@@ -222,6 +238,7 @@ export function createDownloadProgress({
     const max = Math.min(30, state.completed.length);
     for (let index = 0; index < max; index += 1) {
       const item = state.completed[index];
+      if (!item) continue;
       const hasFolder = Boolean(item.folder && item.folder.trim());
       const row = document.createElement("div");
       row.className = "transfer-item";
@@ -258,6 +275,7 @@ export function createDownloadProgress({
     renderOverallProgress();
   }
 
+  /** @param {ArcticCompletedDownloadInput} item */
   function addCompleted(item) {
     const index = state.completed.findIndex(
       (completed) => completed.name === item.name
@@ -265,8 +283,9 @@ export function createDownloadProgress({
         && completed.folder === (item.folder || ""),
     );
     if (index >= 0) {
+      const completed = state.completed[index];
       if (item.folder && item.folder.trim()) {
-        state.completed[index].folder = item.folder;
+        if (completed) completed.folder = item.folder;
       }
       return;
     }

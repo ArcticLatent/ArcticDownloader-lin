@@ -1,5 +1,6 @@
 // Catalog-sourced values may become preview/link targets or backend
 // open_external_url arguments, so only absolute HTTP(S) URLs are allowed.
+/** @param {unknown} value */
 export function isSafeHttpUrl(value) {
   const trimmed = String(value || "").trim();
   if (!trimmed) return false;
@@ -11,6 +12,7 @@ export function isSafeHttpUrl(value) {
   }
 }
 
+/** @param {unknown} url */
 export function isVideoPreviewUrl(url) {
   const value = String(url || "").toLowerCase();
   return value.endsWith(".mp4") || value.endsWith(".webm") || value.endsWith(".mov")

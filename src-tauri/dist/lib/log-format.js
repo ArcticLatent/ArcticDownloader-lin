@@ -1,3 +1,4 @@
+/** @param {unknown} text */
 export function escapeHtml(text) {
   return String(text || "")
     .replace(/&/g, "&amp;")
@@ -5,11 +6,14 @@ export function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
+/** @param {unknown} text */
 export function ansiToHtml(text) {
   const input = String(text || "");
   let html = "";
+  /** @type {string[]} */
   let classes = [];
 
+  /** @param {string} chunk */
   const flush = (chunk) => {
     if (!chunk) return;
     const escaped = escapeHtml(chunk);
@@ -60,6 +64,7 @@ export function ansiToHtml(text) {
   return html;
 }
 
+/** @param {unknown} text */
 export function detectRuntimeLogLevel(text) {
   const value = String(text || "").toLowerCase();
   if (

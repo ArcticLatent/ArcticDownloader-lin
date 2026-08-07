@@ -12,7 +12,12 @@ import {
 import { formatFileSize, trimDescription } from "../lib/display-format.js";
 import { isSafeHttpUrl, isVideoPreviewUrl } from "../lib/url.js";
 
+/** @param {ArcticCatalogDependencies} dependencies */
 export function createCatalogFeature({ logLine, updateDownloadButtons }) {
+/**
+ * @param {unknown} previewUrl
+ * @param {unknown} previewKind
+ */
 function applyLoraPreview(previewUrl, previewKind) {
   const rawUrl = String(previewUrl || "").trim();
   const url = isSafeHttpUrl(rawUrl) ? rawUrl : "";
@@ -46,6 +51,7 @@ function applyLoraPreview(previewUrl, previewKind) {
   el.previewCaption.textContent = "Image preview loaded.";
 }
 
+/** @param {unknown} value */
 async function copyText(value) {
   const text = String(value || "").trim();
   if (!text) return false;
@@ -68,7 +74,9 @@ async function copyText(value) {
   return ok;
 }
 
+/** @param {unknown} words */
 function renderTriggerWords(words) {
+  /** @type {string[]} */
   const list = Array.isArray(words) ? words.filter((x) => String(x || "").trim()) : [];
   el.metaTriggers.innerHTML = "";
   if (!list.length) {
@@ -108,6 +116,11 @@ function renderTriggerWords(words) {
   el.metaTriggers.appendChild(frag);
 }
 
+/**
+ * @param {HTMLSelectElement} select
+ * @param {{ value: string, label: string, disabled?: boolean }[]} options
+ * @param {string | null} [selectedValue]
+ */
 function setOptions(select, options, selectedValue = null) {
   const current = selectedValue ?? select.value;
   select.innerHTML = "";
@@ -123,6 +136,7 @@ function setOptions(select, options, selectedValue = null) {
   }
 }
 
+/** @param {ArcticCatalog | null} [catalog] */
 function catalogCounts(catalog = state.catalog) {
   return {
     models: Array.isArray(catalog?.models) ? catalog.models.length : 0,
@@ -131,11 +145,17 @@ function catalogCounts(catalog = state.catalog) {
   };
 }
 
+/** @param {ArcticCatalog | null} [catalog] */
 function catalogHasContent(catalog = state.catalog) {
   const counts = catalogCounts(catalog);
   return counts.models > 0 || counts.loras > 0 || counts.workflows > 0;
 }
 
+/**
+ * @param {HTMLElement | null | undefined} target
+ * @param {string} text
+ * @param {string} [mode]
+ */
 function updateCatalogStatusElement(target, text, mode = "loading") {
   if (!target) return;
   if (!text) {
@@ -187,6 +207,10 @@ function renderCatalogStatus() {
   );
 }
 
+/**
+ * @param {boolean} loading
+ * @param {string} [message]
+ */
 function setCatalogLoading(loading, message = "") {
   state.catalogLoading = Boolean(loading);
   if (loading) {
@@ -198,6 +222,7 @@ function setCatalogLoading(loading, message = "") {
 }
 
 
+/** @param {string} tab */
 function switchTab(tab) {
   state.activeTab = tab;
   const comfyui = tab === "comfyui";
@@ -215,6 +240,7 @@ function switchTab(tab) {
   el.downloadsStatusPanel.classList.toggle("hidden", comfyui);
 }
 
+/** @param {ArcticCatalogModel[]} models */
 function familyOptions(models) {
   const families = [...new Set(models.map((m) => m.family))].sort();
   return [
@@ -223,6 +249,7 @@ function familyOptions(models) {
   ];
 }
 
+/** @param {unknown} family */
 function prettyFamilyId(family) {
   return String(family || "")
     .trim()
@@ -233,12 +260,13 @@ function prettyFamilyId(family) {
     .replace(/\s+/g, " ");
 }
 
+/** @param {string[]} names */
 function commonDisplayPrefix(names) {
   if (!names.length) return "";
-  let prefix = names[0];
+  let prefix = names[0] || "";
   for (const name of names.slice(1)) {
     let i = 0;
-    while (i < prefix.length && i < name.length && prefix[i].toLowerCase() === name[i].toLowerCase()) {
+    while (i < prefix.length && i < name.length && prefix.charAt(i).toLowerCase() === name.charAt(i).toLowerCase()) {
       i += 1;
     }
     prefix = prefix.slice(0, i);
@@ -250,23 +278,29 @@ function commonDisplayPrefix(names) {
     .trim();
 }
 
+/**
+ * @param {unknown} family
+ * @param {ArcticCatalogModel[]} [models]
+ */
 function modelFamilyLabel(family, models = state.catalog?.models || []) {
   const familyId = String(family || "").trim();
   const names = (Array.isArray(models) ? models : [])
     .filter((model) => String(model?.family || "").trim() === familyId)
     .map((model) => String(model?.display_name || "").trim())
     .filter(Boolean);
-  if (names.length === 1) return names[0];
+  if (names.length === 1) return names[0] || familyId;
   const common = commonDisplayPrefix(names);
   if (common.length >= 4) return common;
   return prettyFamilyId(familyId) || familyId;
 }
 
+/** @param {ArcticCatalogLora[]} loras */
 function loraFamilyOptions(loras) {
   const families = [...new Set(loras.map((l) => l.family).filter(Boolean))].sort();
   return [{ value: "all", label: "All LoRA Families" }, ...families.map((f) => ({ value: f, label: f }))];
 }
 
+/** @param {ArcticCatalogWorkflow[]} workflows */
 function workflowFamilyOptions(workflows) {
   const families = [...new Set((workflows || []).map((w) => w.family).filter(Boolean))].sort();
   return [{ value: "all", label: "All Workflow Families" }, ...families.map((f) => ({ value: f, label: f }))];
@@ -288,37 +322,50 @@ function filteredModelsForCurrentSelection() {
   });
 }
 
+/** @param {ArcticCatalogModel} model */
 function modelHasAlwaysArtifacts(model) {
   return Array.isArray(model?.always)
     && model.always.some((group) => Array.isArray(group?.artifacts) && group.artifacts.length);
 }
 
+/**
+ * @param {ArcticCatalogVariant} variant
+ * @param {string} [selectedTier]
+ */
 function variantVramHint(variant, selectedTier = "") {
   const variantTier = String(variant?.tier || "").trim();
   const target = String(selectedTier || "").trim();
   const label = vramTierLabels[variantTier] || variantTier.toUpperCase();
   if (!target) return label;
   if (variantTier === target) return `${label} detected fit`;
-  const variantStrength = tierStrength[variantTier];
-  const targetStrength = tierStrength[target];
+  const variantStrength = tierStrength[variantTier] ?? Number.NaN;
+  const targetStrength = tierStrength[target] ?? Number.NaN;
   if (!Number.isFinite(variantStrength) || !Number.isFinite(targetStrength)) return label;
   return variantStrength > targetStrength
     ? `${label} may need more VRAM`
     : label;
 }
 
+/**
+ * @param {ArcticCatalogVariant} variant
+ * @param {string} [selectedTier]
+ */
 function variantSortRank(variant, selectedTier = "") {
   const variantTier = String(variant?.tier || "").trim();
   const target = String(selectedTier || "").trim();
   if (!target) return 0;
-  const variantStrength = tierStrength[variantTier];
-  const targetStrength = tierStrength[target];
+  const variantStrength = tierStrength[variantTier] ?? Number.NaN;
+  const targetStrength = tierStrength[target] ?? Number.NaN;
   if (!Number.isFinite(variantStrength) || !Number.isFinite(targetStrength)) return 50;
   if (variantTier === target) return 0;
   if (variantStrength < targetStrength) return 10 + (targetStrength - variantStrength);
   return 20 + (variantStrength - targetStrength);
 }
 
+/**
+ * @param {ArcticCatalogModel} model
+ * @param {string} [selectedTier]
+ */
 function variantsForModel(model, selectedTier = "") {
   const variants = [...(model?.variants || [])];
   if (!selectedTier) return variants;
@@ -332,10 +379,18 @@ function variantsForModel(model, selectedTier = "") {
     .map((entry) => entry.variant);
 }
 
+/**
+ * @param {ArcticCatalogModel} model
+ * @param {string} [selectedTier]
+ */
 function recommendedVariantIdForModel(model, selectedTier = selectedVramTierValue()) {
   return variantsForModel(model, selectedTier)[0]?.id || "";
 }
 
+/**
+ * @param {string} modelId
+ * @param {string} [variantId]
+ */
 function clearModelArtifactChoiceState(modelId, variantId = "") {
   const prefix = variantId ? `${modelId}::${variantId}::` : `${modelId}::`;
   for (const key of Array.from(state.selectedModelArtifactChoices.keys())) {
@@ -345,6 +400,11 @@ function clearModelArtifactChoiceState(modelId, variantId = "") {
   }
 }
 
+/**
+ * @param {string} modelId
+ * @param {string} variantId
+ * @param {boolean} [manuallySelected]
+ */
 function setSelectedModelVariant(modelId, variantId, manuallySelected = false) {
   if (variantId) {
     state.selectedModelVariants.set(modelId, variantId);
@@ -358,12 +418,17 @@ function setSelectedModelVariant(modelId, variantId, manuallySelected = false) {
   }
 }
 
+/**
+ * @param {ArcticCatalogVariant} variant
+ * @param {string} [selectedTier]
+ */
 function modelVariantLabel(variant, selectedTier = "") {
   return [variant.model_size, variant.quantization, variant.note, variantVramHint(variant, selectedTier)]
     .filter(Boolean)
     .join(DOT_SEP);
 }
 
+/** @param {unknown} value */
 function formatRamGb(value) {
   const num = Number(value || 0);
   if (!Number.isFinite(num)) return "0";
@@ -373,6 +438,10 @@ function formatRamGb(value) {
     : String(rounded.toFixed(1));
 }
 
+/**
+ * @param {ArcticCatalogModel} model
+ * @returns {ArcticRamThresholds}
+ */
 function resolvedModelRamThresholds(model) {
   const cfg = model?.ram_tier_thresholds || {};
   return {
@@ -382,6 +451,10 @@ function resolvedModelRamThresholds(model) {
   };
 }
 
+/**
+ * @param {unknown} gb
+ * @param {ArcticRamThresholds | null} [thresholds]
+ */
 function ramTierForGb(gb, thresholds = null) {
   const value = Number(gb);
   if (!Number.isFinite(value)) return "";
@@ -391,6 +464,7 @@ function ramTierForGb(gb, thresholds = null) {
   return "tier_c";
 }
 
+/** @param {unknown} mb */
 function vramTierForMb(mb) {
   const value = Number(mb);
   if (!Number.isFinite(value) || value <= 0) return "";
@@ -400,6 +474,7 @@ function vramTierForMb(mb) {
   return "tier_c";
 }
 
+/** @param {unknown} value */
 function normalizeRamTier(value) {
   const normalized = String(value || "").trim().toLowerCase().replace(/\s+/g, "_");
   if (normalized === "tier_a" || normalized === "a") return "tier_a";
@@ -427,6 +502,10 @@ function selectedVramTierValue() {
   return vramOptions.find((item) => item.id === selected)?.tier || "";
 }
 
+/**
+ * @param {string} tierId
+ * @param {ArcticRamThresholds | null | undefined} thresholds
+ */
 function customRamOptionLabel(tierId, thresholds) {
   const mins = thresholds || { tier_a: 64, tier_b: 32, tier_c: 0 };
   if (tierId === "tier_a") {
@@ -438,6 +517,7 @@ function customRamOptionLabel(tierId, thresholds) {
   return `Tier C (<${formatRamGb(mins.tier_b)} GB)`;
 }
 
+/** @param {ArcticCatalogModel} model */
 function hasCustomRamThresholds(model) {
   const cfg = model?.ram_tier_thresholds || {};
   return Number.isFinite(Number(cfg.tier_a_min_gb))
@@ -445,11 +525,13 @@ function hasCustomRamThresholds(model) {
     || Number.isFinite(Number(cfg.tier_c_min_gb));
 }
 
+/** @param {ArcticRamThresholds | null | undefined} thresholds */
 function ramThresholdKey(thresholds) {
   if (!thresholds) return "";
   return [thresholds.tier_a, thresholds.tier_b, thresholds.tier_c].join("::");
 }
 
+/** @param {ArcticCatalogModel[]} models */
 function sharedCustomRamThresholds(models) {
   const entries = (Array.isArray(models) ? models : [])
     .filter((model) => hasCustomRamThresholds(model))
@@ -491,6 +573,10 @@ function vramOptionsWithPlaceholder() {
   ];
 }
 
+/**
+ * @param {ArcticCatalogArtifact} artifact
+ * @param {string} availableTier
+ */
 function artifactSupportedOnRam(artifact, availableTier) {
   const bucketTier = String(artifact?.ram_bucket || "").trim();
   if (bucketTier) {
@@ -500,30 +586,37 @@ function artifactSupportedOnRam(artifact, availableTier) {
   if (!requiredTier) return true;
   const currentTier = String(availableTier || "").trim();
   if (!currentTier) return false;
-  const currentStrength = tierStrength[currentTier];
-  const requiredStrength = tierStrength[requiredTier];
+  const currentStrength = tierStrength[currentTier] ?? Number.NaN;
+  const requiredStrength = tierStrength[requiredTier] ?? Number.NaN;
   if (!Number.isFinite(currentStrength) || !Number.isFinite(requiredStrength)) return false;
   return currentStrength >= requiredStrength;
 }
 
+/**
+ * @param {ArcticCatalogArtifact} artifact
+ * @param {string} availableTier
+ */
 function artifactSelectableInQueue(artifact, availableTier) {
   if (String(artifact?.ram_bucket || "").trim()) return true;
   return artifactSupportedOnRam(artifact, availableTier);
 }
 
+/** @param {ArcticCatalogArtifact | null} artifact */
 function artifactFileName(artifact) {
   const fromPath = String(artifact?.path || "").trim().split("/").filter(Boolean).pop();
   if (fromPath) return fromPath;
   const direct = String(artifact?.direct_url || "").trim();
   if (!direct) return String(artifact?.repo || "").trim() || "artifact";
-  const noQuery = direct.split("?")[0];
+  const noQuery = direct.split("?")[0] || direct;
   return noQuery.split("/").filter(Boolean).pop() || direct;
 }
 
+/** @param {ArcticCatalogArtifact} artifact */
 function artifactDisplayBaseName(artifact) {
   return artifactFileName(artifact).replace(/\.(safetensors|gguf|ckpt|pt|pth|bin|onnx|json|ya?ml|zip)$/i, "");
 }
 
+/** @param {ArcticCatalogArtifact | null} artifact */
 function artifactSearchText(artifact) {
   return [
     artifactFileName(artifact),
@@ -533,19 +626,23 @@ function artifactSearchText(artifact) {
   ].join(" ").toLowerCase();
 }
 
+/** @param {ArcticCatalogArtifact | null} artifact */
 function isTextEncoderArtifact(artifact) {
   return /\b(text[_\s-]*encoders?|clip)\b/.test(artifactSearchText(artifact));
 }
 
+/** @param {ArcticCatalogArtifact | null} artifact */
 function isTextEncoderProjectionArtifact(artifact) {
   return /(?:^|[_\s\-/])(m?m?proj|projection)(?:$|[_\s\-.])/i.test(artifactSearchText(artifact));
 }
 
+/** @param {ArcticCatalogArtifact | null} artifact */
 function isClipLTextEncoderArtifact(artifact) {
   if (!isTextEncoderArtifact(artifact) || isTextEncoderProjectionArtifact(artifact)) return false;
   return /(?:^|[_\s\-/.])clip[_\s\-.]?l(?:$|[_\s\-.])/i.test(artifactSearchText(artifact));
 }
 
+/** @param {ArcticCatalogArtifact | null} artifact */
 function isQuantizedTextEncoderArtifact(artifact) {
   if (!isTextEncoderArtifact(artifact) || isTextEncoderProjectionArtifact(artifact)) return false;
   const text = artifactSearchText(artifact);
@@ -557,6 +654,7 @@ function isQuantizedTextEncoderArtifact(artifact) {
     || /(?:^|[_\-.])int\d+(?:[_\-.]|$)/i.test(text);
 }
 
+/** @param {ArcticCatalogArtifact} artifact */
 function quantizedTextEncoderSortRank(artifact) {
   const text = artifactSearchText(artifact);
   const fpMatch = text.match(/(?:^|[_\-.])fp([2-8])(?:[_\-.]|$)/i);
@@ -570,6 +668,7 @@ function quantizedTextEncoderSortRank(artifact) {
   return 99;
 }
 
+/** @param {ArcticCatalogArtifact | null} artifact */
 function quantizedTextEncoderLabel(artifact) {
   const text = artifactSearchText(artifact);
   const fpMatch = text.match(/(?:^|[_\-.])fp([2-8])(?:[_\-.]|$)/i);
@@ -583,22 +682,26 @@ function quantizedTextEncoderLabel(artifact) {
   return "quantized";
 }
 
+/** @param {ArcticCatalogArtifact | null} artifact */
 function isFullPrecisionTextEncoderArtifact(artifact) {
   if (!isTextEncoderArtifact(artifact) || isTextEncoderProjectionArtifact(artifact)) return false;
   return !isQuantizedTextEncoderArtifact(artifact);
 }
 
+/** @param {ArcticCatalogArtifact} artifact */
 function artifactSizeBytes(artifact) {
   const size = Number(artifact?.size_bytes);
   return Number.isFinite(size) && size > 0 ? size : 0;
 }
 
+/** @param {ArcticCatalogArtifact} artifact */
 function artifactDisplayName(artifact) {
   const name = artifactDisplayBaseName(artifact);
   const size = formatFileSize(artifactSizeBytes(artifact));
   return size ? `${name} (File Size: ${size})` : name;
 }
 
+/** @param {ArcticCatalogArtifact} artifact */
 function artifactRuntimeRamBytes(artifact) {
   const nested = Number(artifact?.memory_estimate?.runtime_ram_bytes);
   if (Number.isFinite(nested) && nested > 0) return nested;
@@ -606,11 +709,16 @@ function artifactRuntimeRamBytes(artifact) {
   return Number.isFinite(flat) && flat > 0 ? flat : 0;
 }
 
+/** @param {ArcticCatalogArtifact} artifact */
 function artifactRuntimeRamLabel(artifact) {
   const size = formatFileSize(artifactRuntimeRamBytes(artifact));
   return size ? `Estimated RAM while running: ${size}` : "";
 }
 
+/**
+ * @param {HTMLElement} parent
+ * @param {unknown} text
+ */
 function appendArtifactMetaLine(parent, text) {
   const value = String(text || "").trim();
   if (!value) return;
@@ -620,6 +728,7 @@ function appendArtifactMetaLine(parent, text) {
   parent.appendChild(meta);
 }
 
+/** @param {ArcticCatalogArtifact} artifact */
 function artifactChoiceKey(artifact) {
   return [
     String(artifact?.target_category || "").trim(),
@@ -630,13 +739,22 @@ function artifactChoiceKey(artifact) {
   ].join("::");
 }
 
+/**
+ * @param {ArcticSelectedModelItem} item
+ * @param {ArcticCatalogArtifact} artifact
+ */
 function artifactChoiceStateKey(item, artifact) {
   return [item.modelId, item.variantId, artifactChoiceKey(artifact)].join("::");
 }
 
+/**
+ * @param {ArcticCatalogArtifactGroup | ArcticQueueArtifactGroup | null} group
+ * @param {string} ramTier
+ */
 function groupPreferredTierATextEncoderKey(group, ramTier) {
   if (String(ramTier || "").trim() !== "tier_a") return "";
   const artifacts = Array.isArray(group?.artifacts) ? group.artifacts : [];
+  /** @type {ArcticCatalogArtifact | null} */
   let preferred = null;
   artifacts.forEach((artifact) => {
     if (!artifactSelectableInQueue(artifact, ramTier)) return;
@@ -649,6 +767,10 @@ function groupPreferredTierATextEncoderKey(group, ramTier) {
   return preferred ? artifactChoiceKey(preferred) : "";
 }
 
+/**
+ * @param {ArcticCatalogArtifact} artifact
+ * @param {string} ramTier
+ */
 function artifactDefaultSupportedOnRam(artifact, ramTier) {
   const bucketTier = String(artifact?.ram_bucket || "").trim();
   if (bucketTier) {
@@ -658,6 +780,11 @@ function artifactDefaultSupportedOnRam(artifact, ramTier) {
   return artifactSupportedOnRam(artifact, ramTier);
 }
 
+/**
+ * @param {ArcticCatalogArtifact} artifact
+ * @param {string} ramTier
+ * @param {ArcticCatalogArtifactGroup | ArcticQueueArtifactGroup | null} [group]
+ */
 function artifactDefaultChecked(artifact, ramTier, group = null) {
   const preferredTierATextEncoderKey = groupPreferredTierATextEncoderKey(group, ramTier);
   if (preferredTierATextEncoderKey && isTextEncoderArtifact(artifact) && !isTextEncoderProjectionArtifact(artifact)) {
@@ -669,14 +796,24 @@ function artifactDefaultChecked(artifact, ramTier, group = null) {
   return artifactDefaultSupportedOnRam(artifact, ramTier);
 }
 
+/**
+ * @param {ArcticSelectedModelItem} item
+ * @param {ArcticCatalogArtifact} artifact
+ * @param {string} ramTier
+ * @param {ArcticCatalogArtifactGroup | ArcticQueueArtifactGroup | null} [group]
+ */
 function artifactChoiceChecked(item, artifact, ramTier, group = null) {
   const key = artifactChoiceStateKey(item, artifact);
   if (state.selectedModelArtifactChoices.has(key)) {
-    return state.selectedModelArtifactChoices.get(key);
+    return state.selectedModelArtifactChoices.get(key) === true;
   }
   return artifactDefaultChecked(artifact, ramTier, group);
 }
 
+/**
+ * @param {string} tierId
+ * @param {ArcticCatalogArtifact | null} [artifact]
+ */
 function ramBucketLabel(tierId, artifact = null) {
   if (isFullPrecisionTextEncoderArtifact(artifact)) {
     return "Highest fidelity, largest memory use";
@@ -693,6 +830,7 @@ function ramBucketLabel(tierId, artifact = null) {
   return customRamOptionLabel(tierId, ramThresholdsForDropdownContext());
 }
 
+/** @param {ArcticCatalogArtifactGroup} group */
 function queueArtifactGroupLabel(group) {
   const categories = (Array.isArray(group?.artifacts) ? group.artifacts : [])
     .map((artifact) => targetCategoryLabel(artifact?.target_category))
@@ -704,8 +842,10 @@ function queueArtifactGroupLabel(group) {
   return id.replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+/** @param {unknown} category */
 function targetCategoryLabel(category) {
   const normalized = String(category || "").trim().toLowerCase();
+  /** @type {Record<string, string>} */
   const labels = {
     clip: "Text Encoders",
     text_encoders: "Text Encoders",
@@ -729,6 +869,7 @@ function targetCategoryLabel(category) {
     .join(" / ");
 }
 
+/** @param {ArcticCatalogArtifactGroup} group */
 function queueArtifactGroupRank(group) {
   const id = String(group?.id || "").trim().toLowerCase();
   const label = String(group?.label || "").trim().toLowerCase();
@@ -739,6 +880,7 @@ function queueArtifactGroupRank(group) {
   return 1;
 }
 
+/** @param {ArcticCatalogArtifact} artifact */
 function queueArtifactRank(artifact) {
   if (isFullPrecisionTextEncoderArtifact(artifact)) return 0;
   if (isTextEncoderProjectionArtifact(artifact)) return 1;
@@ -746,6 +888,7 @@ function queueArtifactRank(artifact) {
   return 3;
 }
 
+/** @param {ArcticCatalogArtifact[]} artifacts */
 function sortQueueArtifacts(artifacts) {
   if (!artifacts.some((artifact) => isTextEncoderArtifact(artifact) || isTextEncoderProjectionArtifact(artifact))) {
     return artifacts;
@@ -766,6 +909,11 @@ function sortQueueArtifacts(artifacts) {
     .map((entry) => entry.artifact);
 }
 
+/**
+ * @param {ArcticCatalogModel} model
+ * @param {string} ramTier
+ * @returns {ArcticQueueArtifactGroup[]}
+ */
 function alwaysArtifactGroupsForModel(model, ramTier) {
   const groups = Array.isArray(model?.always) ? model.always : [];
   return groups
@@ -789,6 +937,11 @@ function alwaysArtifactGroupsForModel(model, ramTier) {
     .sort((a, b) => (a.rank - b.rank) || (a.index - b.index));
 }
 
+/**
+ * @param {ArcticCatalogVariant | null} variant
+ * @param {string} ramTier
+ * @returns {ArcticCatalogArtifact[]}
+ */
 function selectedVariantArtifactsForDisplay(variant, ramTier) {
   const artifacts = Array.isArray(variant?.artifacts) ? variant.artifacts : [];
   const seen = new Set();
@@ -801,6 +954,7 @@ function selectedVariantArtifactsForDisplay(variant, ramTier) {
   });
 }
 
+/** @param {ArcticSelectedModelItem} item */
 function selectedArtifactKeysForDownload(item) {
   const ramTier = selectedRamTierValue();
   const keys = new Set();
@@ -818,6 +972,7 @@ function selectedArtifactKeysForDownload(item) {
 }
 
 function selectedModelItems() {
+  /** @type {ArcticSelectedModelItem[]} */
   const items = [];
   state.selectedModelVariants.forEach((variantId, modelId) => {
     const model = state.catalog?.models?.find((entry) => entry.id === modelId);
@@ -848,7 +1003,10 @@ function updateModelSelectionSummary() {
     return;
   }
   if (items.length === 1) {
-    el.modelSelectionSummary.textContent = `1 model selected${DOT_SEP}${items[0].label}`;
+    const onlyItem = items[0];
+    if (onlyItem) {
+      el.modelSelectionSummary.textContent = `1 model selected${DOT_SEP}${onlyItem.label}`;
+    }
     return;
   }
   el.modelSelectionSummary.textContent = `${items.length} models selected.`;
@@ -882,8 +1040,9 @@ function renderSelectedModelQueue() {
       head.className = "queue-item-head";
       const title = document.createElement("div");
       title.className = "queue-item-title";
-      title.textContent = selectedArtifacts.length === 1
-        ? artifactDisplayName(selectedArtifacts[0])
+      const onlyArtifact = selectedArtifacts.length === 1 ? selectedArtifacts[0] : null;
+      title.textContent = onlyArtifact
+        ? artifactDisplayName(onlyArtifact)
         : selectedArtifacts.length > 1
           ? `${selectedArtifacts.length} selected variant files`
           : item.label;
@@ -1179,6 +1338,7 @@ function refreshWorkflowSelectors() {
   loadWorkflowPreview();
 }
 
+/** @param {ArcticCatalogWorkflow | null} workflow */
 function workflowDisplayName(workflow) {
   if (!workflow) return "Workflow";
   return (
@@ -1197,6 +1357,7 @@ function selectedWorkflow() {
   return (state.catalog?.workflows || []).find((w) => w.id === selectedId) || null;
 }
 
+/** @param {ArcticCatalogWorkflow | null} workflow */
 function workflowExternalUrl(workflow) {
   if (!workflow) return "";
   const directLink =

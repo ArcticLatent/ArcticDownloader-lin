@@ -58,3 +58,21 @@ function visit(file, trail = []) {
 }
 
 for (const file of frontendFiles) visit(file);
+
+const htmlSource = readFileSync("src-tauri/dist/index.html", "utf8");
+const htmlIds = [...htmlSource.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]);
+const duplicateIds = [...new Set(htmlIds.filter((id, index) => htmlIds.indexOf(id) !== index))];
+if (duplicateIds.length) {
+  throw new Error(`Duplicate IDs in src-tauri/dist/index.html: ${duplicateIds.join(", ")}`);
+}
+
+const htmlIdSet = new Set(htmlIds);
+const appContextSource = readFileSync("src-tauri/dist/lib/app-context.js", "utf8");
+const requiredIds = [...appContextSource.matchAll(/\bbyId\(["']([^"']+)["']\)/g)]
+  .map((match) => match[1]);
+const missingRequiredIds = requiredIds.filter((id) => !htmlIdSet.has(id));
+if (missingRequiredIds.length) {
+  throw new Error(
+    `Required application elements missing from src-tauri/dist/index.html: ${missingRequiredIds.join(", ")}`,
+  );
+}

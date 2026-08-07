@@ -24,6 +24,13 @@ root; `features/bootstrap.js`, `catalog.js`, `comfyui.js`, `gpu-torch.js`,
 explicit dependency injection and import only `lib/`, so the module graph has no
 feature-to-feature cycles.
 
+`jsconfig.json` enables the full TypeScript strict family for the checked JavaScript,
+including `noImplicitAny` and unchecked-index validation. `global.d.ts` defines the
+narrow Tauri IPC surface, feature-factory contracts, catalog/download domain objects,
+and shared application state, including nullable lifecycle values. `npm run
+check:frontend` also verifies that every required `byId(...)` reference in
+`lib/app-context.js` exists exactly once in `index.html`.
+
 ## Daily development on NixOS
 
 Run and test the Linux app:

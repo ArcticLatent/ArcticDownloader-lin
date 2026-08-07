@@ -1,9 +1,25 @@
-export const invoke = window.__TAURI__?.core?.invoke;
-export const listen = window.__TAURI__?.event?.listen || window.__TAURI__?.core?.listen;
+/** @type {TauriInvoke} */
+export const invoke = (command, args) => {
+  const handler = window.__TAURI__?.core?.invoke;
+  if (!handler) {
+    return Promise.reject(new Error("Tauri IPC is unavailable."));
+  }
+  return handler(command, args);
+};
+
+/** @type {TauriListen} */
+export const listen = (event, callback) => {
+  const handler = window.__TAURI__?.event?.listen || window.__TAURI__?.core?.listen;
+  if (!handler) {
+    return Promise.reject(new Error("Tauri event API is unavailable."));
+  }
+  return handler(event, callback);
+};
 
 export const DOT_SEP = " \u2022 ";
 export const ALWAYS_ONLY_VARIANT_ID = "__always_only__";
 
+/** @type {ArcticAppState} */
 export const state = {
   catalog: null,
   catalogLoading: true,
@@ -85,6 +101,7 @@ export const vramOptions = [
   { id: "vram_96", label: "96 GB VRAM", tier: "tier_s" },
 ];
 
+/** @type {Record<string, string>} */
 export const vramTierLabels = {
   tier_s: "32+ GB VRAM",
   tier_a: "16/24 GB VRAM",
@@ -92,6 +109,7 @@ export const vramTierLabels = {
   tier_c: "8 GB VRAM",
 };
 
+/** @type {Record<string, number>} */
 export const tierStrength = {
   tier_c: 0,
   tier_b: 1,
@@ -99,20 +117,36 @@ export const tierStrength = {
   tier_s: 3,
 };
 
+/** @type {ArcticTorchProfile[]} */
 export let comfyTorchProfiles = [
-  { value: "torch271_cu128", label: "Torch 2.7.1 + cu128" },
-  { value: "torch280_cu128", label: "Torch 2.8.0 + cu128" },
-  { value: "torch211_rocm72", label: "Torch 2.11.0 + ROCm 7.2 (Linux)" },
-  { value: "torch291_rocm64", label: "Torch 2.9.1 + ROCm 6.4 (Linux compatibility)" },
-  { value: "torch291_xpu", label: "Torch 2.9.1 + XPU" },
-  { value: "torch291_cu130", label: "Torch 2.9.1 + cu130" },
+  { value: "torch271_cu128", label: "Torch 2.7.1 + cu128", backend: "nvidia" },
+  { value: "torch280_cu128", label: "Torch 2.8.0 + cu128", backend: "nvidia" },
+  { value: "torch211_rocm72", label: "Torch 2.11.0 + ROCm 7.2 (Linux)", backend: "amd" },
+  { value: "torch291_rocm64", label: "Torch 2.9.1 + ROCm 6.4 (Linux compatibility)", backend: "amd" },
+  { value: "torch291_xpu", label: "Torch 2.9.1 + XPU", backend: "intel" },
+  { value: "torch291_cu130", label: "Torch 2.9.1 + cu130", backend: "nvidia" },
 ];
 
+/** @param {ArcticTorchProfile[]} profiles */
 export function setComfyTorchProfiles(profiles) {
   comfyTorchProfiles = profiles;
 }
 
-const byId = (id) => document.getElementById(id);
+/**
+ * Resolve markup that is required by the application shell. Failing during
+ * startup gives a useful error and keeps every consumer non-nullable.
+ *
+ * @template {HTMLElement} T
+ * @param {string} id
+ * @returns {T}
+ */
+const byId = (id) => {
+  const element = document.getElementById(id);
+  if (!element) {
+    throw new Error(`Required application element #${id} was not found.`);
+  }
+  return /** @type {T} */ (element);
+};
 
 export const el = {
   version: byId("version"),

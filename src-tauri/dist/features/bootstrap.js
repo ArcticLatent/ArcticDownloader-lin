@@ -9,6 +9,7 @@ import {
 import { formatVramMbToGb } from "../lib/display-format.js";
 import { normalizeSlashes, parentDir } from "../lib/path.js";
 
+/** @param {ArcticBootstrapDependencies} dependencies */
 export function createBootstrapController({
   applyComfyAddonRules,
   applyComfyTorchProfileOptions,
@@ -57,11 +58,15 @@ async function bootstrap() {
   }
   setStartupStatus("Loading settings and catalog...");
   setCatalogLoading(true);
-  const [settings, catalog, platformCapabilities] = await Promise.all([
+  const [settings, catalog, platformCapabilities] = /** @type {[
+    ArcticRecord,
+    ArcticCatalog,
+    ArcticPlatformCapabilities,
+  ]} */ (await Promise.all([
     invoke("get_settings"),
     invoke("get_catalog"),
     invoke("get_platform_capabilities"),
-  ]);
+  ]));
 
   state.settings = settings;
   state.catalog = catalog;
@@ -299,6 +304,10 @@ async function bootstrap() {
   setStartupStatus("Starting UI...");
 }
 
+/**
+ * @param {ArcticCatalog} catalog
+ * @param {{ resetSelectors?: boolean }} [options]
+ */
 function applyCatalogSnapshot(catalog, { resetSelectors = false } = {}) {
   state.catalog = catalog;
   state.catalogLoading = false;

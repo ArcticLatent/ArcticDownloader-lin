@@ -1,3 +1,7 @@
+/**
+ * @param {string | null | undefined} text
+ * @param {number} [max]
+ */
 export function trimDescription(text, max = 520) {
   const value = (text || "").trim();
   if (!value) return "-";
@@ -5,6 +9,7 @@ export function trimDescription(text, max = 520) {
   return `${value.slice(0, max).trimEnd()}...`;
 }
 
+/** @param {unknown} value */
 export function formatBytes(value) {
   const bytes = Number(value || 0);
   if (!bytes) return "0 B";
@@ -18,12 +23,14 @@ export function formatBytes(value) {
   return `${amount.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
+/** @param {unknown} vramMb */
 export function formatVramMbToGb(vramMb) {
   const value = Number(vramMb || 0);
   if (!value) return null;
   return `${(value / 1024).toFixed(1)} GB VRAM`;
 }
 
+/** @param {unknown} bytes */
 export function formatFileSize(bytes) {
   const size = Number(bytes);
   if (!Number.isFinite(size) || size <= 0) return "";

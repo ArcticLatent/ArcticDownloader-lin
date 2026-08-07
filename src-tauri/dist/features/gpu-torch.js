@@ -1,7 +1,9 @@
 import { comfyTorchProfiles, el, invoke, state } from "../lib/app-context.js";
 import { formatVramMbToGb } from "../lib/display-format.js";
 
+/** @param {ArcticGpuTorchDependencies} dependencies */
 export function createGpuTorchFeature({ logComfyLine, setOptions }) {
+/** @param {unknown} profile */
 function torchProfileLabel(profile) {
   const value = String(profile || "").trim();
   return comfyTorchProfiles.find((item) => item.value === value)?.label || value || "Unknown profile";
@@ -11,14 +13,19 @@ function platformLabel() {
   return state.platformCapabilities?.platform === "windows" ? "Windows" : "Linux";
 }
 
+/** @param {unknown} profile */
 function torchProfileBackend(profile) {
   const value = String(profile || "").trim();
   return String(comfyTorchProfiles.find((item) => item.value === value)?.backend || "");
 }
 
+/**
+ * @param {string} backend
+ * @param {string | null} [requestedValue]
+ */
 function preferredTorchProfile(backend, requestedValue = null) {
   const requested = comfyTorchProfiles.find((item) => item.value === requestedValue);
-  if (requested?.backend === backend) return requested.value;
+  if (requested && requested.backend === backend) return requested.value;
   if (backend === "nvidia") {
     const preferredCuda = comfyTorchProfiles.find((item) => item.value === "torch280_cu128");
     if (preferredCuda) return preferredCuda.value;
@@ -26,10 +33,12 @@ function preferredTorchProfile(backend, requestedValue = null) {
   return comfyTorchProfiles.find((item) => item.backend === backend)?.value || requestedValue || "";
 }
 
+/** @param {unknown} profile */
 function isRocmTorchProfile(profile) {
   return String(profile || "").includes("_rocm");
 }
 
+/** @param {ArcticRecord} snapshot */
 function gpuOptionsFromSnapshot(snapshot) {
   const options = [];
   const nvidiaName = String(snapshot?.nvidia_gpu_name || "").trim();
@@ -51,6 +60,7 @@ function selectedGpuVendor(selection = state.comfyGpuSelection) {
     || "";
 }
 
+/** @param {ArcticRecord} snapshot */
 function refreshGpuSelectionOptions(snapshot) {
   state.detectedGpus = gpuOptionsFromSnapshot(snapshot);
   const options = [{ value: "auto", label: "GPU: Automatic (recommended)" }]
@@ -73,9 +83,10 @@ function refreshGpuSelectionOptions(snapshot) {
     const platform = platformLabel();
     el.comfyGpuSelectionHelp.textContent = effectiveSelection === "auto"
       ? `Platform: ${platform} • Automatically selects NVIDIA first, then another available GPU.`
-      : `Platform: ${platform} • Torch will be configured for ${selected.label}.`;
+      : `Platform: ${platform} • Torch will be configured for ${selected?.label || effectiveSelection}.`;
   }
 }
+/** @param {boolean} detecting */
 function setTorchRecommendedDetecting(detecting) {
   if (!el.comfyTorchRecommended) return;
   if (detecting) {
@@ -128,6 +139,7 @@ function updateRocmGuidedUi() {
   if (!show) {
     return;
   }
+  if (!target) return;
   if (el.rocmGuidedStatus) {
     el.rocmGuidedStatus.textContent = statusMatchesTarget && status?.detail
       ? `${target.statusLabel}: ${status.detail}`
@@ -189,6 +201,7 @@ function comfyTorchProfileOptionsForDetectedGpu() {
   return comfyTorchProfiles.map((item) => ({ ...item, disabled: false }));
 }
 
+/** @param {string | null} [selectedValue] */
 function applyComfyTorchProfileOptions(selectedValue = null) {
   if (!el.comfyTorchProfile) return;
   const options = comfyTorchProfileOptionsForDetectedGpu();

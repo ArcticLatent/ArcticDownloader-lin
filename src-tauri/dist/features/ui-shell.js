@@ -8,6 +8,10 @@ export function createUiShell() {
 // cost of every future prepend -- without bound.
 const LOG_MAX_CHARS = 200_000;
 
+/**
+ * @param {HTMLElement} target
+ * @param {unknown} text
+ */
 function prependLogLine(target, text) {
   const stamp = new Date()
     .toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
@@ -19,15 +23,18 @@ function prependLogLine(target, text) {
     : combined;
 }
 
+/** @param {unknown} text */
 function logLine(text) {
   prependLogLine(el.statusLog, text);
 }
 
+/** @param {unknown} text */
 function logComfyLine(text) {
   if (!el.comfyInstallLog) return;
   prependLogLine(el.comfyInstallLog, text);
 }
 
+/** @param {ArcticRuntimeLog} entry */
 function runtimeLogMatchesFilter(entry) {
   const filter = String(el.comfyRuntimeLogFilter?.value || "all");
   if (filter === "stderr") return entry.stream === "stderr";
@@ -70,6 +77,10 @@ function renderComfyRuntimeLogs() {
   });
 }
 
+/**
+ * @param {unknown} text
+ * @param {string} [stream]
+ */
 function logComfyRuntimeLine(text, stream = "stdout") {
   const stamp = new Date()
     .toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
@@ -87,6 +98,7 @@ function logComfyRuntimeLine(text, stream = "stdout") {
   scheduleComfyRuntimeLogRender();
 }
 
+/** @param {unknown} text */
 function setStartupStatus(text) {
   if (!el.startupStatus) return;
   el.startupStatus.textContent = String(text || "Preparing workspace...");
@@ -103,6 +115,7 @@ function hideStartupOverlay() {
   }, 240);
 }
 
+/** @param {unknown} text */
 function showBlockingOverlay(text) {
   const overlay = el.startupOverlay;
   if (!overlay) return;
@@ -112,6 +125,10 @@ function showBlockingOverlay(text) {
   overlay.setAttribute("aria-busy", "true");
 }
 
+/**
+ * @param {string} title
+ * @param {string} body
+ */
 function notifySystem(title, body) {
   const tauriNotify = window.__TAURI__?.notification;
   if (tauriNotify?.sendNotification) {
@@ -137,6 +154,10 @@ function notifySystem(title, body) {
   }
 }
 
+/**
+ * @param {HTMLInputElement | null | undefined} box
+ * @param {boolean} busy
+ */
 function setToggleBusy(box, busy) {
   if (!box) return;
   box.disabled = Boolean(busy);
@@ -145,6 +166,10 @@ function setToggleBusy(box, busy) {
   label.classList.toggle("busy", Boolean(busy));
 }
 
+/**
+ * @param {string} message
+ * @returns {Promise<boolean>}
+ */
 function showConfirmDialog(message) {
   return new Promise((resolve) => {
     const overlay = el.confirmOverlay;
@@ -157,6 +182,7 @@ function showConfirmDialog(message) {
     }
 
     let settled = false;
+    /** @param {boolean} value */
     const close = (value) => {
       if (settled) return;
       settled = true;
@@ -170,9 +196,11 @@ function showConfirmDialog(message) {
     };
     const onYes = () => close(true);
     const onNo = () => close(false);
+    /** @param {MouseEvent} event */
     const onOverlay = (event) => {
       if (event.target === overlay) close(false);
     };
+    /** @param {KeyboardEvent} event */
     const onKeyDown = (event) => {
       if (event.key === "Escape") close(false);
     };
@@ -190,10 +218,11 @@ function showConfirmDialog(message) {
   });
 }
 
+/** @returns {Promise<void>} */
 function waitForNextPaint() {
   return new Promise((resolve) => {
     window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(resolve);
+      window.requestAnimationFrame(() => resolve());
     });
   });
 }
@@ -222,6 +251,7 @@ function renderTitleMeta() {
 
 function renderAppVersionTag() {
   if (!el.appVersionTag) return;
+  /** @param {unknown} value */
   const normalizeVersion = (value) => String(value || "").trim().replace(/^v/i, "");
   const current = normalizeVersion(state.appVersion || "");
   const latest = normalizeVersion(state.updateVersion || "");
