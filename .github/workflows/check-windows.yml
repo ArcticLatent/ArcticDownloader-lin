@@ -41,6 +41,14 @@ jobs:
       - name: Lint Windows application
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
+      # scripts/build-release.ps1 and verify-release.ps1 run this tool
+      # directly on the release runner, so it needs to build on Windows too.
+      - name: Check manifest-signer tool
+        run: cargo check --locked --manifest-path tools/manifest-signer/Cargo.toml --all-targets
+
+      - name: Lint manifest-signer tool
+        run: cargo clippy --locked --manifest-path tools/manifest-signer/Cargo.toml --all-targets -- -D warnings
+
       - name: Check frontend JavaScript
         run: npm run check:frontend
 
@@ -52,3 +60,6 @@ jobs:
 
       - name: Test Windows backend
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Test manifest-signer tool
+        run: cargo test --locked --manifest-path tools/manifest-signer/Cargo.toml

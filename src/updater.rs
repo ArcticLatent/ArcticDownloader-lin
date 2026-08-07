@@ -1,4 +1,7 @@
 use crate::config::ConfigStore;
+#[cfg(not(target_os = "windows"))]
+use crate::update_signing::linux_release_manifest_signing_payload;
+use crate::update_signing::{update_manifest_signing_payload, verify_with_embedded_key};
 use anyhow::{bail, Context, Result};
 use log::info;
 use reqwest::Client;
@@ -44,17 +47,19 @@ struct UpdateManifest {
     sha256: String,
     #[serde(default)]
     notes: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 #[cfg(not(target_os = "windows"))]
 #[derive(Debug, Deserialize)]
 struct LinuxReleaseManifest {
     version: String,
-    #[allow(dead_code)]
-    tag: Option<String>,
-    #[allow(dead_code)]
-    repository: Option<String>,
+    tag: String,
+    repository: String,
     assets: Vec<LinuxReleaseAsset>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -208,7 +213,11 @@ impl Updater {
                 update.version, package_path
             );
             run_install_command(&package_path).await?;
-            let _ = store_installed_version(update.version.clone(), config.clone()).await;
+            if let Err(err) = store_installed_version(update.version.clone(), &config) {
+                log::warn!(
+                    "Update was applied but its installed version could not be saved: {err:#}"
+                );
+            }
 
             Ok(UpdateApplied {
                 version: update.version,
@@ -246,24 +255,10 @@ fn parse_version(raw: &str) -> Option<Version> {
     Version::parse(normalized).ok()
 }
 
-async fn store_installed_version(version: Version, config: Arc<ConfigStore>) -> Result<()> {
-    let settings_path = config.config_path().join("settings.json");
-
-    let existing = fs::read(&settings_path).await.ok();
-    let mut settings: crate::config::AppSettings = existing
-        .as_deref()
-        .and_then(|bytes| serde_json::from_slice(bytes).ok())
-        .unwrap_or_default();
-
-    settings.last_installed_version = Some(version.to_string());
-    let data = serde_json::to_vec_pretty(&settings)?;
-    if let Some(parent) = settings_path.parent() {
-        fs::create_dir_all(parent).await.ok();
-    }
-    fs::write(&settings_path, data)
-        .await
-        .with_context(|| format!("failed to persist settings at {settings_path:?}"))?;
-
+fn store_installed_version(version: Version, config: &ConfigStore) -> Result<()> {
+    config
+        .update_settings(|settings| settings.last_installed_version = Some(version.to_string()))
+        .context("failed to persist the installed application version")?;
     Ok(())
 }
 
@@ -277,10 +272,12 @@ async fn fetch_manifest(client: &Client, url: &str) -> Result<UpdateManifest> {
         .context("update manifest request returned error status")?;
     #[cfg(target_os = "windows")]
     {
-        response
+        let manifest = response
             .json::<UpdateManifest>()
             .await
-            .context("failed to parse update manifest JSON")
+            .context("failed to parse update manifest JSON")?;
+        verify_update_manifest(&manifest)?;
+        Ok(manifest)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -291,11 +288,13 @@ async fn fetch_manifest(client: &Client, url: &str) -> Result<UpdateManifest> {
             .context("failed to read update manifest bytes")?;
 
         if let Ok(legacy) = serde_json::from_slice::<UpdateManifest>(&bytes) {
+            verify_update_manifest(&legacy)?;
             return Ok(legacy);
         }
 
         let linux = serde_json::from_slice::<LinuxReleaseManifest>(&bytes)
             .context("failed to parse update manifest JSON (legacy and linux-release formats)")?;
+        verify_linux_release_manifest(&linux)?;
         let asset = select_linux_release_asset(&linux)
             .context("no compatible Linux package artifact found in linux-release manifest")?;
         let download_url = asset.download_url.clone();
@@ -306,8 +305,59 @@ async fn fetch_manifest(client: &Client, url: &str) -> Result<UpdateManifest> {
             download_url,
             sha256,
             notes: Some(format!("Selected Linux package asset: {asset_name}")),
+            // The per-asset manifest synthesized here isn't independently
+            // signed -- its data was already authenticated as part of the
+            // whole `linux-release.json` manifest in
+            // verify_linux_release_manifest above, and this value never
+            // gets re-serialized/re-checked.
+            signature: None,
         })
     }
+}
+
+/// Refuses to trust `manifest` unless it carries a signature that verifies
+/// against the embedded (or `ARCTIC_UPDATE_PUBLIC_KEY`-overridden) release
+/// public key. Without this, `sha256` in the manifest only proves the
+/// downloaded bytes match *this manifest* -- not that this manifest itself
+/// came from a real release rather than a compromised token/CI run/account.
+fn verify_update_manifest(manifest: &UpdateManifest) -> Result<()> {
+    let signature = manifest
+        .signature
+        .as_deref()
+        .context("update manifest has no signature -- refusing to trust an unsigned update")?;
+    let payload = update_manifest_signing_payload(
+        &manifest.version,
+        &manifest.download_url,
+        &manifest.sha256,
+    );
+    verify_with_embedded_key(&payload, signature)
+        .context("update manifest signature verification failed -- refusing to trust it")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn verify_linux_release_manifest(manifest: &LinuxReleaseManifest) -> Result<()> {
+    let signature = manifest.signature.as_deref().context(
+        "linux-release manifest has no signature -- refusing to trust an unsigned update",
+    )?;
+    let asset_tuples: Vec<(String, String, String)> = manifest
+        .assets
+        .iter()
+        .map(|asset| {
+            (
+                asset.name.clone(),
+                asset.sha256.clone(),
+                asset.download_url.clone(),
+            )
+        })
+        .collect();
+    let payload = linux_release_manifest_signing_payload(
+        &manifest.version,
+        &manifest.tag,
+        &manifest.repository,
+        &asset_tuples,
+    );
+    verify_with_embedded_key(&payload, signature)
+        .context("linux-release manifest signature verification failed -- refusing to trust it")
 }
 
 fn installer_file_name(url: &str) -> Option<String> {
@@ -562,27 +612,32 @@ fn select_linux_release_asset(manifest: &LinuxReleaseManifest) -> Option<&LinuxR
     let distro = detect_linux_distro_family();
     let arch = std::env::consts::ARCH.to_ascii_lowercase();
 
-    let mut candidates: Vec<&LinuxReleaseAsset> = manifest
+    select_linux_release_asset_for(manifest, &distro, &arch)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn select_linux_release_asset_for<'a>(
+    manifest: &'a LinuxReleaseManifest,
+    distro: &str,
+    arch: &str,
+) -> Option<&'a LinuxReleaseAsset> {
+    // The current Linux release pipeline only produces x86-64 packages.
+    // Refusing other architectures is safer than offering an incompatible
+    // artifact and failing later in the system package manager.
+    if arch != "x86_64" {
+        return None;
+    }
+
+    let candidates: Vec<&LinuxReleaseAsset> = manifest
         .assets
         .iter()
         .filter(|asset| {
             let name = asset.name.to_ascii_lowercase();
-            if name.ends_with(".src.rpm") {
-                return false;
-            }
-            if arch == "x86_64" {
-                name.contains("x86_64") || name.contains("amd64")
-            } else {
-                true
-            }
+            !name.ends_with(".src.rpm") && (name.contains("x86_64") || name.contains("amd64"))
         })
         .collect();
 
-    let preferred = match distro.as_str() {
-        "nixos" => candidates
-            .iter()
-            .find(|asset| asset.name.to_ascii_lowercase().contains("nix"))
-            .copied(),
+    match distro {
         "arch" => candidates
             .iter()
             .find(|asset| asset.name.to_ascii_lowercase().contains(".pkg.tar"))
@@ -595,13 +650,68 @@ fn select_linux_release_asset(manifest: &LinuxReleaseManifest) -> Option<&LinuxR
             .iter()
             .find(|asset| asset.name.to_ascii_lowercase().ends_with(".rpm"))
             .copied(),
+        // Nix packages deliberately disable the standalone updater through
+        // ARCTIC_PACKAGE_MANAGER=nix. A development/standalone binary has no
+        // safe way to install the published Nix tarball automatically.
+        "nixos" | "unknown" => None,
         _ => None,
-    };
+    }
+}
 
-    if preferred.is_some() {
-        return preferred;
+#[cfg(all(test, not(target_os = "windows")))]
+mod tests {
+    use super::*;
+
+    fn linux_manifest() -> LinuxReleaseManifest {
+        LinuxReleaseManifest {
+            version: "1.2.3".to_string(),
+            tag: "v1.2.3".to_string(),
+            repository: "ArcticLatent/Arctic-Helper".to_string(),
+            assets: [
+                "arctic-helper-1.2.3-amd64.deb",
+                "arctic-helper-1.2.3-x86_64.rpm",
+                "arctic-helper-1.2.3-x86_64.src.rpm",
+                "arctic-helper-1.2.3-x86_64.pkg.tar.zst",
+                "arctic-comfyui-helper-nix-x86_64.tar.gz",
+            ]
+            .into_iter()
+            .map(|name| LinuxReleaseAsset {
+                name: name.to_string(),
+                sha256: "abc".to_string(),
+                download_url: format!("https://example.invalid/{name}"),
+            })
+            .collect(),
+            signature: None,
+        }
     }
 
-    candidates.sort_by(|a, b| a.name.cmp(&b.name));
-    candidates.into_iter().next()
+    #[test]
+    fn selects_only_the_native_package_for_supported_distros() {
+        let manifest = linux_manifest();
+        let cases = [
+            ("debian", ".deb"),
+            ("fedora", ".rpm"),
+            ("arch", ".pkg.tar.zst"),
+        ];
+
+        for (distro, suffix) in cases {
+            let selected = select_linux_release_asset_for(&manifest, distro, "x86_64")
+                .expect("supported distro should have a matching package");
+            assert!(
+                selected.name.ends_with(suffix),
+                "selected {}",
+                selected.name
+            );
+            assert!(!selected.name.ends_with(".src.rpm"));
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_architectures_and_package_managers() {
+        let manifest = linux_manifest();
+
+        assert!(select_linux_release_asset_for(&manifest, "debian", "aarch64").is_none());
+        assert!(select_linux_release_asset_for(&manifest, "nixos", "x86_64").is_none());
+        assert!(select_linux_release_asset_for(&manifest, "unknown", "x86_64").is_none());
+    }
 }

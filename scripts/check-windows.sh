@@ -31,3 +31,20 @@ cargo +stable xwin clippy \
   "$@" \
   -- \
   -D warnings
+
+# scripts/build-release.ps1 and verify-release.ps1 run this tool directly on
+# the Windows release runner, so it needs to build for the target too.
+cargo +stable xwin check \
+  --locked \
+  --target "$target" \
+  --manifest-path tools/manifest-signer/Cargo.toml \
+  "$@"
+
+cargo +stable xwin clippy \
+  --locked \
+  --target "$target" \
+  --manifest-path tools/manifest-signer/Cargo.toml \
+  --all-targets \
+  "$@" \
+  -- \
+  -D warnings

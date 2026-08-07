@@ -229,6 +229,9 @@ Windows releases are built from this repository by
   `ArcticLatent/Arctic-Helper`.
 - `ARCTIC_SUPABASE_URL`
 - `ARCTIC_SUPABASE_PUBLISHABLE_KEY`
+- `ARCTIC_UPDATE_SIGNING_KEY`: the base64 Ed25519 private key used only while
+  generating the signed update manifest. See
+  [Update manifest signing](docs/cross-platform-development.md#update-manifest-signing).
 
 Tagging `vX.Y.Z` builds `Arctic-ComfyUI-Helper.exe`, verifies `update.json`, stores a
 workflow artifact, and uploads both files to the public release repository.

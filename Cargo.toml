@@ -6,11 +6,13 @@ rust-version = "1.76"
 authors = ["Arctic Latent"]
 
 [workspace]
-members = ["src-tauri"]
+members = ["src-tauri", "tools/manifest-signer"]
 resolver = "2"
 
 [workspace.dependencies]
 anyhow = "1"
+base64 = "0.22"
+ed25519-dalek = { version = "2", default-features = false }
 env_logger = "0.11"
 log = "0.4"
 open = "5"
@@ -24,8 +26,10 @@ tokio-util = "0.7"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 blake3 = "1"
 directories = "5"
+ed25519-dalek = { workspace = true, features = ["std"] }
 env_logger.workspace = true
 futures = "0.3"
 image = "0.25"

@@ -1,11 +1,13 @@
 {
   "type": "module",
   "scripts": {
-    "check:frontend": "node scripts/check-frontend.mjs && eslint \"src-tauri/dist/**/*.js\"",
+    "check:frontend": "node scripts/check-frontend.mjs && eslint \"src-tauri/dist/**/*.js\" && tsc -p jsconfig.json --noEmit",
+    "check:types": "tsc -p jsconfig.json --noEmit",
     "test:frontend": "node --test \"tests/frontend/*.test.js\""
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.10.1",
-    "eslint": "^10.3.0"
+    "eslint": "^10.3.0",
+    "typescript": "^7.0.2"
   }
 }

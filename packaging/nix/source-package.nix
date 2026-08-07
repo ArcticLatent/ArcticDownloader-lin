@@ -53,6 +53,10 @@ rustPlatform.buildRustPackage {
       ../../src-tauri/icons
       ../../src-tauri/src
       ../../src-tauri/tauri.conf.json
+      # Cargo resolves every workspace member before building the selected
+      # app manifest, so the release-only signer must be present in the
+      # filtered source closure even though it is not shipped in the package.
+      ../../tools/manifest-signer
       ../../vendor
       ../../README.public.md
       ../../packaging/linux/io.github.ArcticHelper.desktop

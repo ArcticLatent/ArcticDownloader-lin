@@ -78,17 +78,65 @@ second compile check on GitHub's native `windows-latest` runner.
   public release repository.
 - `ARCTIC_SUPABASE_URL`: catalog project URL embedded in the release build.
 - `ARCTIC_SUPABASE_PUBLISHABLE_KEY`: public read key embedded in the release build.
+- `ARCTIC_UPDATE_SIGNING_KEY`: private half of the update-manifest signing keypair. See
+  "Update manifest signing" below.
 
 Both Cargo manifests and `src-tauri/tauri.conf.json` must contain the release version.
 Push a matching `vX.Y.Z` tag, or run the workflow manually with `X.Y.Z`. The workflow:
 
 1. builds and checks `Arctic-ComfyUI-Helper.exe` on Windows;
-2. generates and verifies `update.json` against the public release URL and SHA-256;
+2. generates, signs, and verifies `update.json` against the public release URL and SHA-256;
 3. retains both as a GitHub Actions artifact;
 4. creates or updates the matching public release and uploads both files.
 
 MSI/NSIS installers can be added later with `cargo tauri build` on this same native runner.
 The standalone executable remains the current compatibility-preserving artifact.
+
+## Update manifest signing
+
+`src/updater.rs` checks a downloaded update package's SHA-256 against the hash in the
+manifest -- but until the manifest itself is authenticated, that hash only proves the
+download matches *the manifest*, not that the manifest came from a real release rather
+than a compromised `ARCTIC_RELEASE_TOKEN`, CI runner, or GitHub account. Both
+`update.json` (Windows, and the legacy Linux fallback) and `linux-release.json` now carry
+an Ed25519 `signature` field over their content, checked in `src/update_signing.rs`
+against a public key embedded in the binary. The app refuses to trust a manifest that is
+missing a signature or fails verification -- it fails closed, the same way a checksum
+mismatch does.
+
+- `src/update_signing.rs` holds the canonical byte-encoding both sides sign/verify
+  against (`update_manifest_signing_payload`, `linux_release_manifest_signing_payload`)
+  and the embedded public key. This is the only piece of the signing scheme that ships
+  in the app, and it only ever verifies.
+- `tools/manifest-signer` is a release-time-only CLI (workspace member, never shipped)
+  that does the signing. It depends on the root `arctic-downloader` crate for the same
+  payload-encoding functions, so the signer and the verifier can never disagree about
+  what bytes were actually signed.
+  - `manifest-signer keygen` -- generates a new keypair, printed once. Run this only to
+    create the very first key or to rotate it.
+  - `manifest-signer sign --format <update|linux-release> --manifest <path>` -- reads the
+    private key from `ARCTIC_UPDATE_SIGNING_KEY` (base64) and rewrites the manifest in
+    place with a `signature` field. Called from `scripts/build-release.ps1` and
+    `scripts/build-release-linux.sh` right after each manifest is generated.
+  - `manifest-signer verify --format <...> --manifest <path> [--pubkey <base64>]` --
+    checks a manifest the same way the app does, against the embedded key unless
+    `--pubkey` overrides it. Called from `scripts/verify-release.ps1` and
+    `scripts/verify-release-linux.sh` so a broken signing key fails the release build
+    instead of shipping an update the app will silently refuse.
+  - `manifest-signer merge-linux-release --base <path> --replacement <path> --output
+    <path> [--pubkey <base64>]` -- verifies an existing signed Linux manifest and
+    replaces only the package kinds present in the replacement. The Arch/AUR-only
+    release path uses this before signing so rebuilding an Arch package cannot remove
+    Debian, RPM, Flatpak, or Nix assets from the public update manifest. The optional
+    public key is reserved for isolated pipeline tests with a throwaway keypair.
+
+Rotating the key: run `keygen`, update the `ARCTIC_UPDATE_SIGNING_KEY` secret with the
+new private half, and ship a build with `UPDATE_MANIFEST_PUBLIC_KEY_B64` updated to the
+new public half *before* the next release is signed with the new key -- otherwise
+already-installed clients running the old public key can't verify it. `ARCTIC_UPDATE_PUBLIC_KEY`
+is a runtime environment-variable override of the embedded key, for testing the whole
+pipeline end to end against a throwaway keypair; it carries the same "requires control of
+the machine's environment" caveat as the existing `ARCTIC_UPDATE_MANIFEST_URL` override.
 
 ## Consolidation roadmap
 
@@ -181,6 +229,330 @@ duplicated code. Consolidate them incrementally:
    dedicated `gpu/` module would have been the same thing with extra ceremony.
    `gpu_detection_pending` and `is_nvidia_hopper_sm90` were checked too and are
    Linux-only with no Windows counterpart at all — not candidates, just unique code.
+
+   **Separately, readability-only**: `app_linux.rs` (and `app_windows.rs`) are still
+   ~6,800/6,100-line single files with no internal organization -- a real problem this
+   roadmap item didn't address, since it was asking "should GPU detection be shared
+   between platforms" (no) rather than "should Linux's own GPU detection live in its own
+   file within `app_linux/`" (yes, and it doesn't conflict with the answer above). The
+   Linux-only GPU-probing/caching block above -- `NvidiaGpuDetails`,
+   `detect_{nvidia,amd,intel}_gpu_details`, the `query_*_gpu_details_blocking` functions,
+   `gpu_detection_pending`, `is_nvidia_hopper_sm90`, and the two
+   `fake_*_allow_*_setup_enabled` test hooks -- moved into `app_linux/gpu_detection.rs`
+   as the first slice of this split, using Rust's 2018+ file-plus-sibling-directory
+   module convention (`app_linux.rs` stays as the module file; `app_linux/gpu_detection.rs`
+   is a submodule of it, no `mod.rs` rename needed). `app_linux.rs` re-exports
+   everything the rest of the file and `platform.rs` reference
+   (`pub(crate) use gpu_detection::{...};`), so no call site outside the two files
+   changed. One thing this surfaced: `driver_version`/`compute_capability` on
+   `NvidiaGpuDetails` were module-private, which was invisible as long as the struct and
+   its only other users (`comfy_install_recommendation_for` and its tests) shared one
+   file; splitting made that boundary real, so those two fields became `pub(crate)`
+   alongside `name`/`vram_mb` rather than newly inaccessible. The pre-existing
+   `#[cfg(test)] mod gpu_detection_tests` was itself a grab-bag, not purely about GPU
+   detection -- only one of its five tests actually tested detection code
+   (`find_nvidia_gpu_name_in_lspci`); that one moved with the code it tests, and the
+   remaining four (install-recommendation, torch-profile, HF-Xet-preflight tests that
+   merely take GPU details as input) stayed in `app_linux.rs` under the more accurate
+   name `install_recommendation_tests`.
+
+   **Second slice**: tray icon/menu/status handling (`TrayMenuItems`, `setup_tray`,
+   `update_tray_comfy_status`, `stopped_tray_icon`/`started_tray_icon`,
+   `tray_enabled_for_platform`) moved into `app_linux/tray.rs` the same way. Two things
+   worth noting for the next slice:
+   - `include_bytes!("../icons/...")` paths had to become `../../icons/...` --
+     one more directory deep from the new file. Easy to get wrong silently (a
+     missing icon degrades to a fallback rather than a compile error in some of
+     these call sites), so this is worth specifically checking, not just trusting
+     `cargo check` on any future `include_bytes!`/`include_str!` move.
+   - Both feature configurations need checking, not just the default one:
+     `cargo check`/`clippy --no-default-features` (the `desktop-tray` feature off)
+     caught unused imports and a `clippy::needless_return` that
+     `--all-targets` alone (default features) didn't, because the
+     `#[cfg(not(feature = "desktop-tray"))]` no-op variants of
+     `update_tray_comfy_status`/`setup_tray` only compile in that configuration.
+     Neither CI workflow currently runs `--no-default-features` -- this was
+     caught by hand, not by the existing checks. **Closed for Linux**:
+     `check-linux.yml` now runs check/clippy/test with `--no-default-features`
+     as well. **Not added for Windows**, and this isn't a gap to close the same
+     way: trying the identical flag through `cargo xwin check` immediately
+     failed with `unresolved import tauri::tray` -- `app_windows.rs`'s tray
+     code has no `#[cfg(feature = "desktop-tray")]` gating at all, unlike
+     Linux's. That's a real, pre-existing platform asymmetry (Windows always
+     ships tray support; only Linux/Flatpak builds without it), not something
+     introduced by this split and not something to paper over by adding a CI
+     check that would just fail. If Windows is ever meant to support running
+     without tray support, that needs the same `#[cfg(not(feature =
+     "desktop-tray"))]` treatment Linux already has -- real work, not a CI
+     wiring change -- and is out of scope here.
+
+   **Windows now has both slices too**, done as paired extractions rather than
+   finishing Linux end-to-end first: `app_windows/gpu_detection.rs` and
+   `app_windows/tray.rs`, mirroring `app_linux/`'s. Real differences worth
+   recording, not glossed over:
+   - Windows' `NvidiaGpuDetails` has no `compute_capability` field (already
+     known -- see the struct-diffing note earlier in this section -- and
+     confirmed again here rather than "fixed").
+   - Windows has no `gpu_detection_pending`/`is_nvidia_hopper_sm90`/
+     `fake_*_allow_*_setup_enabled` functions at all; `AppSnapshot`'s
+     `gpu_detection_pending` field is computed inline
+     (`nvidia.is_none() && amd.is_none() && intel.is_none()`) rather than
+     from dedicated probe-flag statics.
+   - `windows_rocm_supported_gpu`/`windows_xpu_supported_gpu` stayed in
+     `app_windows.rs`, not `gpu_detection.rs` -- pure GPU-name string
+     matching for install-profile selection, not detection/probing, the same
+     distinction that kept Linux's `comfy_install_recommendation_for` out of
+     `app_linux/gpu_detection.rs`.
+   - Windows' tray code has no `stopped_tray_icon` (it falls back to
+     `app.default_window_icon()` directly) and no `tray_enabled_for_platform`
+     (tray is unconditional -- see the `--no-default-features` note above).
+   - `NvidiaGpuDetails` isn't re-exported from `app_windows.rs` the way it is
+     from `app_linux.rs`: nothing outside `gpu_detection.rs` names the type
+     directly on Windows (only Linux's tests construct it as a literal), so
+     re-exporting it would just be an unused-import warning.
+   - Verification differs by necessity: Windows changes were checked with
+     `cargo xwin check`/`clippy` (cross-compiled from Linux, per "Check the
+     Windows build from Linux" above) since there's no way to run
+     `cargo test` for the Windows target from this environment -- the actual
+     Windows test suite only runs in `check-windows.yml` on a real
+     `windows-latest` runner.
+
+   **Third slice, deliberately narrow**: "install/custom-node management" turned out to
+   span most of both files once actually measured (~5,200 of `app_linux.rs`'s 6,558
+   lines; ~5,000 of `app_windows.rs`'s 5,831), scattered non-contiguously through each
+   file rather than sitting in one place -- this is what the step-3 note below already
+   found for install specifically ("genuine divergence accumulated over time, ... needs
+   real design work"). Moving all of it in one pass was rejected as too large a single
+   change to verify safely. What *did* move, to `app_*/custom_nodes.rs`: the built-in
+   `CUSTOM_NODES` table, `custom_node_spec`, `install_custom_node` (the generic
+   git-clone-plus-`pip install`-plus-`install.py` sequence), and
+   `install_named_custom_node`. This is the one piece of "install" that's genuinely
+   self-contained -- called from both the fresh-install path and the individual
+   enable/disable toggle, but doesn't itself reach back into either orchestrator. The
+   bespoke per-addon installers (InsightFace, Trellis2, Nunchaku -- each with its own
+   wheel-selection/GPU-branching logic) and the two orchestrators
+   (`run_comfyui_install[_linux]`, `apply_comfyui_component_toggle`) stay put for now.
+   One real, pre-existing behavioral difference this surfaced (already flagged in a
+   comment at the Windows definition, not something this pass introduced): Windows'
+   `install_custom_node` re-pins the `requests`/`urllib3`/`charset_normalizer`/`idna`
+   dependency stack (`reassert_requests_dependency_stack`) after every custom-node
+   install; Linux's does not.
+
+   **Fourth slice**: the per-addon installers themselves, to `app_*/addons.rs`. Linux:
+   `linux_wheel_url` (the huge profile/wheel-kind/Hopper match table), `install_linux_wheel_for_profile`,
+   `install_sageattention_linux`, `install_flashattention_linux`, `install_nunchaku_node_requirements`,
+   `install_insightface`, `uninstall_insightface`, `install_trellis2`, `uninstall_trellis2`, plus three
+   helpers (`prewarm_matplotlib_cache`, `insightface_present`,
+   `remove_insightface_site_packages_artifacts`) that turned out, once checked, to be called
+   from nowhere outside this set -- moved in as module-private rather than left `pub(crate)`
+   in the parent for a single caller. Windows: the equivalent
+   `install_insightface`/`install_insightface_variant`/`ensure_insightface_runtime_compat`/
+   `cleanup_tilde_site_packages`/`finalize_nunchaku_install`/`install_nunchaku_node_requirements`/
+   `uninstall_insightface`/`install_trellis2`/`uninstall_trellis2`.
+   **This is where "not a mirror" stopped being a caveat and became the headline finding**:
+   Windows' InsightFace path is roughly 3x the code of Linux's for the same feature. Linux
+   installs InsightFace from one precompiled wheel keyed by torch profile and Hopper-ness and
+   is done (`install_linux_wheel_for_profile`, shared with the attention-backend wheels).
+   Windows has no such wheel, so it pip-installs from source with an MSVC Build Tools
+   install-and-retry fallback (`install_insightface_variant`, `looks_like_missing_msvc_tools`,
+   left in the parent -- general toolchain concern, not addon-specific) and then a
+   numpy/opencv ABI-mismatch retry loop (`ensure_insightface_runtime_compat`) that Linux has
+   no equivalent of at all. Trellis2 pulls from a different upstream repo per platform
+   (`ArcticLatent/ComfyUI-TRELLIS2` + two more repos on Linux; `visualbruno/ComfyUI-Trellis2`
+   alone on Windows) with different prebuilt wheels. None of this was unified -- moving code
+   into a same-named file on each platform is not the same claim as the two files agreeing on
+   what the file contains, and this pair doesn't.
+   One privacy mechanic worth noting since it wasn't obvious going in: a plain (unmarked,
+   private) `fn` defined in `app_linux.rs`/`app_windows.rs` is already visible to
+   `app_linux::addons`/`app_windows::addons` without adding `pub(crate)` -- Rust's privacy
+   rule is "visible to the defining module and all its descendants," and a `mod addons;`
+   declared inside `app_linux.rs` makes `addons` a descendant, not a sibling, of `app_linux`.
+   Every general-purpose helper this slice depends on (`discover_uv_binary`,
+   `run_uv_pip_strict`, `profile_from_torch_env`, `clone_or_update_repo`, `pip_has_package`,
+   etc. on Linux; `run_uv_pip_strict`, `uv_pip_uninstall_best_effort`, `download_http_file`,
+   etc. on Windows) stayed at whatever visibility it already had and just worked via
+   `use super::{...}` -- confirmed empirically (both platforms compiled clean on the first
+   attempt after writing the new files), not just reasoned about after the fact.
+
+   **Fifth slice**: install-location management and state-reporting, to
+   `app_*/install_state.rs` -- `set_comfyui_install_base`, `list_comfyui_installations`,
+   `get_comfyui_addon_state` (plus their private `ComfyInstallationEntry`/`ComfyAddonState`
+   response structs, each used by nothing else). Distinct from `addons.rs`
+   (installing/uninstalling a specific addon) and from the orchestrators that remain in
+   `app_*.rs`: these three only read or record state, they don't mutate an installation.
+   Grep distance between these functions in the original file was misleading before
+   actually reading it -- `list_comfyui_installations` looked ~750 lines away from its
+   neighbors by line-number subtraction, but that gap was almost entirely unrelated
+   interleaved code (`resolve_root_path`, Python-venv discovery, GitHub release checks,
+   process-killing helpers -- runtime-plumbing candidates for a future slice), not the
+   function itself, which is ~70 lines. Don't trust `grep -n` distance as a size estimate
+   in these files; read the actual boundaries.
+   **New mechanic hit for the first time this slice, not seen in the first four**: all
+   three are `#[tauri::command]`s referenced by bare name in `generate_handler!` inside
+   `run()`. `docs` already recorded, for the `shared.rs` extractions, that the
+   `#[tauri::command]` macro's generated dispatch item isn't brought into scope by a plain
+   `use` of the function name -- only the qualified path resolves it. That rule turned out
+   to apply identically to a parent-to-submodule move like this one, not just cross-module:
+   `generate_handler!` entries became `install_state::set_comfyui_install_base` (etc.)
+   rather than a bare name relying on a `pub(crate) use` re-export. Since nothing else in
+   either file calls these three by name (each command's own definition was its only
+   occurrence before the move), no re-export was added at all -- confirmed compiling clean
+   on the first attempt on both platforms once the qualified paths were in place.
+   Real divergence preserved, not unified: Windows normalizes paths with
+   `strip_windows_verbatim_prefix` (stripping the `\\?\` prefix `std::fs::canonicalize`
+   adds on Windows) everywhere Linux uses `normalize_canonical_path`, and
+   `get_comfyui_addon_state` checks `pip_has_package` in addition to
+   `python_module_importable` for sage/flash presence on Windows, where Linux's checks
+   that only for nunchaku.
+
+   **Sixth slice**: ComfyUI runtime start/stop plumbing itself, to `app_*/runtime.rs` --
+   `resolve_root_path`, `start_comfyui_root_impl`, `spawn_comfyui_start_monitor`,
+   `spawn_comfyui_runtime_log_stream`, Python-interpreter discovery
+   (`python_for_root`/`python_exe_candidates_for_root`/`python_exe_works`/
+   `resolve_start_python_exe`/`python_exe_for_root`), `git_latest_release_tag` (+ Linux's
+   GitHub-API fallback chain: `GithubTagEntry`/`comfyui_origin_github_repo`/
+   `parse_github_repo_from_url`/`github_latest_release_tag`), process-killing
+   (`kill_python_processes_for_root`, plus Linux-only `comfyui_listener_running`/
+   `host_comfyui_running_for_needle`/`signal_host_pids`/`kill_host_comfyui_for_root` --
+   Windows kills by port/PowerShell process match instead, no equivalent helper set), and
+   `restart_comfyui_after_mutation`. `pip_has_package` stayed in the parent on both
+   platforms despite sitting in the middle of this code in the original file: it's already
+   consumed by `install_state.rs`/`addons.rs` via `use super::pip_has_package;`, and
+   nothing in this slice calls it, so moving it would only have added churn to two
+   already-verified files for no benefit -- not every function physically inside a
+   slice's line range belongs in the slice.
+   **The cfg-gated-duplicate trap the roadmap already warned about (see step 1's "before
+   extracting a function" rule) showed up for real here**, not just as a documented risk:
+   Windows' `kill_python_processes_for_root` has two definitions --
+   `#[cfg(target_os = "windows")]` (a real PowerShell `Get-CimInstance Win32_Process`
+   implementation matching by executable path or command-line substring) and
+   `#[cfg(not(target_os = "windows"))]` (an `Ok(false)` no-op, presumably a defensive stub
+   for this Windows-only file somehow being compiled elsewhere). `grep -n "^fn
+   kill_python_processes_for_root"` surfaces both immediately if you search for the exact
+   function name rather than trusting a single earlier match -- both moved together with
+   their original `#[cfg(...)]` attributes intact, rather than either the trap (silently
+   keeping only the no-op) or overcorrecting (merging them into one).
+   Real divergence preserved, not unified: Windows' `resolve_start_python_exe` self-heals
+   by bootstrapping a uv-managed Python runtime when no working interpreter is found;
+   Linux's just errors. Windows' `restart_comfyui_after_mutation` doesn't wait for ComfyUI
+   to finish starting before updating tray status; Linux's does. Windows has no GitHub-API
+   fallback for `git_latest_release_tag` at all -- only `git ls-remote`.
+   All six `#[tauri::command]`-registration/`platform.rs`-cross-reference/visibility
+   mechanics from the last two slices repeated cleanly here with no new surprises: both
+   platforms compiled with only unused-import warnings (no errors) on the first attempt
+   after writing each new file, fixed by trimming now-redundant entries from each parent's
+   top-level `use` blocks.
+
+   **Seventh and final slice**: the install/toggle orchestrators themselves, to
+   `app_*/install.rs` -- `run_comfyui_install`/`run_comfyui_install_linux`,
+   `start_comfyui_install`, `apply_comfyui_component_toggle`. This was the piece flagged
+   repeatedly, in this doc and out loud while working through the rest, as needing
+   "investigate first, maybe don't extract" rather than an assumed-easy mechanical move --
+   it's exactly the code step 3 below already found to be "genuine divergence accumulated
+   over time, not surface duplication" when it was checked for a *shared* extraction. That
+   finding was about whether the two platforms' logic could become *one* implementation
+   (no); it was never a finding about whether each platform's *own* version could still
+   move into its own file, which is the only thing every slice in this list has ever done.
+   Once actually read end to end on both sides (not skimmed), the same-platform move turned
+   out to carry the same mechanical risk as every other slice and no more -- large, but not
+   entangled with anything outside itself.
+   **Scale, to calibrate against the other six slices**: `run_comfyui_install` alone is
+   ~510 lines on Linux and ~650 on Windows -- bigger than any single function extracted
+   so far, and this doc's own earlier slice already got the "grep distance is not the same
+   as function size" lesson backwards once (assumed small, was large); here it's the
+   opposite miscalibration risk (assumed unmanageably large, turned out to be one cleanly
+   bounded function per platform, not scattered).
+   Divergence reconfirmed by direct reading, not by trusting the standing claim: Windows'
+   `run_comfyui_install` validates SageAttention3 against RTX 50-series GPUs, branches on
+   ROCm/XPU/CUDA torch stacks, migrates a legacy nested `ComfyUI/ComfyUI` layout, and
+   writes its own `install.log` -- none of which Linux's version does at all. Windows'
+   `start_comfyui_install` uses `spawn_blocking` (with a comment explaining exactly why:
+   the install function is long-running and fully synchronous, so `spawn` would starve
+   other async work on the runtime's worker threads); Linux's uses plain `spawn` and never
+   needed that reasoning written down because the difference was never noticed as a
+   difference until this pass read both side by side. Windows never sets
+   `comfyui_torch_profile` after a fresh install; Linux always does. Windows'
+   `selected_attention_backend` returns `Option<&str>`; Linux's returns `&str` (both
+   already on record from step 3, reconfirmed here). Windows' `apply_comfyui_component_toggle`
+   additionally validates CUDA-only addons against ROCm/XPU profiles and re-checks the
+   Trellis2 torch-profile requirement at toggle time; Linux's toggle path has neither check.
+   None of this was touched -- every difference above is preserved verbatim in the new files.
+   Same `#[tauri::command]`-qualified-path mechanic as the last two slices, applied to two
+   more commands per platform; no new mechanics needed. Both platforms compiled with only
+   unused-import warnings (no errors) on the first attempt after writing each new file.
+
+   **Eighth slice, a targeted fix plus one more extraction, done after the "seven-piece
+   shape" above was declared complete**: two things surfaced once the top-level files were
+   actually re-read rather than assumed finished.
+   First, an oversight in the sixth slice: `start_comfyui_root_impl` had moved to
+   `runtime.rs` but its counterpart `stop_comfyui_root_impl` had not, left behind in each
+   top-level file with a stale re-export comment implying otherwise. Fixed by moving both
+   platforms' `stop_comfyui_root_impl` (and Windows' single-caller
+   `kill_listener_process_on_port` helper, `#[cfg(target_os = "windows")]`) into
+   `runtime.rs` alongside their `start_*` counterpart, updating each parent's
+   `pub(crate) use runtime::{...}` list.
+   Second, the torch/Python environment utility group, to `app_*/torch_env.rs` --
+   uv/pip plumbing, attention-backend package install/cleanup, torch-profile
+   detection/enforcement, CUDA runtime library-path discovery (Linux) or local-uv
+   bootstrap/download (Windows), and the launch-arg/env assembly consumed when starting
+   ComfyUI. This is core shared infrastructure depended on by every other slice above, not
+   a new orchestrator -- moving it was mechanical (confirm callers, mark `pub(crate)`,
+   re-export, verify) even though the group itself is large (~30 functions, ~700 lines on
+   Linux).
+   **First real asymmetry in *shape* between the two platforms' slices, not just
+   content**: every prior slice's Linux and Windows halves lived in one contiguous block
+   each. This one didn't on Windows -- `ensure_uv_python_installed` through
+   `comfyui_launch_args` was one contiguous ~700-line block as expected, but
+   `python_module_importable`, `python_module_import_error`, and `nunchaku_backend_present`
+   lived ~450 lines further down, separated by several unrelated `#[tauri::command]`s
+   (`set_comfyui_root`, `check_updates_now`, `download_lora_asset`, `open_folder`, etc.)
+   and by `pip_has_package` (which, like Linux's `pip_has_package`, deliberately stayed in
+   the parent rather than moving -- nothing in this module calls it, and it's already
+   consumed elsewhere via `use super::pip_has_package;`). All three scattered functions
+   moved into the same `torch_env.rs` as the contiguous block regardless, since that's
+   where they belong logically and Linux's equivalents live there too; physical distance
+   in the original file was not a reason to split them into a second module.
+   **`python_module_import_error` looked like dead code on first grep** (zero call sites
+   in `app_windows.rs` itself) **until the submodule search widened to `app_windows/*.rs`**,
+   which found it consumed by `addons.rs` via `use super::{...}` -- a reminder that
+   "unused" has to be checked crate-wide, not just within the file being read, especially
+   once a directory-module split like this one is already in place and half the callers
+   live one level down.
+   Two visibility fixes needed once compiled: `apply_torch_allocator_env_compat` (a
+   `shared.rs` function) was being re-exported into `runtime.rs` transitively through the
+   parent's own `use crate::shared::{...}` block rather than imported directly -- moving
+   the torch/Python group made that block's copy unused, which would have broken
+   `runtime.rs`'s `use super::apply_torch_allocator_env_compat;` if left as a dangling
+   re-export; fixed by having `runtime.rs` import it straight from `crate::shared` instead,
+   on both platforms. And `ComfyInstallRequest` (defined in each top-level file, previously
+   plain `struct`) needed to become `pub(crate) struct` on both platforms, since
+   `selected_attention_backend` -- itself needing `pub(crate)` for cross-module callers --
+   takes it by reference and Rust's `private_interfaces` lint flags a public-enough function
+   exposing a less-visible type in its signature.
+   Divergence reconfirmed by direct reading, not touched: Windows' `torch_profile_from_versions`
+   takes four version strings (torch/cuda/hip/xpu) where Linux's takes two (cuda/hip/xpu
+   already folded into one field by the caller); Windows' `selected_attention_backend`
+   returns `Option<&'static str>` where Linux's returns `&'static str` (both already on
+   record from the third and seventh slices, reconfirmed here); Windows has no equivalent
+   of Linux's `force_cleanup_attention_backends`/`remove_site_packages_artifacts_with_markers`
+   site-packages sweep at all; and Windows carries an entire ROCm/XPU non-uv install path
+   (`install_windows_rocm_torch_stack`, `install_windows_xpu_torch_stack`,
+   `windows_rocm_sdk_*_packages`) that Linux has no counterpart for -- Linux's ROCm/XPU
+   support is just a different `torch_profile_to_packages_linux` index URL, still installed
+   through the normal uv path.
+
+   **This closes out the roadmap items originally listed as remaining candidates.** Both
+   `app_linux.rs` and `app_windows.rs` have gone from one undifferentiated file each to a
+   directory module with the same eight-piece shape: `gpu_detection.rs`, `tray.rs`,
+   `custom_nodes.rs`, `addons.rs`, `install_state.rs`, `runtime.rs`, `install.rs`,
+   `torch_env.rs`, plus whatever remains in the top-level file itself (the
+   `run()`/`generate_handler!` wiring, the handful of small standalone Tauri commands never
+   large enough to justify their own file, and the process-management/GitHub-release
+   helpers noted as a candidate in the sixth slice above but not yet acted on). That last
+   group -- and anything discovered by actually reading the remaining file rather than
+   assuming it's now "just wiring" -- is the next candidate if this gets picked up again;
+   check with the same rigor as every slice above rather than assuming what's left is
+   trivial just because the obvious pieces are gone.
 3. Move ComfyUI install/runtime operations into platform adapters behind shared commands.
    **Started, scoped to runtime start/stop/status only** — install was investigated and
    found not to fit this round (see below). The runtime orchestration functions

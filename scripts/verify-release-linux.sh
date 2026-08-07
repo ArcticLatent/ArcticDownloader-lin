@@ -94,6 +94,10 @@ for asset in "${listed_assets[@]}"; do
   fi
 done
 
+echo "Verifying release manifest signature ..."
+(cd "$ROOT_DIR" && cargo run --quiet --release --manifest-path tools/manifest-signer/Cargo.toml -- \
+  verify --format linux-release --manifest "$MANIFEST")
+
 echo "Release artifacts verified:"
 echo "  Output:    $OUT_DIR"
 echo "  Manifest:  $MANIFEST"

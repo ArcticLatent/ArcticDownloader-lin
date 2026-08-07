@@ -160,8 +160,22 @@ $manifest = [ordered]@{
 $manifestJson = $manifest | ConvertTo-Json -Depth 4
 $manifestPath = Join-Path $root "update.json"
 $manifestDistPath = Join-Path $root "$OutputDir\update.json"
-$manifestJson | Set-Content -Path $manifestPath -Encoding utf8
 $manifestJson | Set-Content -Path $manifestDistPath -Encoding utf8
+
+Write-Host "Signing update manifest..."
+if (-not $env:ARCTIC_UPDATE_SIGNING_KEY) {
+    throw "ARCTIC_UPDATE_SIGNING_KEY is not set. Run 'cargo run --manifest-path tools/manifest-signer/Cargo.toml -- keygen' once and store the printed private key as this secret/env var before releasing -- the app refuses to trust an unsigned update manifest."
+}
+$signerManifest = Join-Path $root "tools\manifest-signer\Cargo.toml"
+& $cargo run --quiet --release --manifest-path $signerManifest -- sign --format update --manifest $manifestDistPath
+if ($LASTEXITCODE -ne 0) {
+    throw "manifest-signer sign failed"
+}
+
+# Keep the root-level copy identical (and signed) rather than writing an
+# unsigned duplicate that nothing publishes but could be confused for the
+# real one.
+Copy-Item -Path $manifestDistPath -Destination $manifestPath -Force
 
 if ($resolvedNotesFile) {
     $notesDistPath = Join-Path $distDir "release-notes-$Tag.md"

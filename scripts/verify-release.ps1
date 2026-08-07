@@ -54,6 +54,13 @@ if ($manifestSha -ne $expectedSha) {
     throw "Manifest sha256 '$manifestSha' does not match release asset sha256 '$expectedSha'"
 }
 
+Write-Host "Verifying release manifest signature ..."
+$signerManifest = Join-Path $root "tools\manifest-signer\Cargo.toml"
+& cargo run --quiet --release --manifest-path $signerManifest -- verify --format update --manifest $manifestPath
+if ($LASTEXITCODE -ne 0) {
+    throw "manifest-signer verify failed -- the app will refuse to trust this manifest"
+}
+
 Write-Host "Release artifacts verified:"
 Write-Host "  Asset:     $assetPath"
 Write-Host "  Manifest:  $manifestPath"

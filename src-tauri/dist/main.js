@@ -25,7 +25,11 @@ const {
 
 const catalogFeature = createCatalogFeature({
   logLine,
-  updateDownloadButtons: (...args) => updateDownloadButtons(...args),
+  // Forward reference: createDownloadProgress() (below) hasn't run yet, but
+  // this trampoline is only ever called from async callbacks, by which
+  // point the const below has been assigned. updateDownloadButtons() itself
+  // takes no arguments -- match that here rather than forwarding a spread.
+  updateDownloadButtons: () => updateDownloadButtons(),
 });
 const {
   catalogHasContent,

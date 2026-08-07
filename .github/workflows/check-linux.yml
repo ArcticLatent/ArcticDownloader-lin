@@ -10,6 +10,42 @@ permissions:
   contents: read
 
 jobs:
+  nix-package:
+    name: Build Nix package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+
+      # Cargo checks do not exercise the fileset used by source-package.nix.
+      # Build the real derivation so a new workspace member or packaged file
+      # cannot be omitted from the Nix source closure unnoticed.
+      - name: Build packaged application
+        run: nix build .#arctic-comfyui-helper --no-link --print-build-logs
+
+  audit:
+    name: Audit dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Downloads a prebuilt cargo-audit binary instead of compiling one,
+      # so this job stays fast on every PR/push.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      # Scans Cargo.lock against the RustSec advisory database. Cargo.lock
+      # is shared across both platform crates (see workspace.dependencies
+      # in the root Cargo.toml), so one run here covers the Windows build too.
+      # `unmaintained`/`unsound` informational advisories stay warn-only
+      # (cargo-audit's default); only actual vulnerabilities fail the job.
+      - name: Run cargo audit
+        run: cargo audit
+
   check:
     runs-on: ubuntu-latest
     steps:
@@ -64,6 +100,31 @@ jobs:
       - name: Lint Linux application
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
+      # `desktop-tray` is on by default (see src-tauri/Cargo.toml), so the
+      # check above never compiles the `#[cfg(not(feature = "desktop-tray"))]`
+      # no-op branches in app_linux/tray.rs, which only exist without it. A
+      # gap here already let a real unused-import/needless-return pair
+      # through unnoticed once (see docs/cross-platform-development.md).
+      # Linux-only: app_windows.rs's tray code isn't feature-gated at all
+      # (confirmed by trying this same flag through the Windows cross-check
+      # -- it fails to compile there, a real pre-existing platform asymmetry,
+      # not something to "fix" here), so there is no equivalent to add on
+      # the Windows side.
+      - name: Check Linux application (desktop-tray disabled)
+        run: cargo check --locked --no-default-features --manifest-path src-tauri/Cargo.toml
+
+      - name: Lint Linux application (desktop-tray disabled)
+        run: cargo clippy --locked --no-default-features --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # Release-time only (see tools/manifest-signer/src/main.rs) but not
+      # part of either app manifest-path above, so it needs its own check --
+      # a break here would silently fail the next release instead of CI.
+      - name: Check manifest-signer tool
+        run: cargo check --locked --manifest-path tools/manifest-signer/Cargo.toml --all-targets
+
+      - name: Lint manifest-signer tool
+        run: cargo clippy --locked --manifest-path tools/manifest-signer/Cargo.toml --all-targets -- -D warnings
+
       - name: Check frontend JavaScript
         run: npm run check:frontend
 
@@ -75,3 +136,9 @@ jobs:
 
       - name: Test Linux backend
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Test Linux backend (desktop-tray disabled)
+        run: cargo test --locked --no-default-features --manifest-path src-tauri/Cargo.toml
+
+      - name: Test manifest-signer tool
+        run: cargo test --locked --manifest-path tools/manifest-signer/Cargo.toml

@@ -20,6 +20,14 @@ AUR_REPO_DIR="${HOME}/aur/arctic-comfyui-helper-bin"
 DEB_SUDO_PASSWORD="${ARCTIC_DEB_SUDO_PASSWORD:-}"
 RPM_SUDO_PASSWORD="${ARCTIC_RPM_SUDO_PASSWORD:-}"
 ARCH_SUDO_PASSWORD="${ARCTIC_ARCH_SUDO_PASSWORD:-}"
+ARCH_AUR_BASE_DIR=""
+
+cleanup() {
+  if [[ -n "$ARCH_AUR_BASE_DIR" && -d "$ARCH_AUR_BASE_DIR" ]]; then
+    rm -rf "$ARCH_AUR_BASE_DIR"
+  fi
+}
+trap cleanup EXIT
 
 usage() {
   cat <<'USAGE'
@@ -267,6 +275,19 @@ fi
 if ((PUBLISH_AUR == 1)); then
   require_cmd git
   require_cmd ssh
+fi
+
+# An Arch-only rebuild must preserve the other platform assets already in the
+# signed Linux manifest. Save the existing metadata outside dist/ before the
+# clean build removes it; the signer verifies it before merging below.
+if ((ARCH_AUR_ONLY == 1)) && gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+  ARCH_AUR_BASE_DIR="$(mktemp -d)"
+  if gh release download "$TAG" --repo "$REPOSITORY" --pattern 'linux-release.json' --dir "$ARCH_AUR_BASE_DIR" >/dev/null 2>&1; then
+    gh release download "$TAG" --repo "$REPOSITORY" --pattern 'SHA256SUMS' --dir "$ARCH_AUR_BASE_DIR" >/dev/null 2>&1 || true
+    echo "Existing Linux release metadata saved for the Arch-only merge."
+  else
+    echo "No existing Linux release manifest found; creating an Arch-only manifest."
+  fi
 fi
 
 run_aur_git() {
@@ -643,6 +664,16 @@ fi
   sha256sum "${copied[@]}" > SHA256SUMS
 )
 
+if ((ARCH_AUR_ONLY == 1)) && [[ -n "$ARCH_AUR_BASE_DIR" && -f "$ARCH_AUR_BASE_DIR/SHA256SUMS" ]]; then
+  current_sums="$(mktemp)"
+  merged_sums="$(mktemp)"
+  cp "$OUT_ABS_DIR/SHA256SUMS" "$current_sums"
+  awk '$2 !~ /\.pkg\.tar/' "$ARCH_AUR_BASE_DIR/SHA256SUMS" > "$merged_sums"
+  cat "$current_sums" >> "$merged_sums"
+  sort -k2,2 -u "$merged_sums" > "$OUT_ABS_DIR/SHA256SUMS"
+  rm -f "$current_sums" "$merged_sums"
+fi
+
 manifest="$OUT_ABS_DIR/linux-release.json"
 {
   echo "{"
@@ -665,6 +696,26 @@ manifest="$OUT_ABS_DIR/linux-release.json"
   echo "}"
 } > "$manifest"
 
+if ((ARCH_AUR_ONLY == 1)) && [[ -n "$ARCH_AUR_BASE_DIR" && -f "$ARCH_AUR_BASE_DIR/linux-release.json" ]]; then
+  echo "Merging the rebuilt Arch asset into the existing Linux release manifest ..."
+  (cd "$ROOT_DIR" && cargo run --quiet --release --manifest-path tools/manifest-signer/Cargo.toml -- \
+    merge-linux-release \
+    --base "$ARCH_AUR_BASE_DIR/linux-release.json" \
+    --replacement "$manifest" \
+    --output "$manifest")
+fi
+
+echo "Signing release manifest ..."
+if [[ -z "${ARCTIC_UPDATE_SIGNING_KEY:-}" ]]; then
+  echo "ARCTIC_UPDATE_SIGNING_KEY is not set in the environment." >&2
+  echo "Run 'cargo run --manifest-path tools/manifest-signer/Cargo.toml -- keygen' once and store" >&2
+  echo "the printed private key as ARCTIC_UPDATE_SIGNING_KEY before releasing -- the app refuses" >&2
+  echo "to trust an unsigned update manifest." >&2
+  exit 1
+fi
+(cd "$ROOT_DIR" && cargo run --quiet --release --manifest-path tools/manifest-signer/Cargo.toml -- \
+  sign --format linux-release --manifest "$manifest")
+
 echo "Build release artifacts complete:"
 echo "  Output: $OUT_ABS_DIR"
 echo "  Manifest: $manifest"
@@ -673,7 +724,10 @@ echo "  Checksums: $OUT_ABS_DIR/SHA256SUMS"
   if ((PUBLISH_GITHUB == 1)); then
   echo "Publishing GitHub release '$TAG' to '$REPOSITORY' ..."
   if ((ARCH_AUR_ONLY == 1)); then
-    mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f -name '*.pkg.tar.*' | sort)
+    # Replacing the Arch package changes its checksum, so publish the newly
+    # signed manifest and checksum list with it. Leaving the old metadata on
+    # the release would make the updater reject the replacement package.
+    mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name 'SHA256SUMS' -o -name 'linux-release.json' \) | sort)
   else
     mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' -o -name 'arctic-comfyui-helper-nix-*.tar.gz' -o -name 'arctic-comfyui-helper-*-nixos-*.tar.gz' -o -name 'SHA256SUMS' -o -name 'linux-release.json' \) | sort)
   fi
