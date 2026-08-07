@@ -272,10 +272,10 @@ bash ./scripts/publish-release-all.sh --version 0.2.6
 
 The command prompts once for the local manifest-signing key when needed and
 once for confirmation. It rehearses Windows without publishing, builds and
-verifies Linux, publishes GitHub and AUR assets, tags the source, waits for the
-native Windows publisher, and verifies the downloaded public release. Add
-`--yes` to skip the confirmation, `--skip-aur` when AUR is intentionally out of
-scope, or `--resume` after inspecting a partially completed release.
+verifies Linux, publishes the GitHub assets (including the native Arch
+`.pkg.tar.*` package), tags the source, waits for the native Windows publisher,
+and verifies the downloaded public release. Add `--yes` to skip the
+confirmation or `--resume` after inspecting a partially completed release.
 
 For a Linux-only release, use:
 
@@ -291,8 +291,8 @@ container profile. It creates the `arctic-arch`, `arctic-ubuntu`, and
 packages are built inside the Arch container instead of assuming the NixOS
 host provides `makepkg` and an Arch package database.
 
-By default this publishes to `ArcticLatent/Arctic-Helper` and updates the AUR
-binary package.
+This publishes to `ArcticLatent/Arctic-Helper`. The Arch `.pkg.tar.*` package
+is a normal signed-manifest release asset and does not depend on AUR availability.
 It will:
 1. Prompt for version (example: `0.1.1`)
 2. Prompt for release notes (end with `END` line)

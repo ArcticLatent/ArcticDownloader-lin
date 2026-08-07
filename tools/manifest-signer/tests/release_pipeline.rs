@@ -63,7 +63,7 @@ fn write_manifest(path: &Path, assets: Value) {
 }
 
 #[test]
-fn aur_only_release_replaces_arch_and_preserves_other_signed_assets() {
+fn arch_only_release_replaces_arch_and_preserves_other_signed_assets() {
     let test_dir = TestDir::new();
     let base = test_dir.path("base.json");
     let replacement = test_dir.path("arch-replacement.json");

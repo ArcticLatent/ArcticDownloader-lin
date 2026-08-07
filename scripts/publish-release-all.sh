@@ -8,7 +8,6 @@ SOURCE_BRANCH="main"
 WINDOWS_WORKFLOW="release-windows.yml"
 OUTPUT_DIR="dist"
 NOTES_FILE=""
-SKIP_AUR=0
 SKIP_WINDOWS_REHEARSAL=0
 ASSUME_YES=0
 RESUME=0
@@ -22,15 +21,13 @@ Usage:
 
 Builds, verifies, and publishes a complete Linux and Windows release. The
 script performs a non-publishing Windows rehearsal first, publishes Linux and
-AUR artifacts, commits generated AUR metadata, creates the source tag, waits
-for the tag-triggered Windows publication, and verifies the downloaded public
-release.
+Arch package assets, creates the source tag, waits for the tag-triggered
+Windows publication, and verifies the downloaded public release.
 
 Options:
   --version <x.y.z>      Required release version.
   --notes-file <path>    Release notes (default: CHANGELOG_<version>.md).
   --output-dir <path>    Linux artifact directory (default: dist).
-  --skip-aur             Publish GitHub assets without updating AUR.
   --skip-windows-rehearsal
                          Skip the initial non-publishing Windows build.
   --resume               Continue a partially published release/tag.
@@ -74,10 +71,6 @@ while (($# > 0)); do
     --output-dir)
       OUTPUT_DIR="${2:-}"
       shift 2
-      ;;
-    --skip-aur)
-      SKIP_AUR=1
-      shift
       ;;
     --skip-windows-rehearsal)
       SKIP_WINDOWS_REHEARSAL=1
@@ -124,20 +117,14 @@ fi
 for command_name in bash gh git nix; do
   require_cmd "$command_name"
 done
-if ((SKIP_AUR == 0)); then
-  require_cmd ssh
-fi
 
 current_branch="$(git branch --show-current)"
 [[ "$current_branch" == "$SOURCE_BRANCH" ]] || fail "run from branch '$SOURCE_BRANCH' (current: '$current_branch')"
 
-allowed_resume_changes='^ M packaging/aur-bin/(PKGBUILD|\.SRCINFO)$'
 worktree_status="$(git status --porcelain --untracked-files=all)"
 if [[ -n "$worktree_status" ]]; then
-  if ((RESUME == 0)) || [[ -n "$(printf '%s\n' "$worktree_status" | grep -Ev "$allowed_resume_changes" || true)" ]]; then
-    printf '%s\n' "$worktree_status" >&2
-    fail "the source worktree must be clean (only generated AUR metadata is allowed with --resume)"
-  fi
+  printf '%s\n' "$worktree_status" >&2
+  fail "the source worktree must be clean"
 fi
 
 echo "Checking source branch and GitHub access ..."
@@ -207,23 +194,10 @@ if [[ -z "${ARCTIC_UPDATE_SIGNING_KEY:-}" ]]; then
 fi
 [[ -n "$ARCTIC_UPDATE_SIGNING_KEY" ]] || fail "ARCTIC_UPDATE_SIGNING_KEY is empty"
 
-if ((SKIP_AUR == 0)); then
-  echo "Checking AUR access ..."
-  if [[ -f "$HOME/.ssh/id_ed25519_aur" ]]; then
-    GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_ed25519_aur -o IdentitiesOnly=yes" \
-      git ls-remote ssh://aur@aur.archlinux.org/arctic-comfyui-helper-bin.git >/dev/null
-  else
-    git ls-remote ssh://aur@aur.archlinux.org/arctic-comfyui-helper-bin.git >/dev/null
-  fi
-fi
-
 if ((ASSUME_YES == 0)); then
   echo
   echo "This will publish $TAG to $RELEASE_REPOSITORY"
   echo "from $SOURCE_REPOSITORY@$local_head."
-  if ((SKIP_AUR == 0)); then
-    echo "It will also update arctic-comfyui-helper-bin on AUR."
-  fi
   read -r -p "Type 'publish $TAG' to continue: " confirmation
   [[ "$confirmation" == "publish $TAG" ]] || fail "confirmation did not match"
 fi
@@ -327,25 +301,7 @@ linux_args=(
   --output-dir "$OUTPUT_DIR"
   --notes-file "$NOTES_FILE"
 )
-if ((SKIP_AUR == 1)); then
-  linux_args+=(--skip-aur)
-fi
 nix develop -c bash scripts/release-linux.sh "${linux_args[@]}"
-
-if ((SKIP_AUR == 0)); then
-  unexpected_changes="$(git status --porcelain --untracked-files=all | grep -Ev '^ M packaging/aur-bin/(PKGBUILD|\.SRCINFO)$' || true)"
-  if [[ -n "$unexpected_changes" ]]; then
-    printf '%s\n' "$unexpected_changes" >&2
-    fail "the Linux build changed unexpected source files; inspect before tagging"
-  fi
-  git add packaging/aur-bin/PKGBUILD packaging/aur-bin/.SRCINFO
-  if ! git diff --cached --quiet; then
-    git commit -m "Update AUR metadata for $TAG"
-    git push origin "$SOURCE_BRANCH"
-    local_head="$(git rev-parse HEAD)"
-    echo "Generated AUR metadata committed at $local_head."
-  fi
-fi
 
 known_runs="$TEMP_DIR/windows-runs-before-publish"
 capture_windows_runs "$known_runs"

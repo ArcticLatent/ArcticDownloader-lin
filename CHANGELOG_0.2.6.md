@@ -27,3 +27,4 @@
 - Corrected the declared Rust minimum version and Linux desktop metadata validation.
 - Hardened release builds to require and verify signed update manifests before they can be published.
 - Added a guarded one-command publisher for rehearsing, publishing, tagging, and verifying Linux and Windows releases.
+- Removed AUR from the release path so outages cannot block the native Arch package or other platform releases.

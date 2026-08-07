@@ -8,24 +8,20 @@ OUTPUT_DIR="dist"
 NOTES_FILE=""
 SKIP_CLEAN=0
 PUBLISH_GITHUB=0
-PUBLISH_AUR=0
-ARCH_AUR_ONLY=0
+ARCH_ONLY=0
 ASSEMBLE_ONLY=0
 ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
 RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
-AUR_PACKAGE="arctic-comfyui-helper-bin"
-AUR_PKGREL="1"
-AUR_REPO_DIR="${HOME}/aur/arctic-comfyui-helper-bin"
 DEB_SUDO_PASSWORD="${ARCTIC_DEB_SUDO_PASSWORD:-}"
 RPM_SUDO_PASSWORD="${ARCTIC_RPM_SUDO_PASSWORD:-}"
 ARCH_SUDO_PASSWORD="${ARCTIC_ARCH_SUDO_PASSWORD:-}"
-ARCH_AUR_BASE_DIR=""
+ARCH_BASE_DIR=""
 MANIFEST_TMP=""
 
 cleanup() {
-  if [[ -n "$ARCH_AUR_BASE_DIR" && -d "$ARCH_AUR_BASE_DIR" ]]; then
-    rm -rf "$ARCH_AUR_BASE_DIR"
+  if [[ -n "$ARCH_BASE_DIR" && -d "$ARCH_BASE_DIR" ]]; then
+    rm -rf "$ARCH_BASE_DIR"
   fi
   if [[ -n "$MANIFEST_TMP" ]]; then
     rm -f "$MANIFEST_TMP"
@@ -50,16 +46,11 @@ Options:
   --assemble-only        Reuse package artifacts already present in packaging/out.
                          Rebuild Nix assets, checksums, and the release manifest.
   --publish-github       Create/update the GitHub release and upload built assets.
-  --publish-aur          Update and push the AUR binary package metadata.
-  --publish-all          Publish both GitHub release assets and the AUR package.
-  --archaur             Build only the Arch package, upload that Arch asset to GitHub, and update AUR.
+  --arch-only            Build only the native Arch package and update its GitHub release asset.
   --arch-distrobox <name>
                          Arch package build container (default: arctic-arch).
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
   --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
-  --aur-package <name>   AUR package name to update (default: arctic-comfyui-helper-bin).
-  --aur-pkgrel <n>       AUR pkgrel value (default: 1).
-  --aur-repo-dir <path>  Local AUR git repo checkout (default: ~/aur/arctic-comfyui-helper-bin).
   Environment variables for non-interactive sudo:
     ARCTIC_ARCH_SUDO_PASSWORD
     ARCTIC_DEB_SUDO_PASSWORD
@@ -131,19 +122,9 @@ while (($# > 0)); do
       PUBLISH_GITHUB=1
       shift
       ;;
-    --publish-aur)
-      PUBLISH_AUR=1
-      shift
-      ;;
-    --publish-all)
+    --arch-only)
+      ARCH_ONLY=1
       PUBLISH_GITHUB=1
-      PUBLISH_AUR=1
-      shift
-      ;;
-    --archaur)
-      ARCH_AUR_ONLY=1
-      PUBLISH_GITHUB=1
-      PUBLISH_AUR=1
       shift
       ;;
     --arch-distrobox)
@@ -156,18 +137,6 @@ while (($# > 0)); do
       ;;
     --rpm-distrobox)
       RPM_DISTROBOX="${2:-}"
-      shift 2
-      ;;
-    --aur-package)
-      AUR_PACKAGE="${2:-}"
-      shift 2
-      ;;
-    --aur-pkgrel)
-      AUR_PKGREL="${2:-}"
-      shift 2
-      ;;
-    --aur-repo-dir)
-      AUR_REPO_DIR="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -192,11 +161,6 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Version must be semantic version x.y.z" >&2
   exit 1
 fi
-if [[ ! "$AUR_PKGREL" =~ ^[0-9]+$ ]]; then
-  echo "AUR pkgrel must be a positive integer" >&2
-  exit 1
-fi
-
 if [[ -z "$TAG" ]]; then
   TAG="v$VERSION"
 fi
@@ -204,7 +168,6 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGING_DIR="$ROOT_DIR/packaging"
 OUT_ABS_DIR="$ROOT_DIR/$OUTPUT_DIR"
-AUR_REPO_DIR="${AUR_REPO_DIR/#\~/$HOME}"
 
 load_public_catalog_env() {
   local env_file="${ARCTIC_ENV_FILE:-$ROOT_DIR/.env}"
@@ -273,7 +236,7 @@ require_cmd bash
 if ((ASSEMBLE_ONLY == 0)); then
   require_cmd cargo
   require_cmd distrobox
-  if ((ARCH_AUR_ONLY == 0)); then
+  if ((ARCH_ONLY == 0)); then
     require_cmd flatpak
     require_cmd flatpak-builder
   fi
@@ -281,31 +244,18 @@ fi
 if ((PUBLISH_GITHUB == 1)); then
   require_cmd gh
 fi
-if ((PUBLISH_AUR == 1)); then
-  require_cmd git
-  require_cmd ssh
-fi
-
 # An Arch-only rebuild must preserve the other platform assets already in the
 # signed Linux manifest. Save the existing metadata outside dist/ before the
 # clean build removes it; the signer verifies it before merging below.
-if ((ARCH_AUR_ONLY == 1)) && gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
-  ARCH_AUR_BASE_DIR="$(mktemp -d)"
-  if gh release download "$TAG" --repo "$REPOSITORY" --pattern 'linux-release.json' --dir "$ARCH_AUR_BASE_DIR" >/dev/null 2>&1; then
-    gh release download "$TAG" --repo "$REPOSITORY" --pattern 'SHA256SUMS' --dir "$ARCH_AUR_BASE_DIR" >/dev/null 2>&1 || true
+if ((ARCH_ONLY == 1)) && gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+  ARCH_BASE_DIR="$(mktemp -d)"
+  if gh release download "$TAG" --repo "$REPOSITORY" --pattern 'linux-release.json' --dir "$ARCH_BASE_DIR" >/dev/null 2>&1; then
+    gh release download "$TAG" --repo "$REPOSITORY" --pattern 'SHA256SUMS' --dir "$ARCH_BASE_DIR" >/dev/null 2>&1 || true
     echo "Existing Linux release metadata saved for the Arch-only merge."
   else
     echo "No existing Linux release manifest found; creating an Arch-only manifest."
   fi
 fi
-
-run_aur_git() {
-  if [[ -f "$HOME/.ssh/id_ed25519_aur" ]]; then
-    GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_ed25519_aur -o IdentitiesOnly=yes" git "$@"
-  else
-    git "$@"
-  fi
-}
 
 update_simple_version() {
   local file="$1"
@@ -476,7 +426,7 @@ distrobox enter "$ARCH_DISTROBOX" -- bash -lc "
   bash packaging/build-packages.sh arch
 "
 
-if ((ARCH_AUR_ONLY == 0)); then
+if ((ARCH_ONLY == 0)); then
 echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
 if ! distrobox enter "$DEB_DISTROBOX" -- bash -lc "
   set -euo pipefail
@@ -639,7 +589,7 @@ else
   \) -delete
 fi
 
-if ((ARCH_AUR_ONLY == 1)); then
+if ((ARCH_ONLY == 1)); then
   mapfile -t artifacts < <(find "$PACKAGING_DIR/out/arch" -type f -name '*.pkg.tar.*' | sort)
 else
   mapfile -t artifacts < <(find "$PACKAGING_DIR/out" -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' \) | sort)
@@ -653,7 +603,7 @@ for f in "${artifacts[@]}"; do
   cp -f "$f" "$OUT_ABS_DIR/"
 done
 
-if ((ARCH_AUR_ONLY == 0)); then
+if ((ARCH_ONLY == 0)); then
   echo "Creating NixOS binary flake ..."
   (cd "$ROOT_DIR" && bash scripts/build-nix-release.sh \
     --version "$VERSION" \
@@ -673,11 +623,11 @@ fi
   sha256sum "${copied[@]}" > SHA256SUMS
 )
 
-if ((ARCH_AUR_ONLY == 1)) && [[ -n "$ARCH_AUR_BASE_DIR" && -f "$ARCH_AUR_BASE_DIR/SHA256SUMS" ]]; then
+if ((ARCH_ONLY == 1)) && [[ -n "$ARCH_BASE_DIR" && -f "$ARCH_BASE_DIR/SHA256SUMS" ]]; then
   current_sums="$(mktemp)"
   merged_sums="$(mktemp)"
   cp "$OUT_ABS_DIR/SHA256SUMS" "$current_sums"
-  awk '$2 !~ /\.pkg\.tar/' "$ARCH_AUR_BASE_DIR/SHA256SUMS" > "$merged_sums"
+  awk '$2 !~ /\.pkg\.tar/' "$ARCH_BASE_DIR/SHA256SUMS" > "$merged_sums"
   cat "$current_sums" >> "$merged_sums"
   sort -k2,2 -u "$merged_sums" > "$OUT_ABS_DIR/SHA256SUMS"
   rm -f "$current_sums" "$merged_sums"
@@ -706,11 +656,11 @@ MANIFEST_TMP="$(mktemp "$OUT_ABS_DIR/.linux-release.json.XXXXXX")"
   echo "}"
 } > "$MANIFEST_TMP"
 
-if ((ARCH_AUR_ONLY == 1)) && [[ -n "$ARCH_AUR_BASE_DIR" && -f "$ARCH_AUR_BASE_DIR/linux-release.json" ]]; then
+if ((ARCH_ONLY == 1)) && [[ -n "$ARCH_BASE_DIR" && -f "$ARCH_BASE_DIR/linux-release.json" ]]; then
   echo "Merging the rebuilt Arch asset into the existing Linux release manifest ..."
   (cd "$ROOT_DIR" && cargo run --quiet --release --manifest-path tools/manifest-signer/Cargo.toml -- \
     merge-linux-release \
-    --base "$ARCH_AUR_BASE_DIR/linux-release.json" \
+    --base "$ARCH_BASE_DIR/linux-release.json" \
     --replacement "$MANIFEST_TMP" \
     --output "$MANIFEST_TMP")
 fi
@@ -730,7 +680,7 @@ echo "  Checksums: $OUT_ABS_DIR/SHA256SUMS"
 
   if ((PUBLISH_GITHUB == 1)); then
   echo "Publishing GitHub release '$TAG' to '$REPOSITORY' ..."
-  if ((ARCH_AUR_ONLY == 1)); then
+  if ((ARCH_ONLY == 1)); then
     # Replacing the Arch package changes its checksum, so publish the newly
     # signed manifest and checksum list with it. Leaving the old metadata on
     # the release would make the updater reject the replacement package.
@@ -753,30 +703,4 @@ echo "  Checksums: $OUT_ABS_DIR/SHA256SUMS"
   fi
   echo "GitHub release publish complete:"
   echo "  https://github.com/$REPOSITORY/releases/tag/$TAG"
-fi
-
-if ((PUBLISH_AUR == 1)); then
-  echo "Updating AUR package metadata for '$AUR_PACKAGE' ..."
-  (cd "$ROOT_DIR" && bash scripts/update-aur-bin.sh --version "$VERSION" --pkgrel "$AUR_PKGREL" --output-dir "$OUTPUT_DIR" --repository "$REPOSITORY" --arch-distrobox "$ARCH_DISTROBOX")
-
-  if [[ ! -d "$AUR_REPO_DIR/.git" ]]; then
-    echo "Cloning AUR repo into $AUR_REPO_DIR ..."
-    mkdir -p "$(dirname "$AUR_REPO_DIR")"
-    run_aur_git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" "$AUR_REPO_DIR"
-  fi
-
-  cp "$ROOT_DIR/packaging/aur-bin/PKGBUILD" "$AUR_REPO_DIR/PKGBUILD"
-  cp "$ROOT_DIR/packaging/aur-bin/.SRCINFO" "$AUR_REPO_DIR/.SRCINFO"
-
-  (
-    cd "$AUR_REPO_DIR"
-    if [[ -n "$(git status --porcelain)" ]]; then
-      git add PKGBUILD .SRCINFO
-      git commit -m "Update to ${VERSION}-${AUR_PKGREL}"
-      run_aur_git push origin master
-      echo "AUR package pushed: $AUR_PACKAGE"
-    else
-      echo "AUR package already up to date: $AUR_PACKAGE"
-    fi
-  )
 fi

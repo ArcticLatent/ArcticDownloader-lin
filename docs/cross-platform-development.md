@@ -134,7 +134,7 @@ mismatch does.
     instead of shipping an update the app will silently refuse.
   - `manifest-signer merge-linux-release --base <path> --replacement <path> --output
     <path> [--pubkey <base64>]` -- verifies an existing signed Linux manifest and
-    replaces only the package kinds present in the replacement. The Arch/AUR-only
+    replaces only the package kinds present in the replacement. The Arch-only
     release path uses this before signing so rebuilding an Arch package cannot remove
     Debian, RPM, Flatpak, or Nix assets from the public update manifest. The optional
     public key is reserved for isolated pipeline tests with a throwaway keypair.

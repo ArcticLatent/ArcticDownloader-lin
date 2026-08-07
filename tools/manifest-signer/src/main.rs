@@ -27,7 +27,7 @@
 //!   manifest-signer merge-linux-release --base <path> --replacement <path> --output <path> [--pubkey <base64>]
 //!       Verifies an existing signed Linux manifest, replaces package kinds
 //!       present in the replacement manifest, and writes an unsigned merged
-//!       manifest ready for the normal `sign` command. Used by `--archaur`
+//!       manifest ready for the normal `sign` command. Used by `--arch-only`
 //!       releases so rebuilding only Arch does not remove Debian/RPM/Nix
 //!       assets from the public update manifest. The public-key override is
 //!       intended for isolated release-pipeline tests.
