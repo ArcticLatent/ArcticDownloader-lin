@@ -23,3 +23,6 @@
 - Fixed ComfyUI Manager startup failures on Windows caused by an invalid standard-output handle.
 - Fixed misleading repeated HTML scan warnings while inspecting Civitai download responses.
 - Fixed Arch packaging to use the actual Ayatana AppIndicator dependency and avoid an unintended debug-package release asset.
+- Prevented malformed remote catalog model IDs or target categories from escaping the configured models directory.
+- Corrected the declared Rust minimum version and Linux desktop metadata validation.
+- Hardened release builds to require and verify signed update manifests before they can be published.

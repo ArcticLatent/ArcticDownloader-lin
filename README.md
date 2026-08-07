@@ -235,6 +235,8 @@ Windows releases are built from this repository by
 
 Tagging `vX.Y.Z` builds `Arctic-ComfyUI-Helper.exe`, verifies `update.json`, stores a
 workflow artifact, and uploads both files to the public release repository.
+For a non-publishing rehearsal, dispatch the workflow manually with the matching version
+and leave `publish` disabled; enable it only after that build-and-verify run succeeds.
 
 The local PowerShell flow remains available for emergency/native Windows releases:
 

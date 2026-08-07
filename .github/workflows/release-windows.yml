@@ -10,6 +10,11 @@ on:
         description: "Release version (example: 0.4.0)"
         required: true
         type: string
+      publish:
+        description: "Publish to the public release repository after verification"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -83,6 +88,7 @@ jobs:
             dist/update.json
 
       - name: Publish to public release repository
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.ARCTIC_RELEASE_TOKEN }}

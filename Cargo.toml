@@ -2,7 +2,7 @@
 name = "arctic-downloader"
 version = "0.2.6"
 edition = "2021"
-rust-version = "1.76"
+rust-version = "1.89"
 authors = ["Arctic Latent"]
 
 [workspace]

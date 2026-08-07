@@ -4,8 +4,8 @@
   <name>Arctic ComfyUI Helper</name>
   <summary>ComfyUI installer and model manager</summary>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>Proprietary</project_license>
-  <developer id="io.github.ArcticHelper">
+  <project_license>LicenseRef-proprietary</project_license>
+  <developer id="com.arcticlatent">
     <name>Arctic Latent</name>
   </developer>
   <launchable type="desktop-id">io.github.ArcticHelper.desktop</launchable>
@@ -14,7 +14,6 @@
   </description>
   <categories>
     <category>Graphics</category>
-    <category>Utility</category>
   </categories>
   <content_rating type="oars-1.1"/>
   <url type="homepage">https://github.com/ArcticLatent/Arctic-Helper</url>

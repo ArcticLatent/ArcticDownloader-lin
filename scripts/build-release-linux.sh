@@ -21,10 +21,14 @@ DEB_SUDO_PASSWORD="${ARCTIC_DEB_SUDO_PASSWORD:-}"
 RPM_SUDO_PASSWORD="${ARCTIC_RPM_SUDO_PASSWORD:-}"
 ARCH_SUDO_PASSWORD="${ARCTIC_ARCH_SUDO_PASSWORD:-}"
 ARCH_AUR_BASE_DIR=""
+MANIFEST_TMP=""
 
 cleanup() {
   if [[ -n "$ARCH_AUR_BASE_DIR" && -d "$ARCH_AUR_BASE_DIR" ]]; then
     rm -rf "$ARCH_AUR_BASE_DIR"
+  fi
+  if [[ -n "$MANIFEST_TMP" ]]; then
+    rm -f "$MANIFEST_TMP"
   fi
 }
 trap cleanup EXIT
@@ -243,6 +247,11 @@ load_public_catalog_env() {
 }
 
 load_public_catalog_env
+if [[ -z "${ARCTIC_UPDATE_SIGNING_KEY:-}" ]]; then
+  echo "ARCTIC_UPDATE_SIGNING_KEY is not set in the environment." >&2
+  echo "A release build is refused before packaging because the app will not trust an unsigned manifest." >&2
+  exit 1
+fi
 # Ensure rustup cargo/rustc are visible even when invoked from fish or clean shells.
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -507,7 +516,7 @@ if ! distrobox enter "$DEB_DISTROBOX" -- bash -lc "
   }
 
   ensure_modern_rust() {
-    local min_cargo=\"1.85.0\"
+    local min_cargo=\"1.89.0\"
     if ! command -v rustup >/dev/null 2>&1; then
       if ! command -v curl >/dev/null 2>&1; then
         as_root apt update
@@ -582,7 +591,7 @@ if ! distrobox enter "$RPM_DISTROBOX" -- bash -lc "
   }
 
   ensure_modern_rust() {
-    local min_cargo=\"1.85.0\"
+    local min_cargo=\"1.89.0\"
     if ! command -v rustup >/dev/null 2>&1; then
       if ! command -v curl >/dev/null 2>&1; then
         as_root dnf install -y curl
@@ -675,6 +684,7 @@ if ((ARCH_AUR_ONLY == 1)) && [[ -n "$ARCH_AUR_BASE_DIR" && -f "$ARCH_AUR_BASE_DI
 fi
 
 manifest="$OUT_ABS_DIR/linux-release.json"
+MANIFEST_TMP="$(mktemp "$OUT_ABS_DIR/.linux-release.json.XXXXXX")"
 {
   echo "{"
   echo "  \"version\": \"$VERSION\"," 
@@ -694,27 +704,24 @@ manifest="$OUT_ABS_DIR/linux-release.json"
   done
   echo "  ]"
   echo "}"
-} > "$manifest"
+} > "$MANIFEST_TMP"
 
 if ((ARCH_AUR_ONLY == 1)) && [[ -n "$ARCH_AUR_BASE_DIR" && -f "$ARCH_AUR_BASE_DIR/linux-release.json" ]]; then
   echo "Merging the rebuilt Arch asset into the existing Linux release manifest ..."
   (cd "$ROOT_DIR" && cargo run --quiet --release --manifest-path tools/manifest-signer/Cargo.toml -- \
     merge-linux-release \
     --base "$ARCH_AUR_BASE_DIR/linux-release.json" \
-    --replacement "$manifest" \
-    --output "$manifest")
+    --replacement "$MANIFEST_TMP" \
+    --output "$MANIFEST_TMP")
 fi
 
 echo "Signing release manifest ..."
-if [[ -z "${ARCTIC_UPDATE_SIGNING_KEY:-}" ]]; then
-  echo "ARCTIC_UPDATE_SIGNING_KEY is not set in the environment." >&2
-  echo "Run 'cargo run --manifest-path tools/manifest-signer/Cargo.toml -- keygen' once and store" >&2
-  echo "the printed private key as ARCTIC_UPDATE_SIGNING_KEY before releasing -- the app refuses" >&2
-  echo "to trust an unsigned update manifest." >&2
-  exit 1
-fi
 (cd "$ROOT_DIR" && cargo run --quiet --release --manifest-path tools/manifest-signer/Cargo.toml -- \
-  sign --format linux-release --manifest "$manifest")
+  sign --format linux-release --manifest "$MANIFEST_TMP")
+(cd "$ROOT_DIR" && cargo run --quiet --release --manifest-path tools/manifest-signer/Cargo.toml -- \
+  verify --format linux-release --manifest "$MANIFEST_TMP")
+mv "$MANIFEST_TMP" "$manifest"
+MANIFEST_TMP=""
 
 echo "Build release artifacts complete:"
 echo "  Output: $OUT_ABS_DIR"

@@ -5,5 +5,5 @@ Comment=ComfyUI installer and model manager
 Exec=arctic-comfyui-helper
 Icon=io.github.ArcticHelper
 Terminal=false
-Categories=Graphics;Utility;
+Categories=Graphics;
 StartupNotify=true

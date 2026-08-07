@@ -89,7 +89,9 @@ second compile check on GitHub's native `windows-latest` runner.
   "Update manifest signing" below.
 
 Both Cargo manifests and `src-tauri/tauri.conf.json` must contain the release version.
-Push a matching `vX.Y.Z` tag, or run the workflow manually with `X.Y.Z`. The workflow:
+Push a matching `vX.Y.Z` tag, or run the workflow manually with `X.Y.Z`. Manual runs
+default to build-and-verify only; explicitly enable the `publish` input after the dry run
+succeeds. Tag-triggered runs publish automatically. The workflow:
 
 1. builds and checks `Arctic-ComfyUI-Helper.exe` on Windows;
 2. generates, signs, and verifies `update.json` against the public release URL and SHA-256;

@@ -636,8 +636,8 @@ async fn download_artifact(
     if is_cancelled(cancel) {
         return Err(anyhow!("download cancelled by user"));
     }
-    let subdir = artifact.target_category.comfyui_subdir();
-    let dest_dir = comfy_root.join(subdir).join(model_folder);
+    let dest_dir =
+        catalog_model_destination(comfy_root, artifact.target_category.slug(), model_folder)?;
     fs::create_dir_all(&dest_dir)
         .await
         .with_context(|| format!("failed to create directory {:?}", dest_dir))?;
@@ -1886,11 +1886,69 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
+/// Builds a model destination from remotely supplied catalog fields without
+/// allowing either field to escape `<download-root>/models`.
+///
+/// Target categories may be nested (`ultralytics/bbox` is used by the live
+/// catalog), while model IDs must remain a single directory name. Both `/`
+/// and `\` are treated as separators on every host so a catalog accepted on
+/// Linux cannot become unsafe when the same data is consumed on Windows.
+fn catalog_model_destination(
+    comfy_root: &Path,
+    target_category: &str,
+    model_id: &str,
+) -> Result<PathBuf> {
+    let category = validated_catalog_relative_path(target_category, "target category", true)?;
+    let model = validated_catalog_relative_path(model_id, "model ID", false)?;
+    let models_root = comfy_root.join("models");
+    let destination = models_root.join(category).join(model);
+
+    // The component validation above is the security boundary. Keep this
+    // additional invariant check so later refactors cannot accidentally
+    // reintroduce a rooted or parent component into the constructed path.
+    if !destination.starts_with(&models_root) {
+        return Err(anyhow!(
+            "catalog model destination escaped the configured models directory"
+        ));
+    }
+
+    Ok(destination)
+}
+
+fn validated_catalog_relative_path(
+    value: &str,
+    field: &str,
+    allow_nested: bool,
+) -> Result<PathBuf> {
+    if value.is_empty() || value.trim() != value {
+        return Err(anyhow!("catalog {field} must not be empty or padded"));
+    }
+    if value.starts_with(['/', '\\']) {
+        return Err(anyhow!("catalog {field} must be a relative path"));
+    }
+    if value.chars().any(|ch| ch.is_control() || ch == ':') {
+        return Err(anyhow!("catalog {field} contains an unsafe path character"));
+    }
+
+    let components: Vec<&str> = value.split(['/', '\\']).collect();
+    if !allow_nested && components.len() != 1 {
+        return Err(anyhow!("catalog {field} must be a single path component"));
+    }
+    if components
+        .iter()
+        .any(|component| component.is_empty() || *component == "." || *component == "..")
+    {
+        return Err(anyhow!("catalog {field} contains an unsafe path component"));
+    }
+
+    Ok(components.iter().collect())
+}
+
 #[cfg(test)]
 mod filename_safety_tests {
     use super::{
-        filename_from_headers, find_resumable_tmp_path, parse_content_disposition,
-        sanitize_file_name,
+        catalog_model_destination, filename_from_headers, find_resumable_tmp_path,
+        parse_content_disposition, sanitize_file_name,
     };
     use reqwest::header::{HeaderMap, HeaderValue, CONTENT_DISPOSITION};
     use std::{
@@ -1915,6 +1973,44 @@ mod filename_safety_tests {
     #[test]
     fn sanitize_file_name_falls_back_when_nothing_but_separators() {
         assert_eq!(sanitize_file_name("///"), "download");
+    }
+
+    #[test]
+    fn catalog_destination_allows_legitimate_nested_categories() {
+        assert_eq!(
+            catalog_model_destination(
+                Path::new("/home/user/ComfyUI"),
+                "ultralytics/bbox",
+                "detector-model"
+            )
+            .unwrap(),
+            Path::new("/home/user/ComfyUI/models/ultralytics/bbox/detector-model")
+        );
+    }
+
+    #[test]
+    fn catalog_destination_rejects_parent_and_absolute_paths_on_every_platform() {
+        let root = Path::new("/home/user/ComfyUI");
+        for category in [
+            "../outside",
+            "ultralytics/../../outside",
+            r"ultralytics\..\outside",
+            "/tmp/models",
+            r"C:\Users\Public",
+            r"\\server\share",
+        ] {
+            assert!(
+                catalog_model_destination(root, category, "model").is_err(),
+                "unsafe category was accepted: {category}"
+            );
+        }
+
+        for model_id in ["../outside", r"..\outside", "/tmp", r"C:\Temp", "a/b"] {
+            assert!(
+                catalog_model_destination(root, "checkpoints", model_id).is_err(),
+                "unsafe model ID was accepted: {model_id}"
+            );
+        }
     }
 
     #[test]
