@@ -13,6 +13,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Write-Utf8NoBom([string]$Path, [string]$Content) {
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
+
 if (-not $Tag) {
     $Tag = "v$Version"
 }
@@ -184,7 +189,7 @@ $manifest = [ordered]@{
 $manifestJson = $manifest | ConvertTo-Json -Depth 4
 $manifestPath = Join-Path $root "update.json"
 $manifestDistPath = Join-Path $root "$OutputDir\update.json"
-$manifestJson | Set-Content -Path $manifestDistPath -Encoding utf8
+Write-Utf8NoBom -Path $manifestDistPath -Content $manifestJson
 
 Write-Host "Signing update manifest..."
 $signerManifest = Join-Path $root "tools\manifest-signer\Cargo.toml"
