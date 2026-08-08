@@ -29,13 +29,12 @@ Think of it as:
 
 ---
 
-## ✨ New in v0.2.8
+## ✨ New in v0.2.9
 
-- Nix-managed installations now detect newer versions through the signed Linux release manifest
-- Added a **How to Update** action for Nix users without attempting to modify the immutable Nix store
-- Added Nix profile and declarative-configuration update guidance in the application log
-- Kept automatic installation unchanged for Debian, Ubuntu, Fedora, and Arch packages
-- Fixed TLS certificate verification for ComfyUI, ComfyUI Manager, custom nodes, and managed Python processes on NixOS
+- Fixed Arch packages shipping with a NixOS dynamic loader that prevented them from starting on Arch Linux
+- Arch packages are now built natively on Arch and verified for the standard `/lib64/ld-linux-x86-64.so.2` interpreter
+- Release verification now rejects Linux binaries containing leaked `/nix/store` or build-machine home paths
+- Nix release artifacts can now be built from Arch with Podman and the official `nixos/nix` image
 
 ---
 

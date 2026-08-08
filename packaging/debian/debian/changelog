@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.2.9-1) unstable; urgency=medium
+
+  * Build Arch packages natively and reject binaries contaminated by Nix build paths.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Sat, 08 Aug 2026 14:57:49 -0400
+
 arctic-comfyui-helper (0.2.8-1) unstable; urgency=medium
 
   * Detect signed updates for Nix-managed installations without attempting to modify the immutable Nix store.
