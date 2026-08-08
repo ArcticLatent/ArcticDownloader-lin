@@ -28,6 +28,7 @@
   uv,
   util-linux,
   xdg-utils,
+  cacert,
   arcticSupabaseUrl ? "",
   arcticSupabaseAnonKey ? "",
   arcticSupabasePublishableKey ? "",
@@ -135,6 +136,7 @@ rustPlatform.buildRustPackage {
       }
       --set ARCTIC_PACKAGE_MANAGER nix
       --set ARCTIC_SKIP_AUTO_UPDATE 1
+      --set-default SSL_CERT_FILE "${cacert}/etc/ssl/certs/ca-bundle.crt"
     )
   '';
 

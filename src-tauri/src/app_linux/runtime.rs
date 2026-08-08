@@ -30,7 +30,7 @@ use arctic_downloader::app::{drain_lossy_lines, AppContext};
 // helpers defined in the parent `app_linux` module itself (not
 // `shared.rs`), used well beyond this runtime-plumbing set.
 use super::{
-    build_command, comfyui_launch_args, command_available,
+    apply_python_tls_environment, build_command, comfyui_launch_args, command_available,
     detect_launch_attention_backend_for_root, is_forbidden_install_path, nerdstats_enabled,
     normalize_canonical_path, nunchaku_backend_present, python_module_importable,
     python_runtime_env_for_root, recover_lock, run_command_capture, update_tray_comfy_status,
@@ -353,6 +353,7 @@ pub(crate) fn python_for_root(root: &Path) -> std::process::Command {
     } else {
         std::process::Command::new("python")
     };
+    apply_python_tls_environment(&mut cmd);
     if !nerdstats_enabled() {
         super::apply_background_command_flags(&mut cmd);
     }
@@ -378,6 +379,7 @@ fn python_exe_works(py_exe: &Path, root: &Path) -> bool {
         return false;
     }
     let mut cmd = std::process::Command::new(py_exe);
+    apply_python_tls_environment(&mut cmd);
     cmd.arg("--version");
     cmd.current_dir(root);
     super::apply_background_command_flags(&mut cmd);

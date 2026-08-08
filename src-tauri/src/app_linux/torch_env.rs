@@ -24,9 +24,9 @@ use arctic_downloader::config::AppSettings;
 // `ComfyInstallRequest`/`ComfyInstallRecommendation` request/response types
 // defined in the parent `app_linux` module itself (not `shared.rs`).
 use super::{
-    apply_background_command_flags, command_available, get_comfyui_install_recommendation,
-    pip_has_package, python_for_root, run_command, run_command_capture, run_command_env,
-    ComfyInstallRequest,
+    apply_background_command_flags, apply_python_tls_environment, command_available,
+    get_comfyui_install_recommendation, pip_has_package, python_for_root, run_command,
+    run_command_capture, run_command_env, ComfyInstallRequest,
 };
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
@@ -453,6 +453,7 @@ pub(crate) fn enforce_torch_profile_linux(
         )?;
     }
     let mut verify_cmd = std::process::Command::new(py_path);
+    apply_python_tls_environment(&mut verify_cmd);
     verify_cmd.arg("-c").arg(
         "import torch, importlib.metadata as m; \
          print(getattr(torch, '__version__', '')); \

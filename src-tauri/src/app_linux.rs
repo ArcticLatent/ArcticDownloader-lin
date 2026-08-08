@@ -1442,6 +1442,44 @@ fn apply_background_command_flags(_cmd: &mut std::process::Command) {
     let _ = _cmd;
 }
 
+const SYSTEM_CA_BUNDLE_CANDIDATES: &[&str] = &[
+    // NixOS and Fedora-compatible location.
+    "/etc/ssl/certs/ca-bundle.crt",
+    // Debian, Ubuntu, and derivatives.
+    "/etc/ssl/certs/ca-certificates.crt",
+    // RHEL/Fedora legacy location.
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    // Alpine and OpenSSL's common compiled-in default.
+    "/etc/ssl/cert.pem",
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+];
+
+fn select_ssl_cert_file(
+    inherited: Option<std::ffi::OsString>,
+    candidates: &[PathBuf],
+) -> Option<std::ffi::OsString> {
+    inherited.or_else(|| {
+        candidates
+            .iter()
+            .find(|candidate| candidate.is_file())
+            .map(|candidate| candidate.as_os_str().to_os_string())
+    })
+}
+
+fn resolved_ssl_cert_file() -> Option<std::ffi::OsString> {
+    let candidates: Vec<PathBuf> = SYSTEM_CA_BUNDLE_CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    select_ssl_cert_file(std::env::var_os("SSL_CERT_FILE"), &candidates)
+}
+
+fn apply_python_tls_environment(cmd: &mut std::process::Command) {
+    if let Some(ca_bundle) = resolved_ssl_cert_file() {
+        cmd.env("SSL_CERT_FILE", ca_bundle);
+    }
+}
+
 fn running_in_flatpak() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -1460,11 +1498,23 @@ fn build_command(
     working_dir: Option<&Path>,
     envs: &[(&str, &str)],
 ) -> Result<std::process::Command, String> {
+    let explicit_ssl_cert_file = envs.iter().any(|(key, _)| *key == "SSL_CERT_FILE");
+    let ssl_cert_file = if explicit_ssl_cert_file {
+        None
+    } else {
+        resolved_ssl_cert_file()
+    };
     let mut cmd = if running_in_flatpak() && program != "flatpak-spawn" {
         let mut wrapped = std::process::Command::new("flatpak-spawn");
         wrapped.arg("--host");
         if let Some(dir) = working_dir {
             wrapped.arg(format!("--directory={}", dir.to_string_lossy()));
+        }
+        if let Some(ca_bundle) = ssl_cert_file.as_ref() {
+            wrapped.arg(format!(
+                "--env=SSL_CERT_FILE={}",
+                ca_bundle.to_string_lossy()
+            ));
         }
         for (key, value) in envs {
             wrapped.arg(format!("--env={key}={value}"));
@@ -1477,6 +1527,9 @@ fn build_command(
         direct.args(args);
         if let Some(dir) = working_dir {
             direct.current_dir(dir);
+        }
+        if let Some(ca_bundle) = ssl_cert_file.as_ref() {
+            direct.env("SSL_CERT_FILE", ca_bundle);
         }
         for (key, value) in envs {
             direct.env(key, value);
@@ -3561,5 +3614,35 @@ mod install_recommendation_tests {
         assert!(!preflight.hf_cli_available);
         assert_eq!(preflight.hf_backend, "disabled");
         assert!(preflight.detail.contains("default downloader"));
+    }
+}
+
+#[cfg(test)]
+mod tls_environment_tests {
+    use super::*;
+
+    #[test]
+    fn existing_ssl_cert_file_override_wins() {
+        let inherited = std::ffi::OsString::from("/custom/ca-bundle.pem");
+        let candidates = vec![std::env::current_exe().expect("current executable path")];
+
+        assert_eq!(
+            select_ssl_cert_file(Some(inherited.clone()), &candidates),
+            Some(inherited)
+        );
+    }
+
+    #[test]
+    fn first_existing_ca_bundle_is_selected() {
+        let existing = std::env::current_exe().expect("current executable path");
+        let candidates = vec![
+            PathBuf::from("/definitely/missing/arctic-helper-ca-bundle.pem"),
+            existing.clone(),
+        ];
+
+        assert_eq!(
+            select_ssl_cert_file(None, &candidates),
+            Some(existing.into_os_string())
+        );
     }
 }
