@@ -726,6 +726,18 @@ el.saveToken.addEventListener("click", async () => {
 el.checkUpdates.addEventListener("click", async () => {
   if (state.updateInstalling) return;
   if (state.updateAvailable) {
+    if (state.updateManagedExternally) {
+      el.updateStatus.textContent = "Update via package manager";
+      logLine(state.updateNotes || "Update this application through its package manager.");
+      try {
+        await invoke("open_external_url", {
+          url: "https://github.com/ArcticLatent/Arctic-Helper/releases/latest",
+        });
+      } catch (err) {
+        logLine(`Open release page failed: ${err}`);
+      }
+      return;
+    }
     try {
       state.updateInstalling = true;
       updateUpdateButton();
@@ -751,19 +763,27 @@ el.checkUpdates.addEventListener("click", async () => {
     if (result.available) {
       state.updateAvailable = true;
       state.updateVersion = result.version || null;
-      el.updateStatus.textContent = "New update available";
+      state.updateManagedExternally = result.managed_externally === true;
+      state.updateNotes = String(result.notes || "").trim();
+      el.updateStatus.textContent = state.updateManagedExternally
+        ? "Update via package manager"
+        : "New update available";
       updateUpdateButton();
-      logLine(`Update available: v${result.version}`);
+      logLine(state.updateNotes || `Update available: v${result.version}`);
     } else {
       state.updateAvailable = false;
       state.updateVersion = null;
-      el.updateStatus.textContent = result.notes ? "Managed externally" : "Up to date";
+      state.updateManagedExternally = result.managed_externally === true;
+      state.updateNotes = String(result.notes || "").trim();
+      el.updateStatus.textContent = state.updateManagedExternally ? "Managed externally" : "Up to date";
       updateUpdateButton();
-      logLine(result.notes || "No updates available.");
+      logLine(state.updateNotes || "No updates available.");
     }
   } catch (err) {
     state.updateAvailable = false;
     state.updateVersion = null;
+    state.updateManagedExternally = false;
+    state.updateNotes = "";
     state.updateInstalling = false;
     updateUpdateButton();
     el.updateStatus.textContent = "Error";

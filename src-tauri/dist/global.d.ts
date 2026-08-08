@@ -274,6 +274,8 @@ declare global {
     comfyInstallSwitchBusy: boolean;
     updateAvailable: boolean;
     updateVersion: string | null;
+    updateManagedExternally: boolean;
+    updateNotes: string;
     appVersion: string;
     updateChecking: boolean;
     updateInstalling: boolean;

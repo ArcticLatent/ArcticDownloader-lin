@@ -285,7 +285,10 @@ function updateUpdateButton() {
     return;
   }
   el.checkUpdates.disabled = false;
-  el.checkUpdates.textContent = state.updateAvailable ? "Update" : "Check Updates";
+  el.checkUpdates.textContent = state.updateAvailable
+    ? (state.updateManagedExternally ? "How to Update" : "Update")
+    : "Check Updates";
+  el.checkUpdates.title = state.updateManagedExternally ? state.updateNotes : "";
   if (state.updateAvailable) {
     el.checkUpdates.classList.add("update-available");
   }

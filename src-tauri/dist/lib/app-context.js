@@ -48,6 +48,8 @@ export const state = {
   comfyInstallSwitchBusy: false,
   updateAvailable: false,
   updateVersion: null,
+  updateManagedExternally: false,
+  updateNotes: "",
   appVersion: "",
   updateChecking: false,
   updateInstalling: false,

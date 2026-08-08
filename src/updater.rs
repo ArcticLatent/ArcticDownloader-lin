@@ -611,8 +611,13 @@ fn detect_linux_distro_family() -> String {
 fn select_linux_release_asset(manifest: &LinuxReleaseManifest) -> Option<&LinuxReleaseAsset> {
     let distro = detect_linux_distro_family();
     let arch = std::env::consts::ARCH.to_ascii_lowercase();
+    let package_kind = if crate::env_flags::external_package_manager().as_deref() == Some("nix") {
+        "nix"
+    } else {
+        distro.as_str()
+    };
 
-    select_linux_release_asset_for(manifest, &distro, &arch)
+    select_linux_release_asset_for(manifest, package_kind, &arch)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -650,9 +655,16 @@ fn select_linux_release_asset_for<'a>(
             .iter()
             .find(|asset| asset.name.to_ascii_lowercase().ends_with(".rpm"))
             .copied(),
-        // Nix packages deliberately disable the standalone updater through
-        // ARCTIC_PACKAGE_MANAGER=nix. A development/standalone binary has no
-        // safe way to install the published Nix tarball automatically.
+        // Nix packages use this artifact only to discover and authenticate
+        // newer versions. Installation remains delegated to the profile or
+        // declarative configuration that owns the immutable store path.
+        "nix" => candidates
+            .iter()
+            .find(|asset| {
+                let name = asset.name.to_ascii_lowercase();
+                name.starts_with("arctic-comfyui-helper-nix-") && name.ends_with(".tar.gz")
+            })
+            .copied(),
         "nixos" | "unknown" => None,
         _ => None,
     }
@@ -704,6 +716,15 @@ mod tests {
             );
             assert!(!selected.name.ends_with(".src.rpm"));
         }
+    }
+
+    #[test]
+    fn selects_binary_flake_for_nix_managed_installations() {
+        let manifest = linux_manifest();
+        let selected = select_linux_release_asset_for(&manifest, "nix", "x86_64")
+            .expect("Nix installations should discover the binary flake");
+
+        assert_eq!(selected.name, "arctic-comfyui-helper-nix-x86_64.tar.gz");
     }
 
     #[test]

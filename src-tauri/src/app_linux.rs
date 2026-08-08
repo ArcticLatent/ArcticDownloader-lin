@@ -2531,29 +2531,32 @@ fn set_comfyui_root(
 
 #[tauri::command]
 async fn check_updates_now(state: State<'_, AppState>) -> Result<UpdateCheckResponse, String> {
-    if let Some(manager) = external_package_manager() {
-        return Ok(UpdateCheckResponse {
-            available: false,
-            version: None,
-            notes: Some(format!(
-                "Updates are managed by {manager}. Update this application through your package manager."
-            )),
-        });
-    }
-
+    let package_manager = external_package_manager();
     let updater = state.context.updater.clone();
     let result = updater.check_for_update().await;
 
     match result {
-        Ok(Ok(Some(update))) => Ok(UpdateCheckResponse {
-            available: true,
-            version: Some(update.version.to_string()),
-            notes: update.notes,
-        }),
+        Ok(Ok(Some(update))) => {
+            let notes = package_manager.as_deref().map_or(update.notes, |manager| {
+                Some(format!(
+                    "Arctic ComfyUI Helper v{} is available. This installation is managed by {manager}; update the Nix profile or declarative configuration that installed it. Profile installations can run: nix profile upgrade --refresh arctic-comfyui-helper",
+                    update.version
+                ))
+            });
+            Ok(UpdateCheckResponse {
+                available: true,
+                version: Some(update.version.to_string()),
+                notes,
+                managed_externally: package_manager.is_some(),
+            })
+        }
         Ok(Ok(None)) => Ok(UpdateCheckResponse {
             available: false,
             version: None,
-            notes: None,
+            notes: package_manager.as_ref().map(|manager| {
+                format!("This installation is managed by {manager} and is up to date.")
+            }),
+            managed_externally: package_manager.is_some(),
         }),
         Ok(Err(err)) => Err(format!("Update check failed: {err:#}")),
         Err(join_err) => Err(format!("Update task failed: {join_err}")),
@@ -2572,6 +2575,7 @@ async fn auto_update_startup(
             notes: Some(format!(
                 "Updates are managed by {manager}. Update this application through your package manager."
             )),
+            managed_externally: true,
         });
     }
 
@@ -2580,6 +2584,7 @@ async fn auto_update_startup(
             available: false,
             version: None,
             notes: Some("Auto update disabled by environment.".to_string()),
+            managed_externally: false,
         });
     }
 
@@ -2594,6 +2599,7 @@ async fn auto_update_startup(
                 available: false,
                 version: None,
                 notes: None,
+                managed_externally: false,
             });
         }
         Ok(Err(err)) => return Err(format!("Update check failed: {err:#}")),
@@ -2603,6 +2609,7 @@ async fn auto_update_startup(
             available: false,
             version: None,
             notes: None,
+            managed_externally: false,
         });
     };
 
@@ -2647,6 +2654,7 @@ async fn auto_update_startup(
                 available: true,
                 version: Some(applied.version.to_string()),
                 notes: Some("Standalone update apply launched.".to_string()),
+                managed_externally: false,
             })
         }
         Ok(Err(err)) => Err(format!("Update install failed: {err:#}")),

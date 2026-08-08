@@ -78,6 +78,7 @@ pub(crate) struct UpdateCheckResponse {
     pub(crate) available: bool,
     pub(crate) version: Option<String>,
     pub(crate) notes: Option<String>,
+    pub(crate) managed_externally: bool,
 }
 
 #[derive(Debug, Serialize)]

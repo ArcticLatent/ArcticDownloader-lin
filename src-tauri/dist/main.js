@@ -276,15 +276,21 @@ renderTransfers();
           if (startup?.available === true) {
             state.updateAvailable = true;
             state.updateVersion = startup.version || null;
-            el.updateStatus.textContent = "New update available";
+            state.updateManagedExternally = startup.managed_externally === true;
+            state.updateNotes = String(startup.notes || "").trim();
+            el.updateStatus.textContent = state.updateManagedExternally
+              ? "Update via package manager"
+              : "New update available";
             updateUpdateButton();
-            logLine(`Update available: v${startup.version}`);
+            logLine(state.updateNotes || `Update available: v${startup.version}`);
           } else {
             state.updateAvailable = false;
             state.updateVersion = null;
+            state.updateManagedExternally = startup?.managed_externally === true;
+            state.updateNotes = String(startup?.notes || "").trim();
             if (startup?.notes) {
               el.updateStatus.textContent = "Managed externally";
-              logLine(startup.notes);
+              logLine(state.updateNotes);
             }
             updateUpdateButton();
           }

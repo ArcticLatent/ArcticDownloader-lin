@@ -1533,11 +1533,13 @@ async fn check_updates_now(state: State<'_, AppState>) -> Result<UpdateCheckResp
             available: true,
             version: Some(update.version.to_string()),
             notes: update.notes,
+            managed_externally: false,
         }),
         Ok(Ok(None)) => Ok(UpdateCheckResponse {
             available: false,
             version: None,
             notes: None,
+            managed_externally: false,
         }),
         Ok(Err(err)) => Err(format!("Update check failed: {err:#}")),
         Err(join_err) => Err(format!("Update task failed: {join_err}")),
@@ -1554,6 +1556,7 @@ async fn auto_update_startup(
             available: false,
             version: None,
             notes: Some("Auto update disabled by environment.".to_string()),
+            managed_externally: false,
         });
     }
 
@@ -1568,6 +1571,7 @@ async fn auto_update_startup(
                 available: false,
                 version: None,
                 notes: None,
+                managed_externally: false,
             });
         }
         Ok(Err(err)) => return Err(format!("Update check failed: {err:#}")),
@@ -1577,6 +1581,7 @@ async fn auto_update_startup(
             available: false,
             version: None,
             notes: None,
+            managed_externally: false,
         });
     };
 
@@ -1621,6 +1626,7 @@ async fn auto_update_startup(
                 available: true,
                 version: Some(applied.version.to_string()),
                 notes: Some("Standalone update apply launched.".to_string()),
+                managed_externally: false,
             })
         }
         Ok(Err(err)) => Err(format!("Update install failed: {err:#}")),
