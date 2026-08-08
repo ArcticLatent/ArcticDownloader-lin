@@ -36,6 +36,8 @@ Options:
 
 The local ARCTIC_UPDATE_SIGNING_KEY is required for Linux. If it is not
 already exported, the script prompts for it without echoing or saving it.
+On hosts without Nix, Nix artifacts are built through Podman by the Linux
+release script.
 USAGE
 }
 
@@ -114,9 +116,12 @@ elif [[ "$NOTES_FILE" != /* ]]; then
 fi
 [[ -s "$NOTES_FILE" ]] || fail "release notes file is missing or empty: $NOTES_FILE"
 
-for command_name in bash gh git nix; do
+for command_name in bash cargo gh git python3; do
   require_cmd "$command_name"
 done
+if ! command -v nix >/dev/null 2>&1; then
+  require_cmd podman
+fi
 
 current_branch="$(git branch --show-current)"
 [[ "$current_branch" == "$SOURCE_BRANCH" ]] || fail "run from branch '$SOURCE_BRANCH' (current: '$current_branch')"
@@ -152,7 +157,7 @@ read_cargo_version() {
 
 [[ "$(read_cargo_version Cargo.toml)" == "$VERSION" ]] || fail "Cargo.toml is not version $VERSION"
 [[ "$(read_cargo_version src-tauri/Cargo.toml)" == "$VERSION" ]] || fail "src-tauri/Cargo.toml is not version $VERSION"
-nix develop -c python3 - "$VERSION" <<'PY'
+python3 - "$VERSION" <<'PY'
 import json
 import sys
 
@@ -244,11 +249,11 @@ verify_windows_files() {
   [[ -s "$asset" ]] || fail "Windows artifact is missing: $asset"
   [[ -s "$manifest" ]] || fail "Windows manifest is missing: $manifest"
 
-  nix develop -c cargo run --quiet --release \
+  cargo run --quiet --release \
     --manifest-path tools/manifest-signer/Cargo.toml -- \
     verify --format update --manifest "$manifest"
 
-  nix develop -c python3 - "$manifest" "$asset" "$VERSION" "$RELEASE_REPOSITORY" "$TAG" <<'PY'
+  python3 - "$manifest" "$asset" "$VERSION" "$RELEASE_REPOSITORY" "$TAG" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -308,7 +313,7 @@ linux_args=(
   --output-dir "$OUTPUT_DIR"
   --notes-file "$NOTES_FILE"
 )
-nix develop -c bash scripts/release-linux.sh "${linux_args[@]}"
+bash scripts/release-linux.sh "${linux_args[@]}"
 
 if ((remote_tag_exists == 0)); then
   if ((local_tag_exists == 0)); then
@@ -340,7 +345,7 @@ VERIFY_DIR="$(mktemp -d "$ROOT_DIR/.release-verify.XXXXXX")"
 verify_output_dir="${VERIFY_DIR#"$ROOT_DIR/"}"
 gh release download "$TAG" --repo "$RELEASE_REPOSITORY" --dir "$VERIFY_DIR"
 
-nix develop -c bash scripts/verify-release-linux.sh \
+bash scripts/verify-release-linux.sh \
   --version "$VERSION" \
   --tag "$TAG" \
   --repository "$RELEASE_REPOSITORY" \

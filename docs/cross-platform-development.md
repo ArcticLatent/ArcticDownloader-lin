@@ -125,6 +125,9 @@ Run the workflow manually with `X.Y.Z`, normally through
 
 The local publisher creates or updates the public release using the authenticated `gh`
 account, so no cross-repository release token is required in GitHub Actions.
+On Arch Linux the publisher runs Cargo, Python, and the Linux release scripts directly;
+the Nix artifact builder automatically uses the official Nix Podman image when the host
+does not provide `nix`.
 
 MSI/NSIS installers can be added later with `cargo tauri build` on this same native runner.
 The standalone executable remains the current compatibility-preserving artifact.

@@ -264,15 +264,17 @@ Prerequisite:
 Publish Linux and Windows together with one guarded command:
 
 ```bash
-bash ./scripts/publish-release-all.sh --version 0.2.6
+bash ./scripts/publish-release-all.sh --version 0.2.9
 ```
 
 The command prompts once for the local manifest-signing key when needed and
 once for confirmation. It rehearses Windows without publishing, builds and
 verifies Linux, publishes the GitHub assets (including the native Arch
 `.pkg.tar.*` package), tags the source, uploads the verified native Windows
-artifact, and verifies the downloaded public release. Add `--yes` to skip the
-confirmation or `--resume` after inspecting a partially completed release.
+artifact, and verifies the downloaded public release. On Arch, it uses the
+native Cargo/Python toolchain and delegates Nix artifact construction to the
+Podman-backed Nix release builder. Add `--yes` to skip the confirmation or
+`--resume` after inspecting a partially completed release.
 
 For a Linux-only release, use:
 
