@@ -4,6 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target="x86_64-pc-windows-msvc"
 
+# Arch's rustup package and `cargo install` place toolchain proxies and Cargo
+# subcommands here, but non-interactive shells do not necessarily include it.
+export PATH="$HOME/.cargo/bin:$PATH"
+
 for command_name in rustup cargo cargo-xwin; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "Missing $command_name. Enter the Windows development shell first:" >&2

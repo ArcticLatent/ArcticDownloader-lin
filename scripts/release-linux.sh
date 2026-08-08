@@ -6,7 +6,6 @@ REPOSITORY="ArcticLatent/Arctic-Helper"
 OUTPUT_DIR="dist"
 INPUT_NOTES_FILE=""
 SKIP_CLEAN=0
-ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
 RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
 
@@ -23,8 +22,6 @@ Options:
   --notes-file <path>    Release notes markdown file. Defaults to
                          CHANGELOG_<version>.md when it exists; otherwise prompt.
   --skip-clean           Skip cargo clean during build.
-  --arch-distrobox <name>
-                         Arch package build container (default: arctic-arch).
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
   --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
   -h, --help             Show help.
@@ -60,10 +57,6 @@ while (($# > 0)); do
     --skip-clean)
       SKIP_CLEAN=1
       shift
-      ;;
-    --arch-distrobox)
-      ARCH_DISTROBOX="${2:-}"
-      shift 2
       ;;
     --deb-distrobox)
       DEB_DISTROBOX="${2:-}"
@@ -134,7 +127,7 @@ BUILD_ARGS=(--version "$VERSION" --repository "$REPOSITORY" --tag "$TAG" --outpu
 if ((SKIP_CLEAN == 1)); then
   BUILD_ARGS+=(--skip-clean)
 fi
-BUILD_ARGS+=(--arch-distrobox "$ARCH_DISTROBOX" --deb-distrobox "$DEB_DISTROBOX" --rpm-distrobox "$RPM_DISTROBOX")
+BUILD_ARGS+=(--deb-distrobox "$DEB_DISTROBOX" --rpm-distrobox "$RPM_DISTROBOX")
 
 (cd "$ROOT_DIR" && bash scripts/build-release-linux.sh "${BUILD_ARGS[@]}")
 

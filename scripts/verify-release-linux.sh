@@ -61,6 +61,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="$ROOT_DIR/$OUTPUT_DIR"
 MANIFEST="$OUT_DIR/linux-release.json"
 SHASUMS="$OUT_DIR/SHA256SUMS"
+VERIFY_TMP_DIR=""
+
+cleanup() {
+  if [[ -n "$VERIFY_TMP_DIR" && -d "$VERIFY_TMP_DIR" ]]; then
+    rm -rf "$VERIFY_TMP_DIR"
+  fi
+}
+trap cleanup EXIT
 
 [[ -d "$OUT_DIR" ]] || { echo "Missing output dir: $OUT_DIR" >&2; exit 1; }
 [[ -f "$MANIFEST" ]] || { echo "Missing manifest: $MANIFEST" >&2; exit 1; }
@@ -92,6 +100,22 @@ for asset in "${listed_assets[@]}"; do
     echo "Manifest missing expected download URL: $expected" >&2
     exit 1
   fi
+done
+
+mapfile -t arch_packages < <(find "$OUT_DIR" -maxdepth 1 -type f -name '*.pkg.tar.*' | sort)
+for package in "${arch_packages[@]}"; do
+  if ! command -v bsdtar >/dev/null 2>&1; then
+    echo "Required command not found while verifying Arch package: bsdtar" >&2
+    exit 1
+  fi
+
+  VERIFY_TMP_DIR="$(mktemp -d)"
+  bsdtar -xf "$package" -C "$VERIFY_TMP_DIR" usr/bin/arctic-comfyui-helper
+  bash "$ROOT_DIR/scripts/verify-linux-elf.sh" \
+    "$VERIFY_TMP_DIR/usr/bin/arctic-comfyui-helper" \
+    '/lib64/ld-linux-x86-64.so.2'
+  rm -rf "$VERIFY_TMP_DIR"
+  VERIFY_TMP_DIR=""
 done
 
 echo "Verifying release manifest signature ..."

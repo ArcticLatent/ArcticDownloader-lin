@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGING_DIR="$ROOT_DIR/packaging"
 OUT_DIR="$PACKAGING_DIR/out"
-ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
 RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
 
@@ -18,13 +17,12 @@ Targets:
   deb      Build Debian package (.deb) with dpkg-buildpackage
   rpm      Build Fedora/RPM package (.rpm) with rpmbuild
   flatpak  Build Flatpak bundle (.flatpak) with flatpak-builder
-  all      Build all targets in order: arch/deb/rpm (distrobox), flatpak (host)
+  all      Build Arch/Flatpak on the host and Deb/RPM in distroboxes
 
 Notes:
   - Run from anywhere inside the repo.
   - Build tools must already be installed on your system.
-  - `all` expects distroboxes:
-      - Arch: arctic-arch (override with ARCTIC_ARCH_DISTROBOX)
+  - `all` builds Arch natively and expects distroboxes:
       - Debian: arctic-ubuntu (override with ARCTIC_DEB_DISTROBOX)
       - Fedora: arctic-fedora (override with ARCTIC_RPM_DISTROBOX)
 EOF
@@ -262,17 +260,6 @@ build_flatpak() {
   echo "Flatpak artifacts: $OUT_DIR/flatpak"
 }
 
-build_arch_in_distrobox() {
-  require_cmd distrobox
-  echo "Building Arch package in distrobox '$ARCH_DISTROBOX' ..."
-  distrobox enter "$ARCH_DISTROBOX" -- bash -lc "
-    set -euo pipefail
-    export PATH=\"\$HOME/.cargo/bin:\$PATH\"
-    cd '$ROOT_DIR'
-    bash packaging/build-packages.sh arch
-  "
-}
-
 build_deb_in_distrobox() {
   require_cmd distrobox
   echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
@@ -315,7 +302,7 @@ main() {
       build_flatpak
       ;;
     all)
-      build_arch_in_distrobox
+      build_arch
       build_deb_in_distrobox
       build_rpm_in_distrobox
       build_flatpak

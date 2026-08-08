@@ -277,16 +277,15 @@ confirmation or `--resume` after inspecting a partially completed release.
 For a Linux-only release, use:
 
 ```bash
-nix develop
-arctic-release-env-check
 bash ./scripts/release-linux.sh
 ```
 
-On ArcticOS, run `arctic-release-env-init` once after enabling the development
-container profile. It creates the `arctic-arch`, `arctic-ubuntu`, and
-`arctic-fedora` Distroboxes used to build distribution-native packages. Arch
-packages are built inside the Arch container instead of assuming the NixOS
-host provides `makepkg` and an Arch package database.
+On Arch Linux, install the native build dependencies from
+`packaging/arch/PKGBUILD` and create the `arctic-ubuntu` and `arctic-fedora`
+Distroboxes used for Debian and RPM packaging. The Arch package is always built
+natively on the host. NixOS is not a supported Distrobox guest, so the Nix
+release is built with Podman and the official `nixos/nix` image whenever the
+host has no `nix` command.
 
 This publishes to `ArcticLatent/Arctic-Helper`. The Arch `.pkg.tar.*` package
 is a normal signed-manifest release asset and does not depend on AUR availability.

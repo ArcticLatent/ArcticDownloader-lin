@@ -44,6 +44,29 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo tauri dev
 ```
 
+## Daily development on Arch Linux
+
+Install the native GTK/WebKit and packaging dependencies, then use the same
+Node and Cargo commands without `nix develop`:
+
+```bash
+sudo pacman -S --needed \
+  base-devel rustup nodejs npm pkgconf openssl gtk3 webkit2gtk-4.1 \
+  libayatana-appindicator xdg-desktop-portal-gtk dbus \
+  appstream desktop-file-utils flatpak flatpak-builder podman distrobox \
+  clang lld llvm patchelf github-cli
+npm ci
+npm run check:frontend
+npm run test:frontend
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+npx tauri dev
+```
+
+The Arch package is built directly on the Arch host. Debian and Fedora packages
+continue to use the `arctic-ubuntu` and `arctic-fedora` Distroboxes. Nix release
+artifacts use the official `nixos/nix` Podman image when Nix is not installed on
+the host, because NixOS is not a supported Distrobox container distribution.
+
 The root manifest is also the Cargo workspace root. Shared dependency versions live in
 `[workspace.dependencies]`; each crate keeps its own feature selection. Run Cargo from
 the repository root, including when using `--manifest-path src-tauri/Cargo.toml`, so
@@ -52,7 +75,12 @@ both crates consistently use the root `Cargo.lock` and workspace `target/` direc
 Check the Windows build from Linux:
 
 ```bash
+# NixOS
 nix develop .#windows
+./scripts/check-windows.sh
+
+# Arch Linux (one-time setup)
+cargo install cargo-xwin --locked
 ./scripts/check-windows.sh
 ```
 

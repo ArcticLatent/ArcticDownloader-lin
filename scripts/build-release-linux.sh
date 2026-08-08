@@ -10,12 +10,10 @@ SKIP_CLEAN=0
 PUBLISH_GITHUB=0
 ARCH_ONLY=0
 ASSEMBLE_ONLY=0
-ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
 RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
 DEB_SUDO_PASSWORD="${ARCTIC_DEB_SUDO_PASSWORD:-}"
 RPM_SUDO_PASSWORD="${ARCTIC_RPM_SUDO_PASSWORD:-}"
-ARCH_SUDO_PASSWORD="${ARCTIC_ARCH_SUDO_PASSWORD:-}"
 ARCH_BASE_DIR=""
 MANIFEST_TMP=""
 
@@ -47,12 +45,9 @@ Options:
                          Rebuild Nix assets, checksums, and the release manifest.
   --publish-github       Create/update the GitHub release and upload built assets.
   --arch-only            Build only the native Arch package and update its GitHub release asset.
-  --arch-distrobox <name>
-                         Arch package build container (default: arctic-arch).
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
   --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
   Environment variables for non-interactive sudo:
-    ARCTIC_ARCH_SUDO_PASSWORD
     ARCTIC_DEB_SUDO_PASSWORD
     ARCTIC_RPM_SUDO_PASSWORD
   -h, --help             Show help.
@@ -126,10 +121,6 @@ while (($# > 0)); do
       ARCH_ONLY=1
       PUBLISH_GITHUB=1
       shift
-      ;;
-    --arch-distrobox)
-      ARCH_DISTROBOX="${2:-}"
-      shift 2
       ;;
     --deb-distrobox)
       DEB_DISTROBOX="${2:-}"
@@ -235,8 +226,10 @@ require_cmd sha256sum
 require_cmd bash
 if ((ASSEMBLE_ONLY == 0)); then
   require_cmd cargo
-  require_cmd distrobox
+  require_cmd makepkg
+  require_cmd pacman
   if ((ARCH_ONLY == 0)); then
+    require_cmd distrobox
     require_cmd flatpak
     require_cmd flatpak-builder
   fi
@@ -393,38 +386,24 @@ rm -rf "$PACKAGING_DIR/out"
 rm -rf "$OUT_ABS_DIR"
 mkdir -p "$OUT_ABS_DIR"
 
-echo "Building Arch package in distrobox '$ARCH_DISTROBOX' ..."
-distrobox enter "$ARCH_DISTROBOX" -- bash -lc "
-  set -euo pipefail
-  export ARCTIC_SUPABASE_URL=$SUPABASE_URL_Q
-  export ARCTIC_SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY_Q
-  export ARCTIC_SUPABASE_PUBLISHABLE_KEY=$SUPABASE_PUBLISHABLE_KEY_Q
-  SUDO_PASSWORD='${ARCH_SUDO_PASSWORD//\'/\'\"\'\"\'}'
-  as_root() {
-    if [[ \"\$(id -u)\" -eq 0 ]]; then
-      \"\$@\"
-    elif command -v sudo >/dev/null 2>&1; then
-      if [[ -n \"\$SUDO_PASSWORD\" ]]; then
-        printf '%s\n' \"\$SUDO_PASSWORD\" | sudo -S -p '' \"\$@\"
-      else
-        sudo \"\$@\"
-      fi
-    else
-      echo \"Need root privileges to install Arch build dependencies (missing sudo).\" >&2
-      exit 1
-    fi
-  }
+if [[ ! -f /etc/arch-release ]]; then
+  echo "The Arch package must be built natively on an Arch Linux host." >&2
+  exit 1
+fi
 
-  as_root pacman -Syu --noconfirm --needed \
-    base-devel rust pkgconf openssl \
-    gtk3 webkit2gtk-4.1 xdg-desktop-portal-gtk
+mapfile -t missing_arch_packages < <(pacman -T \
+  base-devel rust pkgconf openssl \
+  gtk3 webkit2gtk-4.1 libayatana-appindicator \
+  xdg-desktop-portal-gtk dbus 2>/dev/null || true)
+if ((${#missing_arch_packages[@]} > 0)); then
+  echo "Missing native Arch build dependencies:" >&2
+  printf '  %s\n' "${missing_arch_packages[@]}" >&2
+  echo "Install them with: sudo pacman -S --needed ${missing_arch_packages[*]}" >&2
+  exit 1
+fi
 
-  as_root pacman -S --noconfirm --needed libayatana-appindicator
-
-  export PATH=\"\$HOME/.cargo/bin:\$PATH\"
-  cd '$ROOT_DIR'
-  bash packaging/build-packages.sh arch
-"
+echo "Building Arch package natively on the Arch host ..."
+(cd "$ROOT_DIR" && bash packaging/build-packages.sh arch)
 
 if ((ARCH_ONLY == 0)); then
 echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."

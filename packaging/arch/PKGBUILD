@@ -15,7 +15,9 @@ depends=(
   'dbus'
 )
 makedepends=(
+  'binutils'
   'cargo'
+  'gcc'
   'rust'
   'pkgconf'
 )
@@ -28,9 +30,38 @@ prepare() {
 
 build() {
   cd "$startdir/../.."
+
+  # A leaked NIX_LDFLAGS (or a compiler wrapper from a Nix development shell)
+  # can make a successful-looking Arch build whose ELF interpreter and RUNPATH
+  # point into /nix/store. Use only the native Arch toolchain and pkg-config
+  # paths for this package build.
+  unset "${!NIX_@}"
+  unset \
+    CARGO_BUILD_RUSTC_WRAPPER \
+    CMAKE_PREFIX_PATH \
+    CPATH \
+    CPLUS_INCLUDE_PATH \
+    C_INCLUDE_PATH \
+    LD_LIBRARY_PATH \
+    LIBRARY_PATH \
+    PKG_CONFIG_LIBDIR \
+    PKG_CONFIG_PATH \
+    RUSTC_WRAPPER
+  export PATH='/usr/bin:/bin'
+  export CC='/usr/bin/gcc'
+  export CXX='/usr/bin/g++'
   export CARGO_TARGET_DIR="$srcdir/target"
   export RUSTFLAGS="-C link-arg=-fuse-ld=bfd"
   cargo build --release --manifest-path src-tauri/Cargo.toml
+}
+
+check() {
+  cd "$startdir/../.."
+  export CARGO_TARGET_DIR="$srcdir/target"
+
+  bash scripts/verify-linux-elf.sh \
+    "$CARGO_TARGET_DIR/release/Arctic-ComfyUI-Helper" \
+    '/lib64/ld-linux-x86-64.so.2'
 }
 
 package() {

@@ -5,6 +5,7 @@ VERSION=""
 REPOSITORY="ArcticLatent/Arctic-Helper"
 TAG=""
 OUTPUT_DIR="dist"
+NIX_IMAGE="${ARCTIC_NIX_IMAGE:-docker.io/nixos/nix:2.34.0}"
 
 usage() {
   cat <<'USAGE'
@@ -17,6 +18,9 @@ Options:
                          GitHub repository hosting the release artifacts.
   --tag <tag>            Release tag (default: v<version>).
   --output-dir <path>    Release artifact directory (default: dist).
+  Environment:
+    ARCTIC_NIX_IMAGE     Podman image used when Nix is not installed on the
+                         host (default: docker.io/nixos/nix:2.34.0).
   -h, --help             Show help.
 USAGE
 }
@@ -86,17 +90,8 @@ TEMPLATE_DIR="$ROOT_DIR/packaging/nix"
 STAGING_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGING_DIR"' EXIT
 
-command -v nix >/dev/null 2>&1 || {
-  echo "Required command not found: nix" >&2
-  exit 1
-}
-
 mkdir -p "$OUT_DIR" "$STAGING_DIR/native"
-nix_output="$(nix build \
-  --impure \
-  --no-link \
-  --print-out-paths \
-  --expr "
+nix_expression="
     let
       flake = builtins.getFlake \"path:$ROOT_DIR\";
       pkgs = import flake.inputs.nixpkgs { system = \"x86_64-linux\"; };
@@ -106,10 +101,56 @@ nix_output="$(nix build \
       arcticSupabaseAnonKey = builtins.getEnv \"ARCTIC_SUPABASE_ANON_KEY\";
       arcticSupabasePublishableKey = builtins.getEnv \"ARCTIC_SUPABASE_PUBLISHABLE_KEY\";
     }
-  ")"
+  "
 
-install -Dm755 "$nix_output/bin/.arctic-comfyui-helper-wrapped" \
-  "$STAGING_DIR/native/arctic-comfyui-helper"
+if command -v nix >/dev/null 2>&1; then
+  nix_output="$(nix \
+    --extra-experimental-features 'nix-command flakes' \
+    build \
+    --impure \
+    --no-link \
+    --print-out-paths \
+    --expr "$nix_expression")"
+
+  install -Dm755 "$nix_output/bin/.arctic-comfyui-helper-wrapped" \
+    "$STAGING_DIR/native/arctic-comfyui-helper"
+else
+  command -v podman >/dev/null 2>&1 || {
+    echo "Required command not found: nix or podman" >&2
+    exit 1
+  }
+
+  # Distrobox explicitly does not support NixOS containers. On non-NixOS
+  # hosts, use the official Nix OCI image directly and copy the built binary
+  # through a bind-mounted staging directory before the container exits.
+  container_expression="${nix_expression//$ROOT_DIR/\/work}"
+  echo "Building Nix package in $NIX_IMAGE ..."
+  podman run --rm \
+    --name "arctic-nix-build-$$" \
+    --volume "$ROOT_DIR:/work:ro" \
+    --volume "$STAGING_DIR/native:/staging:rw" \
+    --workdir /work \
+    --env ARCTIC_SUPABASE_URL \
+    --env ARCTIC_SUPABASE_ANON_KEY \
+    --env ARCTIC_SUPABASE_PUBLISHABLE_KEY \
+    --env ARCTIC_NIX_EXPRESSION="$container_expression" \
+    --entrypoint /bin/sh \
+    "$NIX_IMAGE" \
+    -eu -c '
+      nix_output="$(nix \
+        --extra-experimental-features "nix-command flakes" \
+        build \
+        --impure \
+        --no-link \
+        --print-out-paths \
+        --expr "$ARCTIC_NIX_EXPRESSION")"
+      mkdir -p /staging
+      cp "$nix_output/bin/.arctic-comfyui-helper-wrapped" \
+        /staging/arctic-comfyui-helper
+      chmod 0755 /staging/arctic-comfyui-helper
+    '
+fi
+
 install -Dm644 "$ROOT_DIR/packaging/linux/io.github.ArcticHelper.desktop" \
   "$STAGING_DIR/native/io.github.ArcticHelper.desktop"
 install -Dm644 "$ROOT_DIR/src-tauri/dist/icon.svg" \

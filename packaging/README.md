@@ -24,6 +24,10 @@ Artifacts are copied to `packaging/out/`.
 - File: `packaging/arch/PKGBUILD`
 - Build from repo root:
   - `bash packaging/build-packages.sh arch`
+- The PKGBUILD isolates the native Arch compiler/linker environment from any
+  inherited Nix variables and rejects binaries containing `/nix/store` or
+  `/home/` paths. `scripts/verify-release-linux.sh` repeats that check against
+  the binary extracted from the finished package.
 
 ## Debian/Ubuntu (`.deb`)
 
@@ -56,6 +60,8 @@ Artifacts are copied to `packaging/out/`.
 - Local development run: `nix run`
 - Public binary flake templates: `packaging/nix/*.in`
 - Release artifact generator: `scripts/build-nix-release.sh`
+- On hosts without Nix, the release generator uses Podman with the pinned
+  official `nixos/nix` OCI image. Override it with `ARCTIC_NIX_IMAGE`.
 
 The full Linux release flow generates a Nix-native runtime archive and
 `arctic-comfyui-helper-nix-x86_64.tar.gz`, then uploads both to GitHub Releases.
