@@ -23,9 +23,19 @@
 Arctic ComfyUI Helper mirrors the exact builds shown in Arctic Latent tutorials, so you can follow along with less setup friction.
 
 Think of it as:
-- A built-in **ComfyUI installer** for Windows (easy setup from inside the app)
+- A built-in **ComfyUI installer and manager** for Windows and Linux
 - A curated model/LoRA catalog matched to your hardware tiers
 - A one-click downloader that places assets into the correct ComfyUI folders
+
+---
+
+## ✨ New in v0.2.8
+
+- Nix-managed installations now detect newer versions through the signed Linux release manifest
+- Added a **How to Update** action for Nix users without attempting to modify the immutable Nix store
+- Added Nix profile and declarative-configuration update guidance in the application log
+- Kept automatic installation unchanged for Debian, Ubuntu, Fedora, and Arch packages
+- Fixed TLS certificate verification for ComfyUI, ComfyUI Manager, custom nodes, and managed Python processes on NixOS
 
 ---
 
@@ -38,7 +48,7 @@ Think of it as:
 - 📈 **Live download progress** with active/completed transfer tracking
 - 🔐 **Optional Civitai token support** for authenticated LoRA downloads
 - 🖼️ **LoRA preview + metadata** in-app (description, triggers, creator link)
-- ♻️ **Auto-update support** through GitHub Releases manifest
+- ♻️ **Verified update support** through signed GitHub Releases manifests
 - 🧵 **System tray controls** to Start/Stop ComfyUI even when the main window is hidden
 
 ---
@@ -98,13 +108,16 @@ Install into your user profile:
 nix profile add 'tarball+https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/arctic-comfyui-helper-nix-x86_64.tar.gz'
 ```
 
-Update a profile installation with `nix profile upgrade arctic-comfyui-helper`.
+Update a profile installation with `nix profile upgrade --refresh arctic-comfyui-helper`.
 For a declarative NixOS configuration, add the same tarball URL as a flake input
 and add `inputs.arctic-helper.packages.${pkgs.system}.default` to
 `environment.systemPackages`. Only `x86_64-linux` is currently supported.
 
-The in-app self-updater is disabled in the Nix package because the Nix store is
-immutable; use Nix to update the application.
+Nix installations check the signed release manifest and display the latest
+available version in the app. The **How to Update** action opens the latest
+release page and records Nix guidance in the application log. Installation
+remains delegated to Nix because applications cannot modify binaries in the
+immutable Nix store.
 
 ---
 
@@ -114,13 +127,22 @@ immutable; use Nix to update the application.
 
 ---
 
-## 🔄 Auto-Updates
+## 🔄 Updates and Release Verification
 
-On startup, the app checks:
+On supported installations, Arctic ComfyUI Helper checks the signed release
+manifests published with each GitHub release.
 
-`https://github.com/ArcticLatent/Arctic-Helper/releases/latest/download/update.json`
-
-If a newer version is found, the app downloads, verifies checksum, replaces binary, and restarts.
+- Windows uses `update.json`.
+- Linux packages use `linux-release.json` to select the matching Debian,
+  Fedora, or Arch artifact.
+- Nix installations use the same signed Linux manifest to detect newer
+  versions without downloading or installing them automatically.
+- Release manifests are authenticated with Ed25519 signatures, and downloaded
+  application files are verified against SHA-256 checksums before installation.
+- Nix profile installations are updated with
+  `nix profile upgrade --refresh arctic-comfyui-helper`; declarative
+  installations are updated through their flake configuration and normal
+  system rebuild.
 
 ---
 
