@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.2.8-1) unstable; urgency=medium
+
+  * Detect signed updates for Nix-managed installations without attempting to modify the immutable Nix store.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Fri, 07 Aug 2026 23:27:37 -0400
+
 arctic-comfyui-helper (0.2.7-1) unstable; urgency=medium
 
   * Fix TLS certificate handling for managed Python processes on NixOS.
