@@ -1,5 +1,7 @@
 #!/usr/bin/make -f
 
+export CARGO_TARGET_DIR := $(CURDIR)/target/debian
+
 %:
 	dh $@
 
@@ -7,7 +9,7 @@ override_dh_auto_build:
 	cargo build --release --manifest-path src-tauri/Cargo.toml
 
 override_dh_auto_install:
-	install -Dpm0755 src-tauri/target/release/Arctic-ComfyUI-Helper \
+	install -Dpm0755 $(CARGO_TARGET_DIR)/release/Arctic-ComfyUI-Helper \
 		debian/arctic-comfyui-helper/usr/bin/arctic-comfyui-helper
 	install -Dpm0644 packaging/linux/io.github.ArcticHelper.desktop \
 		debian/arctic-comfyui-helper/usr/share/applications/io.github.ArcticHelper.desktop

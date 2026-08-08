@@ -91,10 +91,13 @@ build_deb() {
   mkdir -p "$OUT_DIR/deb"
   (
     cd "$ROOT_DIR"
+    cleanup_debian_tree() {
+      rm -rf "$ROOT_DIR/debian"
+    }
+    trap cleanup_debian_tree EXIT
     rm -rf debian
     cp -a packaging/debian/debian ./debian
     dpkg-buildpackage -us -uc -b
-    rm -rf debian
     shopt -s nullglob
     local debs=(../arctic-comfyui-helper_*_amd64.deb)
     local changes=(../arctic-comfyui-helper_*_amd64.changes ../arctic-comfyui-helper_*_amd64.buildinfo)
@@ -174,6 +177,7 @@ build_flatpak() {
   local repo_dir="$flatpak_dir/repo"
   local manifest="$flatpak_dir/io.github.ArcticHelper.yml"
   local bundle_name="arctic-comfyui-helper-${version}-x86_64.flatpak"
+  local cargo_target_dir="$ROOT_DIR/target/flatpak"
 
   mkdir -p "$OUT_DIR/flatpak" "$staging_dir" "$repo_dir"
 
@@ -183,7 +187,8 @@ build_flatpak() {
 
   (
     cd "$ROOT_DIR"
-    cargo build --release --manifest-path src-tauri/Cargo.toml
+    CARGO_TARGET_DIR="$cargo_target_dir" \
+      cargo build --release --manifest-path src-tauri/Cargo.toml
   )
 
   find_shared_library() {
@@ -230,7 +235,7 @@ build_flatpak() {
     install -Dm755 "$lib_path" "$staging_dir/lib/$lib"
   done
 
-  install -Dm755 "$ROOT_DIR/src-tauri/target/release/Arctic-ComfyUI-Helper" \
+  install -Dm755 "$cargo_target_dir/release/Arctic-ComfyUI-Helper" \
     "$staging_dir/Arctic-ComfyUI-Helper"
   install -Dm644 "$PACKAGING_DIR/linux/io.github.ArcticHelper.desktop" \
     "$staging_dir/io.github.ArcticHelper.desktop"
