@@ -93,6 +93,15 @@ Inside the **ComfyUI** tab, you can:
 
 That is it. Pick your setup, click, and the app handles the rest.
 
+### Fedora (COPR)
+
+```bash
+sudo dnf copr enable burcebor/arctic-helper
+sudo dnf install arctic-comfyui-helper
+```
+
+Project page: [burcebor/arctic-helper](https://copr.fedorainfracloud.org/coprs/burcebor/arctic-helper/)
+
 ### NixOS / Nix
 
 Run without installing:

@@ -11,9 +11,8 @@ PUBLISH_GITHUB=0
 ARCH_ONLY=0
 ASSEMBLE_ONLY=0
 DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
-RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
+ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 DEB_SUDO_PASSWORD="${ARCTIC_DEB_SUDO_PASSWORD:-}"
-RPM_SUDO_PASSWORD="${ARCTIC_RPM_SUDO_PASSWORD:-}"
 ARCH_BASE_DIR=""
 MANIFEST_TMP=""
 
@@ -44,12 +43,12 @@ Options:
   --assemble-only        Reuse package artifacts already present in packaging/out.
                          Rebuild Nix assets, checksums, and the release manifest.
   --publish-github       Create/update the GitHub release and upload built assets.
-  --arch-only            Build only the native Arch package and update its GitHub release asset.
+  --arch-only            Build only the containerized Arch package and update its GitHub release asset.
+  --arch-distrobox <name>
+                         Distrobox name for Arch package build (default: arctic-arch).
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
-  --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
   Environment variables for non-interactive sudo:
     ARCTIC_DEB_SUDO_PASSWORD
-    ARCTIC_RPM_SUDO_PASSWORD
   -h, --help             Show help.
 USAGE
 }
@@ -126,8 +125,8 @@ while (($# > 0)); do
       DEB_DISTROBOX="${2:-}"
       shift 2
       ;;
-    --rpm-distrobox)
-      RPM_DISTROBOX="${2:-}"
+    --arch-distrobox)
+      ARCH_DISTROBOX="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -226,10 +225,9 @@ require_cmd sha256sum
 require_cmd bash
 if ((ASSEMBLE_ONLY == 0)); then
   require_cmd cargo
-  require_cmd makepkg
-  require_cmd pacman
+  require_cmd distrobox
   if ((ARCH_ONLY == 0)); then
-    require_cmd distrobox
+    require_cmd rpmbuild
     require_cmd flatpak
     require_cmd flatpak-builder
   fi
@@ -312,7 +310,7 @@ build_deb_with_podman() {
         debhelper-compat cargo rustc \
         libssl-dev \
         libgtk-3-dev libwebkit2gtk-4.1-dev \
-        libayatana-appindicator3-dev \
+        libayatana-appindicator3-dev libdbus-1-dev \
         ca-certificates curl
 
       if ! command -v rustup >/dev/null 2>&1; then
@@ -323,39 +321,6 @@ build_deb_with_podman() {
       rustup default stable >/dev/null
 
       bash packaging/build-packages.sh deb
-    '
-}
-
-build_rpm_with_podman() {
-  require_cmd podman
-  echo "Distrobox RPM build failed; retrying in a temporary Fedora Podman container ..."
-  podman run --rm \
-    --name "arctic-rpm-build-$VERSION" \
-    --volume "$ROOT_DIR:/work:rw" \
-    --workdir /work \
-    --env HOME=/root \
-    --env ARCTIC_SUPABASE_URL \
-    --env ARCTIC_SUPABASE_ANON_KEY \
-    --env ARCTIC_SUPABASE_PUBLISHABLE_KEY \
-    registry.fedoraproject.org/fedora:latest \
-    bash -lc '
-      set -euo pipefail
-      dnf install -y \
-        rpm-build rpmdevtools \
-        rust cargo openssl-devel \
-        gcc gcc-c++ make pkgconf-pkg-config \
-        gtk3-devel webkit2gtk4.1-devel \
-        libayatana-appindicator-gtk3-devel \
-        ca-certificates curl
-
-      if ! command -v rustup >/dev/null 2>&1; then
-        curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
-      fi
-      export PATH="$HOME/.cargo/bin:$PATH"
-      rustup toolchain install stable --profile minimal >/dev/null
-      rustup default stable >/dev/null
-
-      bash packaging/build-packages.sh rpm
     '
 }
 
@@ -386,24 +351,40 @@ rm -rf "$PACKAGING_DIR/out"
 rm -rf "$OUT_ABS_DIR"
 mkdir -p "$OUT_ABS_DIR"
 
-if [[ ! -f /etc/arch-release ]]; then
-  echo "The Arch package must be built natively on an Arch Linux host." >&2
-  exit 1
+if ((ARCH_ONLY == 0)); then
+  if [[ ! -f /etc/fedora-release ]]; then
+    echo "The full Linux release must run on Fedora because RPM and Flatpak artifacts are built natively." >&2
+    exit 1
+  fi
+
+  fedora_build_packages=(
+    rpm-build rpmdevtools rust cargo openssl-devel gcc gcc-c++ make pkgconf-pkg-config
+    gtk3-devel webkit2gtk4.1-devel libayatana-appindicator-gtk3-devel
+    dbus-devel flatpak flatpak-builder appstream desktop-file-utils podman distrobox
+  )
+  missing_fedora_packages=()
+  for package in "${fedora_build_packages[@]}"; do
+    rpm -q "$package" >/dev/null 2>&1 || missing_fedora_packages+=("$package")
+  done
+  if ((${#missing_fedora_packages[@]} > 0)); then
+    echo "Missing native Fedora build dependencies:" >&2
+    printf '  %s\n' "${missing_fedora_packages[@]}" >&2
+    echo "Install them with: sudo dnf install ${missing_fedora_packages[*]}" >&2
+    echo "Or run: bash scripts/setup-linux-build-environments.sh --host-only" >&2
+    exit 1
+  fi
 fi
 
-mapfile -t missing_arch_packages < <(pacman -T \
-  base-devel rust pkgconf openssl \
-  gtk3 webkit2gtk-4.1 libayatana-appindicator \
-  xdg-desktop-portal-gtk dbus 2>/dev/null || true)
-if ((${#missing_arch_packages[@]} > 0)); then
-  echo "Missing native Arch build dependencies:" >&2
-  printf '  %s\n' "${missing_arch_packages[@]}" >&2
-  echo "Install them with: sudo pacman -S --needed ${missing_arch_packages[*]}" >&2
-  exit 1
-fi
-
-echo "Building Arch package natively on the Arch host ..."
-(cd "$ROOT_DIR" && bash packaging/build-packages.sh arch)
+echo "Building Arch package in distrobox '$ARCH_DISTROBOX' ..."
+distrobox enter "$ARCH_DISTROBOX" -- bash -lc "
+  set -euo pipefail
+  export ARCTIC_SUPABASE_URL=$SUPABASE_URL_Q
+  export ARCTIC_SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY_Q
+  export ARCTIC_SUPABASE_PUBLISHABLE_KEY=$SUPABASE_PUBLISHABLE_KEY_Q
+  export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+  cd '$ROOT_DIR'
+  bash packaging/build-packages.sh arch
+"
 
 if ((ARCH_ONLY == 0)); then
 echo "Building Debian package in distrobox '$DEB_DISTROBOX' ..."
@@ -430,8 +411,11 @@ if ! distrobox enter "$DEB_DISTROBOX" -- bash -lc "
 
   ensure_deb_build_tools() {
     local missing=0
-    for cmd in dpkg-buildpackage cargo rustc; do
+    for cmd in dpkg-buildpackage; do
       command -v \"\$cmd\" >/dev/null 2>&1 || missing=1
+    done
+    for package in cargo rustc; do
+      dpkg-query -W -f='\${db:Status-Status}' \"\$package\" 2>/dev/null | grep -qx 'installed' || missing=1
     done
     if [[ \"\$missing\" -eq 1 ]]; then
       as_root apt update
@@ -478,78 +462,8 @@ if ! distrobox enter "$DEB_DISTROBOX" -- bash -lc "
   build_deb_with_podman
 fi
 
-echo "Building RPM package in distrobox '$RPM_DISTROBOX' ..."
-if ! distrobox enter "$RPM_DISTROBOX" -- bash -lc "
-  set -euo pipefail
-  export ARCTIC_SUPABASE_URL=$SUPABASE_URL_Q
-  export ARCTIC_SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY_Q
-  export ARCTIC_SUPABASE_PUBLISHABLE_KEY=$SUPABASE_PUBLISHABLE_KEY_Q
-  SUDO_PASSWORD='${RPM_SUDO_PASSWORD//\'/\'\"\'\"\'}'
-  as_root() {
-    if [[ \"\$(id -u)\" -eq 0 ]]; then
-      \"\$@\"
-    elif command -v sudo >/dev/null 2>&1; then
-      if [[ -n \"\$SUDO_PASSWORD\" ]]; then
-        printf '%s\n' \"\$SUDO_PASSWORD\" | sudo -S -p '' \"\$@\"
-      else
-        sudo \"\$@\"
-      fi
-    else
-      echo \"Need root privileges to install RPM build dependencies (missing sudo).\" >&2
-      exit 1
-    fi
-  }
-
-  ensure_rpm_build_tools() {
-    local missing=0
-    for cmd in rpmbuild cargo rustc; do
-      command -v \"\$cmd\" >/dev/null 2>&1 || missing=1
-    done
-    if [[ \"\$missing\" -eq 1 ]] \
-      || ! rpm -q openssl-devel >/dev/null 2>&1 \
-      || ! rpm -q gtk3-devel >/dev/null 2>&1 \
-      || ! rpm -q webkit2gtk4.1-devel >/dev/null 2>&1 \
-      || ! rpm -q libayatana-appindicator-gtk3-devel >/dev/null 2>&1; then
-      as_root dnf install -y \
-        rpm-build rpmdevtools \
-        rust cargo openssl-devel \
-        gcc gcc-c++ make pkgconf-pkg-config \
-        gtk3-devel webkit2gtk4.1-devel \
-        libayatana-appindicator-gtk3-devel
-    fi
-  }
-
-  ensure_modern_rust() {
-    local min_cargo=\"1.89.0\"
-    if ! command -v rustup >/dev/null 2>&1; then
-      if ! command -v curl >/dev/null 2>&1; then
-        as_root dnf install -y curl
-      fi
-      curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
-    fi
-
-    export PATH=\"\$HOME/.cargo/bin:\$PATH\"
-    rustup toolchain install stable --profile minimal >/dev/null
-    rustup default stable >/dev/null
-    hash -r
-
-    local cargo_version
-    cargo_version=\"\$(cargo --version | awk '{print \$2}')\"
-    if [[ \"\$(printf '%s\n' \"\$cargo_version\" \"\$min_cargo\" | sort -V | head -n1)\" != \"\$min_cargo\" ]]; then
-      echo \"Cargo \$cargo_version is too old (need >= \$min_cargo).\" >&2
-      exit 1
-    fi
-  }
-
-  ensure_rpm_build_tools
-  ensure_modern_rust
-  export PATH=\"\$HOME/.cargo/bin:\$PATH\"
-  as_root dnf remove -y arctic-comfyui-helper || true
-  cd '$ROOT_DIR'
-  bash packaging/build-packages.sh rpm
-"; then
-  build_rpm_with_podman
-fi
+echo "Building RPM package natively on the Fedora host ..."
+(cd "$ROOT_DIR" && bash packaging/build-packages.sh rpm)
 
 echo "Building Flatpak bundle on host ..."
 (cd "$ROOT_DIR" && bash packaging/build-packages.sh flatpak)

@@ -44,17 +44,14 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo tauri dev
 ```
 
-## Daily development on Arch Linux
+## Daily development on Fedora Linux
 
-Install the native GTK/WebKit and packaging dependencies, then use the same
-Node and Cargo commands without `nix develop`:
+Bootstrap the native GTK/WebKit/RPM/Flatpak dependencies and the Arch/Ubuntu
+build containers, then use the same Node and Cargo commands without
+`nix develop`:
 
 ```bash
-sudo pacman -S --needed \
-  base-devel rustup nodejs npm pkgconf openssl gtk3 webkit2gtk-4.1 \
-  libayatana-appindicator xdg-desktop-portal-gtk dbus \
-  appstream desktop-file-utils flatpak flatpak-builder podman distrobox \
-  clang lld llvm patchelf github-cli
+bash scripts/setup-linux-build-environments.sh
 npm ci
 npm run check:frontend
 npm run test:frontend
@@ -62,10 +59,15 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 npx tauri dev
 ```
 
-The Arch package is built directly on the Arch host. Debian and Fedora packages
-continue to use the `arctic-ubuntu` and `arctic-fedora` Distroboxes. Nix release
-artifacts use the official `nixos/nix` Podman image when Nix is not installed on
-the host, because NixOS is not a supported Distrobox container distribution.
+Fedora RPM and Flatpak packages are built directly on the host. Arch and Debian
+packages use the `arctic-arch` and `arctic-ubuntu` Distroboxes. Nix release
+artifacts use the official pinned `nixos/nix` Podman image when Nix is not
+installed on the host, because NixOS is not a supported Distrobox distribution.
+
+Publish a Fedora source snapshot to the maintainer COPR with
+`bash scripts/publish-copr.sh`. Add `--publish-copr` to `release-linux.sh` or
+`publish-release-all.sh` to include COPR in a release. Authentication is read
+from `~/.config/copr`; obtain or refresh it from the Fedora COPR API page.
 
 The root manifest is also the Cargo workspace root. Shared dependency versions live in
 `[workspace.dependencies]`; each crate keeps its own feature selection. Run Cargo from
@@ -79,7 +81,7 @@ Check the Windows build from Linux:
 nix develop .#windows
 ./scripts/check-windows.sh
 
-# Arch Linux (one-time setup)
+# Fedora Linux (one-time setup)
 cargo install cargo-xwin --locked
 ./scripts/check-windows.sh
 ```
@@ -125,9 +127,9 @@ Run the workflow manually with `X.Y.Z`, normally through
 
 The local publisher creates or updates the public release using the authenticated `gh`
 account, so no cross-repository release token is required in GitHub Actions.
-On Arch Linux the publisher runs Cargo, Python, and the Linux release scripts directly;
-the Nix artifact builder automatically uses the official Nix Podman image when the host
-does not provide `nix`.
+On Fedora Linux the publisher runs Cargo, Python, RPM, Flatpak, and the Linux release
+scripts directly. Arch and Debian packaging use Distroboxes; the Nix artifact builder
+uses the official Nix Podman image when the host does not provide `nix`.
 
 MSI/NSIS installers can be added later with `cargo tauri build` on this same native runner.
 The standalone executable remains the current compatibility-preserving artifact.

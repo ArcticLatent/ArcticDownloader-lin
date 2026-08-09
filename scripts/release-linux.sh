@@ -6,8 +6,10 @@ REPOSITORY="ArcticLatent/Arctic-Helper"
 OUTPUT_DIR="dist"
 INPUT_NOTES_FILE=""
 SKIP_CLEAN=0
+PUBLISH_COPR=0
+COPR_PROJECT="${ARCTIC_COPR_PROJECT:-burcebor/arctic-helper}"
 DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
-RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
+ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 
 usage() {
   cat <<'USAGE'
@@ -22,8 +24,12 @@ Options:
   --notes-file <path>    Release notes markdown file. Defaults to
                          CHANGELOG_<version>.md when it exists; otherwise prompt.
   --skip-clean           Skip cargo clean during build.
+  --publish-copr        Publish the generated SRPM to Fedora COPR after verification.
+  --copr-project <owner/name>
+                         COPR project (default: burcebor/arctic-helper).
+  --arch-distrobox <name>
+                         Distrobox name for Arch package build (default: arctic-arch).
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
-  --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
   -h, --help             Show help.
 USAGE
 }
@@ -58,12 +64,20 @@ while (($# > 0)); do
       SKIP_CLEAN=1
       shift
       ;;
+    --publish-copr)
+      PUBLISH_COPR=1
+      shift
+      ;;
+    --copr-project)
+      COPR_PROJECT="${2:-}"
+      shift 2
+      ;;
     --deb-distrobox)
       DEB_DISTROBOX="${2:-}"
       shift 2
       ;;
-    --rpm-distrobox)
-      RPM_DISTROBOX="${2:-}"
+    --arch-distrobox)
+      ARCH_DISTROBOX="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -127,7 +141,7 @@ BUILD_ARGS=(--version "$VERSION" --repository "$REPOSITORY" --tag "$TAG" --outpu
 if ((SKIP_CLEAN == 1)); then
   BUILD_ARGS+=(--skip-clean)
 fi
-BUILD_ARGS+=(--deb-distrobox "$DEB_DISTROBOX" --rpm-distrobox "$RPM_DISTROBOX")
+BUILD_ARGS+=(--arch-distrobox "$ARCH_DISTROBOX" --deb-distrobox "$DEB_DISTROBOX")
 
 (cd "$ROOT_DIR" && bash scripts/build-release-linux.sh "${BUILD_ARGS[@]}")
 
@@ -136,6 +150,18 @@ MANIFEST_FILE="$OUT_DIR/linux-release.json"
 SHAS_FILE="$OUT_DIR/SHA256SUMS"
 
 (cd "$ROOT_DIR" && bash scripts/verify-release-linux.sh --version "$VERSION" --tag "$TAG" --repository "$REPOSITORY" --output-dir "$OUTPUT_DIR")
+
+if ((PUBLISH_COPR == 1)); then
+  mapfile -t copr_srpms < <(find "$OUT_DIR" -maxdepth 1 -type f -name '*.src.rpm' | sort)
+  if ((${#copr_srpms[@]} != 1)); then
+    echo "Expected exactly one SRPM for COPR publishing; found ${#copr_srpms[@]}." >&2
+    exit 1
+  fi
+  (cd "$ROOT_DIR" && bash scripts/publish-copr.sh \
+    --project "$COPR_PROJECT" \
+    --srpm "${copr_srpms[0]}" \
+    --yes)
+fi
 
 mapfile -t release_assets < <(find "$OUT_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name '*.flatpak' -o -name 'arctic-comfyui-helper-nix-*.tar.gz' -o -name 'arctic-comfyui-helper-*-nixos-*.tar.gz' \) | sort)
 release_assets+=("$SHAS_FILE" "$MANIFEST_FILE")

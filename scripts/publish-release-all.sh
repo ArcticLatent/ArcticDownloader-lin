@@ -11,6 +11,8 @@ NOTES_FILE=""
 SKIP_WINDOWS_REHEARSAL=0
 ASSUME_YES=0
 RESUME=0
+PUBLISH_COPR=0
+COPR_PROJECT="${ARCTIC_COPR_PROJECT:-burcebor/arctic-helper}"
 TEMP_DIR=""
 VERIFY_DIR=""
 
@@ -31,6 +33,9 @@ Options:
   --skip-windows-rehearsal
                          Defer the Windows build until after Linux publication.
   --resume               Continue a partially published release/tag.
+  --publish-copr         Also publish the Fedora SRPM to COPR.
+  --copr-project <owner/name>
+                         COPR project (default: burcebor/arctic-helper).
   --yes                  Skip the single publication confirmation.
   -h, --help             Show help.
 
@@ -81,6 +86,14 @@ while (($# > 0)); do
     --resume)
       RESUME=1
       shift
+      ;;
+    --publish-copr)
+      PUBLISH_COPR=1
+      shift
+      ;;
+    --copr-project)
+      COPR_PROJECT="${2:-}"
+      shift 2
       ;;
     --yes)
       ASSUME_YES=1
@@ -313,6 +326,9 @@ linux_args=(
   --output-dir "$OUTPUT_DIR"
   --notes-file "$NOTES_FILE"
 )
+if ((PUBLISH_COPR == 1)); then
+  linux_args+=(--publish-copr --copr-project "$COPR_PROJECT")
+fi
 bash scripts/release-linux.sh "${linux_args[@]}"
 
 if ((remote_tag_exists == 0)); then

@@ -269,11 +269,11 @@ bash ./scripts/publish-release-all.sh --version 0.2.9
 
 The command prompts once for the local manifest-signing key when needed and
 once for confirmation. It rehearses Windows without publishing, builds and
-verifies Linux, publishes the GitHub assets (including the native Arch
+verifies Linux, publishes the GitHub assets (including the container-built Arch
 `.pkg.tar.*` package), tags the source, uploads the verified native Windows
-artifact, and verifies the downloaded public release. On Arch, it uses the
-native Cargo/Python toolchain and delegates Nix artifact construction to the
-Podman-backed Nix release builder. Add `--yes` to skip the confirmation or
+artifact, and verifies the downloaded public release. On Fedora, it uses the
+native Cargo/Python/RPM/Flatpak toolchain and delegates Arch, Debian, and Nix
+artifact construction to containers. Add `--yes` to skip the confirmation or
 `--resume` after inspecting a partially completed release.
 
 For a Linux-only release, use:
@@ -282,16 +282,22 @@ For a Linux-only release, use:
 bash ./scripts/release-linux.sh
 ```
 
-On Arch Linux, install the native build dependencies from
-`packaging/arch/PKGBUILD` and create the `arctic-ubuntu` and `arctic-fedora`
-Distroboxes used for Debian and RPM packaging. The Arch package is always built
-natively on the host. NixOS is not a supported Distrobox guest, so the Nix
-release is built with Podman and the official `nixos/nix` image whenever the
-host has no `nix` command.
+On a new Fedora workstation, set up the native dependencies plus the
+`arctic-arch` and `arctic-ubuntu` Distroboxes with:
+
+```bash
+bash scripts/setup-linux-build-environments.sh
+```
+
+RPM and Flatpak artifacts are built natively on Fedora. Arch and Debian
+packages use their matching Distroboxes. NixOS is not a supported Distrobox
+guest, so the Nix release is built with Podman and the official pinned
+`nixos/nix` image whenever the host has no `nix` command.
 
 This publishes to `ArcticLatent/Arctic-Helper`. The Arch `.pkg.tar.*` package
 is a normal signed-manifest release asset and does not depend on AUR availability.
 It will:
+
 1. Prompt for version (example: `0.1.1`)
 2. Prompt for release notes (end with `END` line)
 3. Build + verify + publish GitHub release (Arch + Deb + RPM artifacts)
@@ -301,6 +307,23 @@ Optional non-interactive variant:
 ```bash
 bash ./scripts/release-linux.sh --version 0.1.1
 ```
+
+Publish the verified Fedora source package to the personal COPR as part of the
+Linux release:
+
+```bash
+bash ./scripts/release-linux.sh --version 0.1.1 --publish-copr
+```
+
+For a COPR-only build from the current source tree:
+
+```bash
+bash scripts/publish-copr.sh
+```
+
+The default project is `burcebor/arctic-helper`. The COPR build has network
+access because Cargo dependencies are locked but not vendored. Override the
+project with `--project owner/name` or `ARCTIC_COPR_PROJECT`.
 
 Build-only:
 
@@ -322,11 +345,13 @@ bash ./scripts/verify-release-linux.sh --version 0.1.1 --tag v0.1.1 --repository
 ```
 
 Linux flow does:
+
 1. Bump versions in Rust/Tauri/package metadata.
 2. Update Debian changelog entry.
 3. Build Arch (`.pkg.tar.zst`), Debian (`.deb`), Fedora/RPM (`.rpm`/`.src.rpm`), Flatpak, and a binary Nix flake artifact.
 4. Generate `SHA256SUMS` + `linux-release.json`.
-5. Create/update GitHub release via `gh`.
+5. Optionally submit the Fedora SRPM to COPR.
+6. Create/update GitHub release via `gh`.
 
 ### Local NixOS build
 

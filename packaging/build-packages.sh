@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGING_DIR="$ROOT_DIR/packaging"
 OUT_DIR="$PACKAGING_DIR/out"
 DEB_DISTROBOX="${ARCTIC_DEB_DISTROBOX:-arctic-ubuntu}"
-RPM_DISTROBOX="${ARCTIC_RPM_DISTROBOX:-arctic-fedora}"
+ARCH_DISTROBOX="${ARCTIC_ARCH_DISTROBOX:-arctic-arch}"
 
 usage() {
   cat <<'EOF'
@@ -16,15 +16,19 @@ Targets:
   arch     Build Arch package (.pkg.tar.zst) with makepkg
   deb      Build Debian package (.deb) with dpkg-buildpackage
   rpm      Build Fedora/RPM package (.rpm) with rpmbuild
+  srpm     Build Fedora source package (.src.rpm) for COPR or other builders
   flatpak  Build Flatpak bundle (.flatpak) with flatpak-builder
-  all      Build Arch/Flatpak on the host and Deb/RPM in distroboxes
+  all      Build Fedora packages on the host and Arch/Deb in distroboxes
 
 Notes:
   - Run from anywhere inside the repo.
   - Build tools must already be installed on your system.
-  - `all` builds Arch natively and expects distroboxes:
+  - On Fedora, RPM and Flatpak artifacts are built natively on the host.
+  - `all` expects distroboxes:
+      - Arch: arctic-arch (override with ARCTIC_ARCH_DISTROBOX)
       - Debian: arctic-ubuntu (override with ARCTIC_DEB_DISTROBOX)
-      - Fedora: arctic-fedora (override with ARCTIC_RPM_DISTROBOX)
+  - When this script is already running inside Arch, the `arch` target builds
+    directly instead of recursively entering the Arch distrobox.
 EOF
 }
 
@@ -67,7 +71,7 @@ clean_flatpak_previous_builds() {
   rm -rf "$PACKAGING_DIR/flatpak/build-dir" "$PACKAGING_DIR/flatpak/repo" "$PACKAGING_DIR/flatpak/staging"
 }
 
-build_arch() {
+build_arch_native() {
   require_cmd makepkg
   clean_arch_previous_builds
   mkdir -p "$OUT_DIR/arch"
@@ -85,7 +89,23 @@ build_arch() {
   echo "Arch artifacts: $OUT_DIR/arch"
 }
 
-build_deb() {
+build_arch() {
+  if [[ -f /etc/arch-release ]]; then
+    build_arch_native
+    return
+  fi
+
+  require_cmd distrobox
+  echo "Building Arch package in distrobox '$ARCH_DISTROBOX' ..."
+  distrobox enter "$ARCH_DISTROBOX" -- bash -lc "
+    set -euo pipefail
+    export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+    cd '$ROOT_DIR'
+    bash packaging/build-packages.sh arch
+  "
+}
+
+build_deb_native() {
   require_cmd dpkg-buildpackage
   clean_deb_previous_builds
   mkdir -p "$OUT_DIR/deb"
@@ -113,12 +133,18 @@ build_deb() {
   echo "Debian artifacts: $OUT_DIR/deb"
 }
 
-build_rpm() {
-  require_cmd rpmbuild
-  clean_rpm_previous_builds
-  local version
-  version="$(read_pkgver)"
-  local rpmtop="$OUT_DIR/rpm/rpmbuild"
+build_deb() {
+  if [[ -f /etc/debian_version ]]; then
+    build_deb_native
+    return
+  fi
+
+  build_deb_in_distrobox
+}
+
+prepare_rpm_tree() {
+  local version="$1"
+  local rpmtop="$2"
   local source_tar="arctic-comfyui-helper-${version}.tar.gz"
 
   mkdir -p "$rpmtop"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
@@ -144,6 +170,26 @@ build_rpm() {
   )
 
   cp -f "$PACKAGING_DIR/fedora/arctic-comfyui-helper.spec" "$rpmtop/SPECS/"
+}
+
+copy_rpm_artifacts() {
+  local rpmtop="$1"
+  local artifact
+
+  mkdir -p "$OUT_DIR/rpm"
+  while IFS= read -r -d '' artifact; do
+    cp -f "$artifact" "$OUT_DIR/rpm/"
+  done < <(find "$rpmtop/RPMS" "$rpmtop/SRPMS" -type f -name '*.rpm' -print0)
+}
+
+build_rpm() {
+  require_cmd rpmbuild
+  clean_rpm_previous_builds
+  local version
+  version="$(read_pkgver)"
+  local rpmtop="$OUT_DIR/rpm/rpmbuild"
+
+  prepare_rpm_tree "$version" "$rpmtop"
 
   local jobs
   jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)"
@@ -151,15 +197,27 @@ build_rpm() {
   rpmbuild \
     --define "_topdir $rpmtop" \
     --define "_smp_mflags -j$jobs" \
-    -bb "$rpmtop/SPECS/arctic-comfyui-helper.spec"
+    -ba "$rpmtop/SPECS/arctic-comfyui-helper.spec"
 
-  mkdir -p "$OUT_DIR/rpm"
-  find "$rpmtop/RPMS" -type f -name '*.rpm' -print0 |
-    while IFS= read -r -d '' f; do
-      cp -f "$f" "$OUT_DIR/rpm/"
-    done
+  copy_rpm_artifacts "$rpmtop"
 
   echo "RPM artifacts: $OUT_DIR/rpm"
+}
+
+build_srpm() {
+  require_cmd rpmbuild
+  clean_rpm_previous_builds
+  local version
+  version="$(read_pkgver)"
+  local rpmtop="$OUT_DIR/rpm/rpmbuild"
+
+  prepare_rpm_tree "$version" "$rpmtop"
+  rpmbuild \
+    --define "_topdir $rpmtop" \
+    -bs "$rpmtop/SPECS/arctic-comfyui-helper.spec"
+
+  copy_rpm_artifacts "$rpmtop"
+  echo "Source RPM artifacts: $OUT_DIR/rpm"
 }
 
 build_flatpak() {
@@ -276,17 +334,6 @@ build_deb_in_distrobox() {
   "
 }
 
-build_rpm_in_distrobox() {
-  require_cmd distrobox
-  echo "Building RPM package in distrobox '$RPM_DISTROBOX' ..."
-  distrobox enter "$RPM_DISTROBOX" -- bash -lc "
-    set -euo pipefail
-    export PATH=\"\$HOME/.cargo/bin:\$PATH\"
-    cd '$ROOT_DIR'
-    bash packaging/build-packages.sh rpm
-  "
-}
-
 main() {
   if (($# != 1)); then
     usage
@@ -303,13 +350,16 @@ main() {
     rpm)
       build_rpm
       ;;
+    srpm)
+      build_srpm
+      ;;
     flatpak)
       build_flatpak
       ;;
     all)
       build_arch
-      build_deb_in_distrobox
-      build_rpm_in_distrobox
+      build_deb
+      build_rpm
       build_flatpak
       ;;
     -h|--help|help)
